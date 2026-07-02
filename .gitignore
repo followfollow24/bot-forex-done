@@ -1,0 +1,13 @@
+.env
+*.log
+*.csv
+*.json
+*.lock
+__pycache__/
+*.pyc
+*.b64
+*.gz
+*_OLD*.py
+*_NEW*.py
+*_new*.py
+forex_live_bot_gold_cwider_*.py
