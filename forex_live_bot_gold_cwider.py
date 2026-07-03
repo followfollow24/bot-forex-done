@@ -33,11 +33,17 @@ DEMO ของ Exness (ผ่าน MT5 terminal local) เพื่อวัด
     + Daily summary line ตอนข้ามวัน (UTC): avg spread paid, max spread,
       #trades, day PnL
 
-[4] SAFETY (คงของเดิม)
+[4] SAFETY
     - Daily loss limit (ข้างบน)
     - Kill-switch file: touch STOP_GOLD_CWIDER  → บล็อกเข้าไม้ใหม่ (ไม้เดิม
       ยังถูกบริหารตามปกติ — SL/TP broker-managed + timeout check ยังทำงาน)
     - Reconnect/retry เมื่อ MT5 connection error
+    - MT5-CALL TIMEOUT WATCHDOG (เพิ่มใหม่ — ดูหัวข้อ [6]):
+      ทุกการเรียก MT5 ที่อยู่ใน hot-path ของ main loop (fetch candles) ถูกห่อ
+      ด้วย ThreadPoolExecutor + timeout เพื่อป้องกัน mt5.copy_rates_from_pos()
+      ค้างแบบไม่มีกำหนด (IPC hang กับ terminal) โดยไม่ throw exception —
+      ถ้าค้างเกิน timeout จะถูกแปลงเป็น TimeoutError ซึ่งเข้า error-handling
+      เดิม (consecutive_errors → reconnect) ได้ตามปกติ
     - Rotating log file (forex_gold_cwider.log)
     - Graceful shutdown (Ctrl+C) — save state ก่อนออก
 
@@ -52,6 +58,26 @@ DEMO ของ Exness (ผ่าน MT5 terminal local) เพื่อวัด
 
     หมายเหตุ Windows VPS: ปิด RDP (disconnect) โดยไม่ Sign out —
     process จะรันต่อใน background ตราบใดที่ PowerShell window ยังเปิดอยู่
+
+[6] MT5-CALL TIMEOUT (เพิ่มใหม่ — แก้บั๊ก "log ค้างตั้งแต่ startup, PID ยังอยู่"):
+    เหตุผลของบั๊กเดิม:  mt5.copy_rates_from_pos() (เรียกผ่าน
+    connector.fetch_ohlcv / fetch_ohlcv_paginated) เป็น blocking IPC call
+    ที่ไม่มี timeout ในตัวของแพ็กเกจ MetaTrader5 — ถ้า IPC กับ terminal ค้าง
+    (ไม่ throw exception, แค่ไม่ return) main loop ทั้งหมดจะบล็อกตลอดกาล
+    โดยที่ `except Exception` ในเดิมจับไม่ได้เลย (ไม่มี exception ให้จับ)
+    → consecutive_errors ไม่เพิ่ม → reconnect logic ไม่เคย trigger
+    → process ยังอยู่ (PID โผล่) แต่ log ไม่ขยับอีกเลย
+
+    Fix: ห่อ self.connector.fetch_ohlcv() / fetch_ohlcv_paginated() ด้วย
+    self._call_with_timeout() (ThreadPoolExecutor.submit + future.result(timeout=..))
+    ถ้าค้างเกิน timeout → raise TimeoutError แทน → main loop's except Exception
+    จับได้ตามปกติ → reconnect logic (เดิมมีอยู่แล้ว) ทำงาน
+
+    ข้อจำกัดที่ต้องรู้: thread ที่ค้างจริงจะไม่ถูกฆ่า (Python ทำไม่ได้ตรงๆ กับ
+    C-extension call ที่ block) มันจะลอยเป็น zombie thread ต่อไป — ถ้า MT5
+    IPC hang บ่อยมากในระยะสั้น ThreadPoolExecutor (3 workers) อาจตันในที่สุด
+    นี่คือเหตุผลที่ต้องมี watchdog.ps1 (ภายนอก process) เป็นชั้นป้องกันสุดท้าย
+    เพราะมันฆ่า process ทั้งตัวได้จริง ซึ่งคืน IPC handle ให้ Windows เคลียร์ให้
 
 หมายเหตุ:
   - ENTRY ใช้ M15 (timeframe="15m"), TREND ใช้ H1 (resample ภายใน strategy)
@@ -69,6 +95,7 @@ DEMO ของ Exness (ผ่าน MT5 terminal local) เพื่อวัด
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import logging
@@ -126,6 +153,12 @@ ADX_MIN             = 22        # ADX threshold: 22=default, 20=adx20tp7
 MAX_HOLD_BARS       = 64         # = 64 x 15m = 16 ชั่วโมง (มิเรอร์ค่า backtest C_wider)
 HISTORY_BARS        = 900       # >= strategy.MIN_BARS(850) + warm-up
 VARIANT_TAG         = "cwider"  # overridden at runtime by --variant-tag arg
+
+# ── MT5-call timeout watchdog (defense layer #1 — see [6] in module docstring) ──
+# วินาทีที่ยอมให้ fetch_ohlcv/fetch_ohlcv_paginated ค้างได้สูงสุดก่อนถือว่า hang
+# คำนวณจริงใน __init__ เป็น max(MT5_CALL_TIMEOUT_FLOOR_SEC, poll_interval_sec * 3)
+MT5_CALL_TIMEOUT_FLOOR_SEC = 20.0
+MT5_IO_WORKERS             = 3
 
 # Magic numbers per symbol (base 555000 + index)
 SYMBOL_MAGIC = {
@@ -261,6 +294,14 @@ class GoldCWiderBot:
         self.day_trade_count:  int   = 0
         self.day_spreads:      list  = []
 
+        # ── MT5-call timeout watchdog (defense layer #1) ──
+        # ทุก MT5 IPC call ที่อยู่บน hot-path ของ main loop รันผ่าน executor นี้
+        # แทนการเรียกตรง เพื่อกัน mt5.copy_rates_from_pos() ค้างไม่มีกำหนด
+        self._io_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=MT5_IO_WORKERS, thread_name_prefix=f"mt5-io-{VARIANT_TAG}")
+        self._mt5_call_timeout_sec = max(
+            MT5_CALL_TIMEOUT_FLOOR_SEC, cfg.poll_interval_sec * 3)
+
     # ─────────────────────────────────────────────────────────────────────
     # Logging
     # ─────────────────────────────────────────────────────────────────────
@@ -274,6 +315,34 @@ class GoldCWiderBot:
             pass
         logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers, force=True)
         return logging.getLogger("GoldCWiderBot")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # MT5-call timeout wrapper (defense layer #1 — see [6] in module docstring)
+    # ─────────────────────────────────────────────────────────────────────
+    def _call_with_timeout(self, func, timeout: float, *args, **kwargs):
+        """รัน MT5 call ใน thread แยก + timeout.
+
+        ถ้าค้างเกิน `timeout` วินาที จะ raise TimeoutError แทนที่จะปล่อยให้
+        main loop บล็อกตลอดกาล (ซึ่งคือสาเหตุของบั๊กเดิม: log ค้างตั้งแต่
+        startup ทั้งที่ process/PID ยังอยู่). TimeoutError ที่ raise ออกไป
+        จะถูก main loop's `except Exception` จับได้ตามปกติ → consecutive_errors
+        เพิ่ม → reconnect logic (เดิมมีอยู่แล้ว) ทำงาน
+
+        หมายเหตุ: thread ที่ค้างจริงจะไม่ถูกฆ่า (Python ทำไม่ได้กับ blocking
+        C-extension call) — มันจะลอยเป็น zombie thread ต่อไป ถ้า hang เกิดถี่
+        มากในช่วงเวลาสั้นๆ worker pool อาจตันได้ในที่สุด นี่คือเหตุผลที่ต้องมี
+        watchdog.ps1 (นอก process) เป็นชั้นป้องกันสุดท้ายที่ฆ่า process ทั้งตัว
+        เพื่อคืน IPC handle ให้ Windows เคลียร์ให้จริงๆ
+        """
+        fut = self._io_executor.submit(func, *args, **kwargs)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            fname = getattr(func, "__name__", str(func))
+            self.log.error(
+                f"[MT5-TIMEOUT] {fname} ค้างเกิน {timeout:.0f}s "
+                f"— ถือเป็น error เพื่อ trigger reconnect logic")
+            raise TimeoutError(f"{fname} timed out after {timeout:.0f}s")
 
     # ─────────────────────────────────────────────────────────────────────
     # Single-instance lock (กัน orphan/duplicate process แย่ง MT5 connection)
@@ -378,6 +447,7 @@ class GoldCWiderBot:
             f"  Daily rules   : OFF (no daily loss limit, no reactive stop)",
             f"  Order mode    : {'DRY-RUN (paper, NO real orders)' if self.cfg.dry_run else 'LIVE — places real orders on the account above'}",
             f"  Kill-switch   : touch {os.path.basename(STOP_FILE)}  (blocks NEW entries only)",
+            f"  MT5-call timeout : {self._mt5_call_timeout_sec:.0f}s  (fetch hang -> forced reconnect)",
             f"  Fills log     : {os.path.basename(FILLS_LOG_FILE)}",
             "=" * 78,
         ]
@@ -421,10 +491,17 @@ class GoldCWiderBot:
             self.log.warning(f"  -> only {len(self.buf)}/{HISTORY_BARS} bars after retries — will fill naturally")
 
     def _fetch_closed_candles(self, limit: int = 5) -> list:
+        """ดึงแท่งที่ปิดแล้วจาก MT5 — ห่อด้วย timeout (defense layer #1)
+        กัน mt5.copy_rates_from_pos() ค้างไม่มีกำหนดแล้วบล็อก main loop ตาย
+        (ดูรายละเอียดเหตุผลใน module docstring หัวข้อ [6])."""
         if limit + 1 > 999:
-            candles = self.connector.fetch_ohlcv_paginated(self.bsym, TIMEFRAME, limit + 1)
+            candles = self._call_with_timeout(
+                self.connector.fetch_ohlcv_paginated, self._mt5_call_timeout_sec,
+                self.bsym, TIMEFRAME, limit + 1)
         else:
-            candles = self.connector.fetch_ohlcv(self.bsym, TIMEFRAME, limit + 1)
+            candles = self._call_with_timeout(
+                self.connector.fetch_ohlcv, self._mt5_call_timeout_sec,
+                self.bsym, TIMEFRAME, limit + 1)
         if not candles:
             return []
         now_ms = int(time.time() * 1000)
@@ -842,7 +919,8 @@ class GoldCWiderBot:
         last_status_ms = 0
         consecutive_errors = 0
 
-        self.log.info(f"เริ่ม main loop — poll ทุก {self.cfg.poll_interval_sec}s ...")
+        self.log.info(f"เริ่ม main loop — poll ทุก {self.cfg.poll_interval_sec}s "
+                       f"(MT5-call timeout={self._mt5_call_timeout_sec:.0f}s) ...")
 
         while True:
             try:
@@ -870,6 +948,7 @@ class GoldCWiderBot:
                 except Exception:
                     pass
                 self._release_single_instance_lock()
+                self._io_executor.shutdown(wait=False, cancel_futures=True)
                 break
 
             except Exception as exc:

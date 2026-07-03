@@ -13,10 +13,19 @@ $allFlat = $true
 foreach ($v in $variants) {
     $logFile = "$DESKTOP\forex_xauusd_$v.log"
     if (Test-Path $logFile) {
-        $line = Get-Content $logFile -Tail 1
-        $pos = [regex]::Match($line, "position=\[(.+?)\]").Groups[1].Value
+        # ใช้ STATUS line ล่าสุดใน 300 บรรทัดท้าย (ไม่ใช้ -Tail 1 เพราะ
+        # บรรทัดสุดท้ายอาจเป็น trades_today=0 แทน STATUS line)
+        $statusLine = Get-Content $logFile -Tail 300 -ErrorAction SilentlyContinue |
+                      Select-String "== STATUS ==" | Select-Object -Last 1
+        if ($statusLine) {
+            $pos = [regex]::Match($statusLine.Line, "position=\[(.+?)\]").Groups[1].Value
+        } else {
+            $pos = ""
+        }
         if ($pos -eq "-") {
             Write-Host "  $v : flat [-]" -ForegroundColor Green
+        } elseif ($pos -eq "") {
+            Write-Host "  $v : no STATUS line found (assuming flat)" -ForegroundColor Yellow
         } else {
             Write-Host "  $v : position=$pos  <-- NOT FLAT, aborting!" -ForegroundColor Red
             $allFlat = $false
@@ -40,9 +49,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 3. Copy updated .py files to Desktop
-Write-Host "`n[3] Copying .py files to Desktop..." -ForegroundColor Yellow
+# 3. Copy updated .py and .ps1 files to Desktop
+Write-Host "`n[3] Copying .py and .ps1 files to Desktop..." -ForegroundColor Yellow
 Copy-Item "$REPO\*.py" $DESKTOP -Force
+Copy-Item "$REPO\watchdog.ps1" $DESKTOP -Force -ErrorAction SilentlyContinue
+Copy-Item "$REPO\setup_watchdog_task.ps1" $DESKTOP -Force -ErrorAction SilentlyContinue
 Write-Host "  Done." -ForegroundColor Green
 
 # 4. Stop running bots
