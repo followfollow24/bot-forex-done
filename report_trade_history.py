@@ -56,13 +56,21 @@ def analyze_variant(variant: str) -> dict:
         else:
             losses.append(pnl)
 
-        # classify exit reason from comment, e.g. "ADX20TP-TP (broker) pnl=..."
+        # Classify exit reason from comment, e.g. "M5TP7-SL (broker) pnl=-12.34"
+        # IMPORTANT: variant tags like "m5tp7"/"adx20tp7"/"adx18tp7" literally
+        # contain the substring "TP" in their own name (from "...tp7"). Naively
+        # searching "TP" in the whole comment would match the variant-tag
+        # prefix itself, not the actual exit reason. Fix: only look at the
+        # text AFTER the first "-", which is where the bot always places the
+        # real reason (see _close_timeout / _log_broker_close in
+        # forex_live_bot_gold_cwider.py: comment = f"{TAG}-{reason} pnl=...").
         c = r.get("comment", "")
-        if "Timeout" in c:
+        _, _, reason_part = c.partition("-")
+        if "Timeout" in reason_part:
             reason = "Timeout"
-        elif "TP" in c:
+        elif "TP" in reason_part:
             reason = "TP"
-        elif "SL" in c:
+        elif "SL" in reason_part:
             reason = "SL"
         else:
             reason = "Other"
