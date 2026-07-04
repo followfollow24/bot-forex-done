@@ -63,82 +63,68 @@ class ForexConfig:
     trail_activation_atr: float = 0.5
 
     # ── Spread filter (ATR-based — instrument-agnostic) ───────────────────────
-    # ใช้ได้กับทุก instrument: ถ้า spread > N% ของ ATR(M15) → ข้ามเทรด
-    # ทอง ATR M15 ≈ $3–8; spread ≈ $0.30–1.50 → ratio ≈ 5–30%
-    # FX ATR M15 ≈ 10–20 pips; spread ≈ 0.5–2 pips → ratio ≈ 3–20%
-    spread_filter_atr_ratio: float = 0.20   # ≥20% ของ ATR = spread กว้างเกิน → skip
+    spread_filter_atr_ratio: float = 0.20
 
     # ── News Blackout ────────────────────────────────────────────────────────
-    # รายการช่วงเวลา UTC ที่ห้ามเข้าไม้ใหม่ (NFP, CPI, FOMC ฯลฯ)
-    # Format: [("08:25", "08:35"), ("13:25", "13:35")]
-    # ตัวอย่าง: NFP = วันศุกร์แรก 12:25-12:45 UTC
     news_blackout: List[Tuple[str, str]] = field(default_factory=list)
 
-    # ── Forex Cost Model (แทน fee_bps + funding_bps ของ crypto) ──────────────
-    # Spread (pips) — fallback สำหรับ dry_run (live ดึงจาก MT5 จริง)
+    # ── Forex Cost Model ──────────────────────────────────────────────────────
     spread_pips: Dict[str, float] = field(default_factory=lambda: {
-        # FX pairs
         "EURUSD": 0.5,  "GBPUSD": 0.7,  "USDJPY": 0.5,  "USDCHF": 0.9,
         "AUDUSD": 0.7,  "USDCAD": 0.9,  "NZDUSD": 1.0,
         "EURJPY": 0.8,  "GBPJPY": 1.2,  "EURGBP": 0.7,
-        # Commodities — ในหน่วย "pips" ตามนิยามของ pair นั้น
-        # XAUUSD: spread $0.30–1.50, pip_size=0.01 → ~30–150 pips
         "XAUUSD": 50.0,
     })
-    # Swap = ต้นทุนข้ามคืน (pips/วัน): ลบ = จ่าย, บวก = ได้รับ
     swap_long_pips_per_day: Dict[str, float] = field(default_factory=lambda: {
         "EURUSD": -0.30, "GBPUSD":  0.10, "USDJPY":  0.50, "USDCHF":  0.40,
         "AUDUSD":  0.20, "USDCAD": -0.40, "NZDUSD":  0.10,
         "EURJPY":  0.20, "GBPJPY":  0.60, "EURGBP": -0.20,
-        # ทอง: long XAU/USD = กู้ USD ซื้อ Gold → จ่าย financing (ลบ)
-        "XAUUSD": -5.00,    # ≈ -$5/lot/คืน (ค่าประมาณ — แต่ละโบรกต่างกัน)
+        "XAUUSD": -5.00,
     })
     swap_short_pips_per_day: Dict[str, float] = field(default_factory=lambda: {
         "EURUSD":  0.10, "GBPUSD": -0.40, "USDJPY": -0.70, "USDCHF": -0.60,
         "AUDUSD": -0.40, "USDCAD":  0.20, "NZDUSD": -0.30,
         "EURJPY": -0.50, "GBPJPY": -0.90, "EURGBP":  0.00,
-        # ทอง: short = ให้ยืม Gold → ได้รับ (น้อย)
-        "XAUUSD":  1.00,    # ≈ +$1/lot/คืน
+        "XAUUSD":  1.00,
     })
 
     # ── Pip ──────────────────────────────────────────────────────────────────
-    # pip_size: ทศนิยมตำแหน่งที่ 4 ยกเว้นคู่ที่มี JPY (ตำแหน่งที่ 2)
-    # XAUUSD: 1 pip = 0.01 (ราคาทองมี 2 ทศนิยม เช่น 2345.67)
     pip_size: Dict[str, float] = field(default_factory=lambda: {
         "EURUSD": 0.0001, "GBPUSD": 0.0001, "AUDUSD": 0.0001,
         "NZDUSD": 0.0001, "USDCAD": 0.0001, "USDCHF": 0.0001, "EURGBP": 0.0001,
         "USDJPY": 0.01,   "EURJPY": 0.01,   "GBPJPY": 0.01,
-        "XAUUSD": 0.01,   # Gold: 1 pip = $0.01
+        "XAUUSD": 0.01,
     })
-    # pip_value_usd_approx: มูลค่า 1 pip ต่อ 1 standard lot ใน USD
-    # XAUUSD: 100 oz/lot × $0.01/pip = $1.00/pip/lot
+    # FALLBACK เท่านั้น (dry-run / ไม่มี MT5) — live mode ใช้ get_pip_value_live()
+    # ที่ดึง trade_tick_value จาก MT5 โดยตรง ซึ่งถูกต้องไม่ว่า account currency
+    # จะเป็น USD หรือ USC (cent) และไม่ว่า contract_size จริงจะเท่าไหร่ก็ตาม
     pip_value_usd_approx: Dict[str, float] = field(default_factory=lambda: {
         "EURUSD": 10.0,  "GBPUSD": 10.0,  "AUDUSD": 10.0,  "NZDUSD": 10.0,
         "USDCAD": 7.6,   "USDCHF": 11.0,  "EURGBP": 12.5,
         "USDJPY": 9.1,   "EURJPY": 9.1,   "GBPJPY": 9.1,
-        "XAUUSD": 1.0,   # 100 oz × $0.01 = $1.00/pip/lot
+        "XAUUSD": 1.0,   # 100 oz × $0.01 = $1.00/pip/lot (fallback only)
     })
 
-    # ── Contract Size (units per 1 standard lot) ──────────────────────────────
-    # FX:     100,000 units (e.g. 100k EUR สำหรับ EURUSD)
-    # XAUUSD: 100 troy ounces
-    contract_size: float = 100_000.0      # FX default
+    # FALLBACK เท่านั้น — contract_size จริงต่างกันได้ต่อ broker/account type
+    # (พิสูจน์แล้ว: XAUUSDc Real Cent = 1.0 oz ไม่ใช่ 100.0)
+    # ห้ามใช้ค่าตรงนี้คำนวณ pip value จริงบน live mode อีกต่อไป
+    contract_size: float = 100_000.0
     contract_sizes: Dict[str, float] = field(default_factory=lambda: {
         "EURUSD": 100_000.0, "GBPUSD": 100_000.0, "AUDUSD": 100_000.0,
         "NZDUSD": 100_000.0, "USDCAD": 100_000.0, "USDCHF": 100_000.0,
         "EURGBP": 100_000.0, "USDJPY": 100_000.0, "EURJPY": 100_000.0,
         "GBPJPY": 100_000.0,
-        "XAUUSD": 100.0,     # 100 troy oz per standard lot
+        "XAUUSD": 100.0,     # fallback only — actual may differ per broker/account
     })
 
     # ── Session Filters ───────────────────────────────────────────────────────
-    trade_london:    bool = True           # 07:00–17:00 UTC — สภาพคล่องสูงสุด
-    trade_newyork:   bool = True           # 12:00–21:00 UTC — overlap กับ London ดีที่สุด
-    trade_tokyo:     bool = False          # 23:00–08:00 UTC
-    trade_sydney:    bool = False          # 21:00–06:00 UTC
+    trade_london:    bool = True
+    trade_newyork:   bool = True
+    trade_tokyo:     bool = False
+    trade_sydney:    bool = False
     require_active_session: bool = True
-    close_before_weekend_mins: int = 60    # ปิด position ก่อนตลาดปิดวันศุกร์ (นาที)
-    skip_rollover_window: bool = True      # หลีกเลี่ยง 21:45–22:15 UTC
+    close_before_weekend_mins: int = 60
+    skip_rollover_window: bool = True
     near_close_size_mult: float = 0.5
 
     # ── การเทรด ──────────────────────────────────────────────────────────────
@@ -147,10 +133,8 @@ class ForexConfig:
     cooldown_bars: int = 20
 
     # ── คู่เงิน / Symbols ─────────────────────────────────────────────────────
-    # Default: EURUSD เดียว — ปรับผ่าน --pairs CLI หรือ .env
     symbols: List[str] = field(default_factory=lambda: ["EURUSD"])
-    # รัน XAUUSD: python3 forex_live_bot.py --pairs XAUUSD --risk 0.3 --magic 555003
-    history_bars: int = 900    # ≥ 850 สำหรับ Hybrid H1-EMA200 (200 H1 × 4 M15 + buffer)
+    history_bars: int = 900
     warm_bars: int = 150
 
     # ── ไฟล์ ─────────────────────────────────────────────────────────────────
@@ -159,13 +143,16 @@ class ForexConfig:
     trades_csv: str = "forex_trades.csv"
     db_file:    str = "forex_bot.db"
 
-    # ── MT5 via MetaApi.cloud ──────────────────────────────────────────────────
+    # ── MT5 ──────────────────────────────────────────────────────────────────
     dry_run:              bool = True
     metaapi_token:        str  = ""
     metaapi_account_id:   str  = ""
-    magic_number:         int  = 20240101  # EURUSD default; ใช้ 555003 สำหรับ XAUUSD
+    magic_number:         int  = 20240101
     leverage:             int  = 100
     poll_interval_sec:    int  = 30
+    # ต้อง set True อย่างชัดเจนผ่าน --allow-real CLI flag เพื่อรันบนบัญชีที่
+    # ไม่ใช่ DEMO — ค่า default False ป้องกันการเทรดเงินจริงโดยไม่ตั้งใจ
+    allow_real:           bool = False
 
     # ── Regime Detection ─────────────────────────────────────────────────────
     hurst_window: int   = 200
@@ -196,25 +183,22 @@ class ForexConfig:
         return self.pip_size.get(symbol, 0.0001)
 
     def get_pip_value(self, symbol: str) -> float:
-        """มูลค่า 1 pip ต่อ 1 lot ใน USD (ค่าประมาณสำหรับ paper trading)."""
+        """มูลค่า 1 pip ต่อ 1 lot (ค่าประมาณสำหรับ paper trading / fallback)."""
         return self.pip_value_usd_approx.get(symbol, 10.0)
 
     def get_contract_size(self, symbol: str) -> float:
-        """Contract size ต่อ 1 standard lot: 100,000 สำหรับ FX, 100 สำหรับ XAUUSD."""
+        """Contract size ต่อ 1 standard lot — fallback เท่านั้น."""
         return self.contract_sizes.get(symbol, self.contract_size)
 
     def get_price_decimals(self, symbol: str) -> int:
-        """จำนวนทศนิยมสำหรับ price quote — ใช้ใน MT5 order rounding."""
         _dec = {
             "EURUSD": 5, "GBPUSD": 5, "AUDUSD": 5, "NZDUSD": 5,
             "USDCAD": 5, "USDCHF": 5, "EURGBP": 5,
             "USDJPY": 3, "EURJPY": 3, "GBPJPY": 3,
-            "XAUUSD": 2,   # ราคาทอง: 2345.67
+            "XAUUSD": 2,
         }
         if symbol in _dec:
             return _dec[symbol]
-        # Fallback แบบ keyword — รองรับ broker-suffixed names เช่น
-        # "XAUUSD.m", "GOLD#", "USDJPYm" ที่ resolve_symbol() อาจคืนมา
         u = symbol.upper()
         if "XAU" in u or "GOLD" in u:
             return 2
@@ -223,11 +207,11 @@ class ForexConfig:
         return 5
 
     def add_symbol_alias(self, canonical: str, alias: str):
-        """เพิ่ม broker-specific name เป็น alias ของ canonical symbol.
+        """Copy pip_size/spread/swap config จาก canonical → broker alias.
 
-        เรียกหลัง symbol resolver: ถ้า XAUUSD → XAUUSD.m
-        ก็จะ copy config values จาก XAUUSD ไปให้ XAUUSD.m ด้วย
-        เพื่อให้ get_pip_size('XAUUSD.m') คืนค่าถูกต้อง
+        ปลอดภัยสำหรับ pip_size และ price_decimals (คงที่ตามรูปแบบราคา)
+        แต่ห้ามใช้ค่า contract_size/pip_value ที่ copy มาตรงนี้คำนวณ pip value
+        จริงบน live mode — ดึงจาก MT5 trade_tick_value โดยตรงแทนเสมอ
         """
         if canonical == alias:
             return

@@ -455,12 +455,20 @@ class GoldCWiderBot:
             self.log.info(l)
 
         if not self.cfg.dry_run and not is_demo:
-            self.log.error(
-                "REFUSING TO START: ไม่สามารถยืนยันได้ว่าบัญชีนี้เป็น DEMO "
-                "(account info type != ACCOUNT_TRADE_MODE_DEMO). "
-                "ตรวจสอบว่า MT5 terminal login ด้วยบัญชี DEMO เท่านั้น "
-                "หรือรันด้วย --dry-run เพื่อทดสอบโค้ดแบบ paper")
-            sys.exit(1)
+            if not self.cfg.allow_real:
+                self.log.error(
+                    "REFUSING TO START: ไม่สามารถยืนยันได้ว่าบัญชีนี้เป็น DEMO "
+                    "(account info type != ACCOUNT_TRADE_MODE_DEMO). "
+                    "ตรวจสอบว่า MT5 terminal login ด้วยบัญชี DEMO เท่านั้น "
+                    "หรือรันด้วย --dry-run เพื่อทดสอบโค้ดแบบ paper "
+                    "หรือถ้าต้องการรันบนบัญชีเงินจริงโดยตั้งใจ ต้องส่ง --allow-real "
+                    "มาด้วยอย่างชัดเจน")
+                sys.exit(1)
+            else:
+                self.log.warning(
+                    "*** REAL-MONEY MODE CONFIRMED (--allow-real) *** "
+                    f"บัญชีนี้ไม่ใช่ demo — คำสั่งซื้อขายทุกคำสั่งจะใช้เงินจริง "
+                    f"บน login={login}  balance={balance:,.2f} {currency}")
 
         expected_login = os.environ.get("MT5_LOGIN")
         if not self.cfg.dry_run and expected_login and str(login) != str(expected_login):
@@ -1020,6 +1028,10 @@ def main():
                     help="วินาทีต่อรอบ poll (default 30)")
     ap.add_argument("--capital", type=float, default=0.0,
                     help="Capital USD เริ่มต้น (0 = ดึงจาก MT5 balance)")
+    ap.add_argument("--allow-real", action="store_true",
+                    help="อนุญาตให้รันบนบัญชีที่ไม่ใช่ DEMO (เช่น Real Cent account). "
+                         "ต้องระบุอย่างชัดเจน มิฉะนั้นระบบปฏิเสธการ start เสมอ "
+                         "เมื่อ MT5 แจ้งว่า account type != DEMO")
     args = ap.parse_args()
 
     # Re-initialise all symbol/variant-dependent globals based on CLI args
@@ -1067,6 +1079,7 @@ def main():
     cfg.max_hold_bars      = MAX_HOLD_BARS  # pin ตรงๆ — ไม่พึ่ง ForexConfig default
     cfg.poll_interval_sec  = args.poll_interval
     cfg.dry_run            = args.dry_run
+    cfg.allow_real         = args.allow_real
     cfg.state_file         = STATE_FILE
     cfg.log_file           = LOG_FILE
     slug = SYMBOL.lower()

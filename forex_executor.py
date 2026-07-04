@@ -181,32 +181,23 @@ class MT5Connector:
         return (float(tick.bid), float(tick.ask))
 
     def get_pip_value_live(self, symbol: str) -> float:
-        """คำนวณ pip value (USD/pip/lot) จากราคาปัจจุบัน.
+        """คำนวณ pip value ต่อ lot จาก MT5 trade_tick_value โดยตรง.
 
-        สูตร: pip_value = pip_size × contract_size  (สำหรับ USD-quoted)
-          FX EURUSD: 0.0001 × 100,000 = $10/pip/lot
-          Gold XAUUSD: 0.01  × 100    = $1/pip/lot
+        สูตร: pip_value = trade_tick_value × (pip_size / trade_tick_size)
+        trade_tick_value จาก MT5 คืนค่าใน account currency อยู่แล้ว
+        ถูกต้องไม่ว่า account จะเป็น USD หรือ USC (cent) และไม่ว่า
+        contract_size จริงจะเท่าไหร่ (XAUUSDm=100 oz, XAUUSDc=1 oz etc.)
         """
-        pip_size      = self.cfg.get_pip_size(symbol)
-        contract_size = self.cfg.get_contract_size(symbol)
-        base          = symbol[:3].upper()
-        quote         = symbol[3:6].upper()
-
-        bid, ask = self.get_current_price(symbol)
-        mid = (bid + ask) / 2 if bid > 0 else 0
-
-        if mid <= 0:
+        if not _HAS_MT5:
             return self.cfg.get_pip_value(symbol)
-
-        if quote == "USD":
-            # EURUSD, GBPUSD, XAUUSD → pip_value = pip_size × contract_size
-            return pip_size * contract_size
-        elif base == "USD":
-            # USDJPY, USDCHF → quote ไม่ใช่ USD ต้องแปลง
-            return pip_size * contract_size / mid
-        else:
-            # Cross pairs: ใช้ค่าประมาณจาก config
+        info = mt5.symbol_info(symbol)
+        if info is None or not info.trade_tick_size:
+            self.log.debug(
+                f"get_pip_value_live: symbol_info('{symbol}') unavailable or "
+                f"trade_tick_size=0 — falling back to cfg.get_pip_value()")
             return self.cfg.get_pip_value(symbol)
+        pip_size = self.cfg.get_pip_size(symbol)
+        return info.trade_tick_value * (pip_size / info.trade_tick_size)
 
     # ── OHLCV ─────────────────────────────────────────────────────────────────
 
