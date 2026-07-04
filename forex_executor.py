@@ -310,8 +310,16 @@ class MT5Connector:
     def get_position_deals(self, position_id: str, lookback_minutes: int = 30) -> list:
         """คืน deals (entries/exits) ของ position นี้ จาก deal history.
 
-        ใช้สำหรับดึง commission จริง/fill price จริงของแต่ละ leg (open/close).
-        ถ้าเรียกแล้ว error → คืน [] (เรียกใช้แบบ best-effort, ไม่ throw)
+        ใช้สำหรับดึง commission จริง/fill price จริงของแต่ละ leg (open/close)
+        และ 'reason' (FIX) ที่ _log_broker_close() ใน live bot เช็คว่า broker
+        ปิดเพราะ SL หรือ TP โดยหา "SL"/"TP" เป็น substring ใน reason string.
+
+        ก่อนแก้: ฟังก์ชันนี้ไม่เคยคืน 'reason' เลย → _log_broker_close() ได้
+        ค่าว่างเปล่า → fallback ไป "SL/TP (broker)" ทุกครั้ง → fills_log แยก
+        SL/TP ไม่ได้เลย
+
+        แก้: เพิ่ม reason_map จาก mt5.DEAL_REASON_* → string มีคำว่า "SL"/"TP"
+        ไม่ต้องแก้โค้ด live bot เพราะ logic _log_broker_close() ถูกต้องอยู่แล้ว
         """
         if not _HAS_MT5 or not position_id:
             return []
@@ -325,11 +333,27 @@ class MT5Connector:
                 getattr(mt5, "DEAL_ENTRY_INOUT", 2):  "DEAL_ENTRY_INOUT",
                 getattr(mt5, "DEAL_ENTRY_OUT_BY", 3): "DEAL_ENTRY_OUT_BY",
             }
+            # FIX: map MT5's DEAL_REASON_* enum → string containing "SL"/"TP"
+            # so the substring checks in _log_broker_close() actually work.
+            # DEAL_REASON_SO (stop out from margin call) grouped with SL side.
+            reason_map = {
+                getattr(mt5, "DEAL_REASON_CLIENT", 0):   "DEAL_REASON_CLIENT",
+                getattr(mt5, "DEAL_REASON_MOBILE", 1):   "DEAL_REASON_MOBILE",
+                getattr(mt5, "DEAL_REASON_WEB", 2):      "DEAL_REASON_WEB",
+                getattr(mt5, "DEAL_REASON_EXPERT", 3):   "DEAL_REASON_EXPERT",
+                getattr(mt5, "DEAL_REASON_SL", 4):       "DEAL_REASON_SL",
+                getattr(mt5, "DEAL_REASON_TP", 5):       "DEAL_REASON_TP",
+                getattr(mt5, "DEAL_REASON_SO", 6):       "DEAL_REASON_SL_STOPOUT",
+                getattr(mt5, "DEAL_REASON_ROLLOVER", 7): "DEAL_REASON_ROLLOVER",
+                getattr(mt5, "DEAL_REASON_VMARGIN", 8):  "DEAL_REASON_VMARGIN",
+                getattr(mt5, "DEAL_REASON_SPLIT", 9):    "DEAL_REASON_SPLIT",
+            }
             return [{
                 "positionId": str(d.position_id),
                 "entryType":  entry_map.get(d.entry, "UNKNOWN"),
                 "price":      float(d.price),
                 "commission": float(d.commission),
+                "reason":     reason_map.get(d.reason, "UNKNOWN"),
             } for d in deals]
         except Exception as exc:
             self.log.debug(f"get_position_deals({position_id}): {exc}")

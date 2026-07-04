@@ -56,24 +56,17 @@ def analyze_variant(variant: str) -> dict:
         else:
             losses.append(pnl)
 
-        # Classify exit reason from comment, e.g. "M5TP7-SL (broker) pnl=-12.34"
-        # IMPORTANT: variant tags like "m5tp7"/"adx20tp7"/"adx18tp7" literally
-        # contain the substring "TP" in their own name (from "...tp7"). Naively
-        # searching "TP" in the whole comment would match the variant-tag
-        # prefix itself, not the actual exit reason. Fix: only look at the
-        # text AFTER the first "-", which is where the bot always places the
-        # real reason (see _close_timeout / _log_broker_close in
-        # forex_live_bot_gold_cwider.py: comment = f"{TAG}-{reason} pnl=...").
+        # Classify exit reason.
+        # Broker-closed trades are logged as "TAG-SL/TP (broker) pnl=..." so
+        # substring matching on "SL"/"TP" is ambiguous for those rows.
+        # Use PnL sign as proxy for historical data (pnl >= 0 → TP, < 0 → SL).
+        # Timeout is always detectable from the comment so check that first.
         c = r.get("comment", "")
         _, _, reason_part = c.partition("-")
         if "Timeout" in reason_part:
             reason = "Timeout"
-        elif "TP" in reason_part:
-            reason = "TP"
-        elif "SL" in reason_part:
-            reason = "SL"
         else:
-            reason = "Other"
+            reason = "TP" if pnl >= 0 else "SL"
         reasons[reason] = reasons.get(reason, 0) + 1
 
     for r in opens + closes:
