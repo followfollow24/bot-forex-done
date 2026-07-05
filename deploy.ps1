@@ -60,13 +60,16 @@ Write-Host "  Done." -ForegroundColor Green
 
 # 4. Stop running bots
 Write-Host "`n[4] Stopping bots..." -ForegroundColor Yellow
-$running = Get-Process python* -ErrorAction SilentlyContinue
+# [FIX C4-5] Filter by CommandLine to only kill our forex bot processes,
+# not every python.exe on the machine (e.g. pip, other scripts, VSCode).
+$running = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+           Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }
 if ($running) {
-    Stop-Process -Id $running.Id -Force
+    $running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 2
-    Write-Host "  Stopped: $($running.Id -join ', ')" -ForegroundColor Green
+    Write-Host "  Stopped PIDs: $($running.ProcessId -join ', ')" -ForegroundColor Green
 } else {
-    Write-Host "  No bots running." -ForegroundColor Yellow
+    Write-Host "  No forex bots running." -ForegroundColor Yellow
 }
 
 # 5. Start 2 bots (adx20tp7 + adx18tp7) with --allow-real — m5tp7 permanently retired
@@ -87,8 +90,12 @@ Write-Host "  Running python processes: $count / 2" -ForegroundColor $color
 
 Write-Host "`n[6b] Check log for REAL-MONEY confirmation..." -ForegroundColor Yellow
 Start-Sleep -Seconds 5
-Get-Content "$DESKTOP\forex_xauusd_adx20tp7.log" -Tail 40 -ErrorAction SilentlyContinue |
-    Select-String "REAL-MONEY|balance=|EQUITY_STOP|REFUSING"
+# [FIX C4-8] Check both variant logs (was only checking adx20tp7 before)
+foreach ($v in @("adx20tp7", "adx18tp7")) {
+    Write-Host "  --- $v ---" -ForegroundColor Cyan
+    Get-Content "$DESKTOP\forex_xauusd_$v.log" -Tail 40 -ErrorAction SilentlyContinue |
+        Select-String "REAL-MONEY|balance=|EQUITY_STOP|REFUSING"
+}
 
 if ($count -eq 2) {
     Write-Host "`nDeploy complete! Verify 'REAL-MONEY MODE CONFIRMED' in log above." -ForegroundColor Cyan

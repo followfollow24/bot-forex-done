@@ -30,17 +30,13 @@ $bots = @(
     @{
         Variant      = "adx20tp7"
         StaleMinutes = 30    # M15 → STATUS ทุก ~15 นาที, buffer 2x
-        Args         = "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30"
-    },
-    @{
-        Variant      = "m5tp7"
-        StaleMinutes = 15    # M5 → STATUS ทุก ~5 นาที, buffer 3x (poll ถี่กว่า เผื่อ noise มากกว่า)
-        Args         = "forex_live_bot_gold_cwider.py --variant-tag m5tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 5m --max-positions 3 --risk 0.30"
+        # [FIX C4-2] Added --allow-real; [FIX C4-1] m5tp7 block removed permanently
+        Args         = "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     },
     @{
         Variant      = "adx18tp7"
         StaleMinutes = 30
-        Args         = "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30"
+        Args         = "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     }
 )
 

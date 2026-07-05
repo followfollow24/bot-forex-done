@@ -490,11 +490,19 @@ class GoldCWiderBot:
                     f"บน login={login}  balance={balance:,.2f} {currency}")
 
         expected_login = os.environ.get("MT5_LOGIN")
-        if not self.cfg.dry_run and expected_login and str(login) != str(expected_login):
-            self.log.error(
-                f"REFUSING TO START: connected login={login} != MT5_LOGIN={expected_login} (env) "
-                f"— MT5 terminal login ผิดบัญชี")
-            sys.exit(1)
+        if not self.cfg.dry_run:
+            if expected_login:
+                if str(login) != str(expected_login):
+                    self.log.error(
+                        f"REFUSING TO START: connected login={login} != MT5_LOGIN={expected_login} (env) "
+                        f"— MT5 terminal login ผิดบัญชี")
+                    sys.exit(1)
+            else:
+                # [FIX C1-4] MT5_LOGIN not set → safety check is disabled; warn loudly
+                self.log.warning(
+                    "MT5_LOGIN ไม่ได้ตั้งไว้ใน environment — "
+                    "login-match safety check ไม่ทำงาน (แนะนำให้ตั้งค่านี้ "
+                    "ใน .env เพื่อป้องกันการต่อผิดบัญชีโดยไม่ตั้งใจ)")
 
     # ─────────────────────────────────────────────────────────────────────
     # Warm-up

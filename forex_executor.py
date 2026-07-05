@@ -161,13 +161,25 @@ class MT5Connector:
         if not _HAS_MT5:
             return self.cfg.total_capital_usd
         info = mt5.account_info()
-        return float(info.balance) if info is not None else self.cfg.total_capital_usd
+        if info is None:
+            # [FIX C1-1] Do NOT silently return stale cfg.total_capital_usd —
+            # that default can be wildly wrong (e.g. 10,000 USD default vs a
+            # small Real Cent account). Raise so the main-loop reconnect path
+            # (consecutive_errors → reconnect) handles this correctly.
+            raise RuntimeError(f"mt5.account_info() returned None: {mt5.last_error()}")
+        return float(info.balance)
 
     def get_equity(self) -> float:
         if not _HAS_MT5:
             return self.cfg.total_capital_usd
         info = mt5.account_info()
-        return float(info.equity) if info is not None else self.cfg.total_capital_usd
+        if info is None:
+            # [FIX C1-2] Same reasoning as get_balance(). Equity feeds both
+            # position-sizing (risk_cash = equity * risk_pct) and the equity-stop
+            # circuit breaker — a silently wrong fallback could mis-size a position
+            # or fail to trigger equity-stop during a real drawdown.
+            raise RuntimeError(f"mt5.account_info() returned None: {mt5.last_error()}")
+        return float(info.equity)
 
     # ── price ─────────────────────────────────────────────────────────────────
 
@@ -448,6 +460,13 @@ class ForexOrderExecutor:
                             sl: float, tp: float, comment: str,
                             position: int | None = None):
         tick = mt5.symbol_info_tick(symbol)
+        # [FIX C1-3] symbol_info_tick() returns None when symbol is not subscribed
+        # (e.g. at reconnect before symbol_select is called) — guard before deref.
+        if tick is None:
+            self.log.error(
+                f"  [ORDER ERROR] symbol_info_tick('{symbol}') returned None "
+                f"— cannot determine price, aborting order")
+            return None
         price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
         base_request = {
@@ -616,7 +635,10 @@ class ForexOrderExecutor:
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err = result.retcode if result is not None else mt5.last_error()
                 self.log.error(f"  [ORDER ERROR] close {symbol}: retcode={err}")
-                return {"fill_price": fallback_fill, "commission": 0.0}
+                # [FIX C1-7] Return falsy {} so caller's `if not result:` fires
+                # and the position is NOT removed from tracking — it remains in
+                # self.positions and will be retried on the next poll cycle.
+                return {}
 
             self.log.info(
                 f"  [MT5] CLOSE {side.upper():5} {symbol:8} "
