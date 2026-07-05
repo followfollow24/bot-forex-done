@@ -714,10 +714,9 @@ class GoldCWiderBot:
 
         actual_risk_pct = (sl_pips * pip_value * lot) / equity * 100.0 if equity > 0 else float("inf")
         if actual_risk_pct > self.cfg.max_risk_per_trade_pct:
-            self.log.info(
-                f"  [SKIP] risk cap exceeded: actual={actual_risk_pct:.2f}% "
-                f"> max={self.cfg.max_risk_per_trade_pct}%  (lot would be {lot})")
-            return
+            self.log.warning(
+                f"  [MIN-LOT] risk={actual_risk_pct:.2f}% > target={self.cfg.risk_per_trade_pct}% "
+                f"(min_lot={self.cfg.min_lot} forced, SL wide) — trading anyway")
 
         side    = "long" if long_ else "short"
         comment = f"{VARIANT_TAG[:6].upper()}-{sig.action}"[:16]
