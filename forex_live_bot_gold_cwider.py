@@ -104,6 +104,8 @@ import math
 import os
 import sys
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -172,7 +174,7 @@ VARIANT_MAGIC_OFFSET = {"cwider": 0, "tp7": 10, "tp8": 20, "mix_a": 30, "mix_b":
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def _make_paths(symbol: str, variant: str = "cwider") -> tuple:
-    """Return (STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER) for symbol+variant."""
+    """Return (STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE) for symbol+variant."""
     slug = symbol.lower()
     v    = variant.lower()
     base_magic = SYMBOL_MAGIC.get(symbol, 555000 + abs(hash(symbol)) % 999)
@@ -186,6 +188,7 @@ def _make_paths(symbol: str, variant: str = "cwider") -> tuple:
             os.path.join(_BASE_DIR, f"fills_log_{slug}_cwider.csv"),
             os.path.join(_BASE_DIR, f"{slug}_cwider.lock"),
             magic,
+            os.path.join(_BASE_DIR, f"EQUITY_STOP_{symbol.upper()}"),
         )
     return (
         os.path.join(_BASE_DIR, f"STOP_{symbol.upper()}_{v.upper()}"),
@@ -194,10 +197,11 @@ def _make_paths(symbol: str, variant: str = "cwider") -> tuple:
         os.path.join(_BASE_DIR, f"fills_log_{slug}_{v}.csv"),
         os.path.join(_BASE_DIR, f"{slug}_{v}.lock"),
         magic,
+        os.path.join(_BASE_DIR, f"EQUITY_STOP_{symbol.upper()}_{v.upper()}"),
     )
 
 # Initialised with defaults; overwritten in main() after argparse
-STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER = _make_paths(SYMBOL)
+STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE = _make_paths(SYMBOL)
 
 
 
@@ -294,6 +298,18 @@ class GoldCWiderBot:
         self.day_trade_count:  int   = 0
         self.day_spreads:      list  = []
 
+        # ── Portfolio-level equity-stop circuit breaker (defense layer) ──
+        # Tracks the highest equity ever observed and, if current equity
+        # drops more than cfg.stop_equity_frac below that peak, blocks new
+        # entries (existing positions still managed normally, same as the
+        # manual kill-switch file). Unlike per-trade SL, this catches a
+        # losing streak accumulated across many trades rather than damage
+        # from a single position. Requires a human to delete
+        # EQUITY_STOP_FILE before new entries resume — it will NOT clear
+        # itself automatically, by design.
+        self.peak_equity:           float = cfg.total_capital_usd
+        self.equity_stop_triggered: bool  = False
+
         # ── MT5-call timeout watchdog (defense layer #1) ──
         # ทุก MT5 IPC call ที่อยู่บน hot-path ของ main loop รันผ่าน executor นี้
         # แทนการเรียกตรง เพื่อกัน mt5.copy_rates_from_pos() ค้างไม่มีกำหนด
@@ -326,7 +342,7 @@ class GoldCWiderBot:
         main loop บล็อกตลอดกาล (ซึ่งคือสาเหตุของบั๊กเดิม: log ค้างตั้งแต่
         startup ทั้งที่ process/PID ยังอยู่). TimeoutError ที่ raise ออกไป
         จะถูก main loop's `except Exception` จับได้ตามปกติ → consecutive_errors
-        เพิ่ม → reconnect logic (เดิมมีอยู่แล้ว) ทำงาน
+        เพิ่ม → reconnect logic เดิม (disconnect + connect ใหม่) ทำงานเอง
 
         หมายเหตุ: thread ที่ค้างจริงจะไม่ถูกฆ่า (Python ทำไม่ได้กับ blocking
         C-extension call) — มันจะลอยเป็น zombie thread ต่อไป ถ้า hang เกิดถี่
@@ -447,6 +463,10 @@ class GoldCWiderBot:
             f"  Daily rules   : OFF (no daily loss limit, no reactive stop)",
             f"  Order mode    : {'DRY-RUN (paper, NO real orders)' if self.cfg.dry_run else 'LIVE — places real orders on the account above'}",
             f"  Kill-switch   : touch {os.path.basename(STOP_FILE)}  (blocks NEW entries only)",
+            f"  Equity-stop   : {self.cfg.stop_equity_frac*100:.0f}% drawdown from peak -> "
+            f"touch {os.path.basename(EQUITY_STOP_FILE)} auto-created, blocks NEW entries "
+            f"(delete file to resume)",
+            f"  Telegram alert: {'configured ✅' if (os.environ.get('TELEGRAM_BOT_TOKEN') and os.environ.get('TELEGRAM_CHAT_ID')) else 'NOT configured ⚠️ (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env)'}",
             f"  MT5-call timeout : {self._mt5_call_timeout_sec:.0f}s  (fetch hang -> forced reconnect)",
             f"  Fills log     : {os.path.basename(FILLS_LOG_FILE)}",
             "=" * 78,
@@ -459,10 +479,9 @@ class GoldCWiderBot:
                 self.log.error(
                     "REFUSING TO START: ไม่สามารถยืนยันได้ว่าบัญชีนี้เป็น DEMO "
                     "(account info type != ACCOUNT_TRADE_MODE_DEMO). "
-                    "ตรวจสอบว่า MT5 terminal login ด้วยบัญชี DEMO เท่านั้น "
-                    "หรือรันด้วย --dry-run เพื่อทดสอบโค้ดแบบ paper "
-                    "หรือถ้าต้องการรันบนบัญชีเงินจริงโดยตั้งใจ ต้องส่ง --allow-real "
-                    "มาด้วยอย่างชัดเจน")
+                    "ถ้าตั้งใจรันบัญชีจริง (เช่น Real Cent account) ต้องส่ง "
+                    "--allow-real มาด้วยอย่างชัดเจน มิฉะนั้นระบบจะปฏิเสธการ "
+                    "start เสมอเพื่อป้องกันการต่อ MT5 terminal ผิดบัญชีโดยไม่ตั้งใจ")
                 sys.exit(1)
             else:
                 self.log.warning(
@@ -594,6 +613,10 @@ class GoldCWiderBot:
                 "day_trade_count":  self.day_trade_count,
                 "day_spreads":      self.day_spreads,
             },
+            "equity_stop_state": {
+                "peak_equity":           self.peak_equity,
+                "equity_stop_triggered": self.equity_stop_triggered,
+            },
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -622,6 +645,16 @@ class GoldCWiderBot:
             self.day_equity_start = ds.get("day_equity_start", self.cfg.total_capital_usd)
             self.day_trade_count  = ds.get("day_trade_count", 0)
             self.day_spreads      = ds.get("day_spreads", [])
+
+            es = data.get("equity_stop_state", {})
+            self.peak_equity           = es.get("peak_equity", self.cfg.total_capital_usd)
+            self.equity_stop_triggered = es.get("equity_stop_triggered", False)
+            if self.equity_stop_triggered:
+                self.log.warning(
+                    f"[STATE] equity-stop was previously triggered (peak_equity="
+                    f"{self.peak_equity:,.2f}) — remains latched until "
+                    f"{os.path.basename(EQUITY_STOP_FILE)} is deleted")
+
             self.log.info(f"[STATE] loaded {STATE_FILE}")
         except Exception as exc:
             self.log.warning(f"load_state: {exc}")
@@ -751,6 +784,13 @@ class GoldCWiderBot:
             f"SL={sl:.2f} TP={tp:.2f}  spread={spread:.4f}  slippage={slippage:+.4f}  "
             f"commission={commission:.4f}")
 
+        self._send_telegram_alert(
+            f"\U0001F7E2 OPEN {side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"Lot: {lot}\n"
+            f"Entry: {fill_px:.2f}\n"
+            f"SL: {sl:.2f}   TP: {tp:.2f}\n"
+            f"Spread: {spread:.4f}   Slippage: {slippage:+.4f}")
+
     # ─────────────────────────────────────────────────────────────────────
     # Close due to Timeout (the only bot-initiated close for C_wider)
     # ─────────────────────────────────────────────────────────────────────
@@ -782,6 +822,12 @@ class GoldCWiderBot:
             f"  [CLOSE-TIMEOUT] {pos.side.upper()} {self.bsym} lot={pos.lot}  "
             f"fill={fill_px:.2f}  net_pnl={net:+.2f}  "
             f"spread={spread:.4f}  slippage={slippage:+.4f}  commission={commission:.4f}")
+
+        self._send_telegram_alert(
+            f"⏱ CLOSE-TIMEOUT {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"Lot: {pos.lot}\n"
+            f"Entry: {pos.entry:.2f}   Fill: {fill_px:.2f}\n"
+            f"Net PnL: {net:+.2f}")
 
         self.day_trade_count += 1
         self._update_day_state(net)
@@ -847,11 +893,95 @@ class GoldCWiderBot:
             f"fill={fill_px:.2f}  net_pnl={net:+.2f}  "
             f"spread={spread:.4f}  slippage={slippage:+.4f}  commission={commission:.4f}")
 
+        emoji = "\U0001F534" if net < 0 else "\U0001F7E2"
+        self._send_telegram_alert(
+            f"{emoji} CLOSE-{reason} {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"Lot: {pos.lot}\n"
+            f"Entry: {pos.entry:.2f}   Fill: {fill_px:.2f}\n"
+            f"Net PnL: {net:+.2f}")
+
         self.day_trade_count += 1
         self._update_day_state(net)
         if pos in self.positions:
             self.positions.remove(pos)
         self.executor.release_order_key(self.bsym, pos.side, pos.lot)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Telegram alert (best-effort — never blocks or crashes the bot)
+    # ─────────────────────────────────────────────────────────────────────
+    def _send_telegram_alert(self, message: str):
+        """ส่งข้อความแจ้งเตือนผ่าน Telegram Bot API — best-effort เท่านั้น.
+
+        อ่าน TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID จาก environment (.env)
+        ถ้าไม่ได้ตั้งค่าไว้ จะข้ามเงียบๆ (debug log เท่านั้น ไม่ error) เพื่อ
+        ไม่ให้บอทกระทบการทำงานหลักถ้า Telegram ยังไม่ได้ setup หรือ network
+        มีปัญหาชั่วคราว — ใช้ urllib มาตรฐานของ Python เพื่อไม่ต้องเพิ่ม
+        dependency ใหม่ (เช่น `requests`) ที่อาจไม่มีติดตั้งบน VPS.
+        """
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            self.log.debug(
+                "[TELEGRAM] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set in "
+                "environment — skipping alert")
+            return
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+            req = urllib.request.Request(url, data=data)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+            self.log.info("[TELEGRAM] alert sent")
+        except Exception as exc:
+            self.log.error(f"[TELEGRAM] failed to send alert: {exc}")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Equity-stop circuit breaker (portfolio-level, see __init__ comment)
+    # ─────────────────────────────────────────────────────────────────────
+    def _check_equity_stop(self, equity: float):
+        """อัปเดต peak equity และเช็คว่าต้อง trigger circuit breaker ไหม.
+
+        Trigger เมื่อ equity ปัจจุบันต่ำกว่า peak เกิน cfg.stop_equity_frac
+        (เช่น 0.35 = 35%) — เขียนไฟล์ EQUITY_STOP_FILE ทันทีเพื่อบล็อกไม้
+        ใหม่ (ไม้เก่ายังบริหารตามปกติผ่าน broker SL/TP/timeout) และไม่
+        auto-clear เอง ต้องลบไฟล์ด้วยมือหลังตรวจสอบสถานการณ์แล้วเท่านั้น
+        """
+        if equity > self.peak_equity:
+            self.peak_equity = equity
+
+        if self.equity_stop_triggered:
+            return  # already triggered — stay latched until a human clears it
+
+        floor = self.peak_equity * (1.0 - self.cfg.stop_equity_frac)
+        if equity <= floor:
+            self.equity_stop_triggered = True
+            drawdown_pct = (1.0 - equity / self.peak_equity) * 100.0 if self.peak_equity > 0 else 0.0
+            self.log.critical(
+                f"[EQUITY-STOP TRIGGERED] equity={equity:,.2f} <= floor={floor:,.2f} "
+                f"(peak={self.peak_equity:,.2f}, drawdown={drawdown_pct:.1f}% >= "
+                f"{self.cfg.stop_equity_frac*100:.0f}% threshold). "
+                f"Blocking NEW entries. Existing positions still managed normally. "
+                f"To resume: investigate first, then delete {os.path.basename(EQUITY_STOP_FILE)}")
+            try:
+                with open(EQUITY_STOP_FILE, "w", encoding="utf-8") as f:
+                    f.write(
+                        f"Triggered at {datetime.now(timezone.utc).isoformat()}\n"
+                        f"peak_equity={self.peak_equity:.2f}\n"
+                        f"equity_at_trigger={equity:.2f}\n"
+                        f"drawdown_pct={drawdown_pct:.1f}\n"
+                        f"threshold_pct={self.cfg.stop_equity_frac*100:.0f}\n"
+                        f"Delete this file to resume new entries after investigating.\n")
+            except Exception as exc:
+                self.log.error(f"_check_equity_stop: failed to write EQUITY_STOP_FILE: {exc}")
+
+            self._send_telegram_alert(
+                f"\U0001F6A8 EQUITY-STOP TRIGGERED \U0001F6A8\n"
+                f"Variant: {VARIANT_TAG} ({SYMBOL})\n"
+                f"Peak equity: {self.peak_equity:,.2f}\n"
+                f"Current equity: {equity:,.2f}\n"
+                f"Drawdown: {drawdown_pct:.1f}% (threshold: {self.cfg.stop_equity_frac*100:.0f}%)\n"
+                f"New entries are BLOCKED. Existing positions still managed normally.\n"
+                f"To resume: investigate, then delete {os.path.basename(EQUITY_STOP_FILE)} on the VPS.")
 
     # ─────────────────────────────────────────────────────────────────────
     # Process a newly-closed M15 bar
@@ -863,6 +993,7 @@ class GoldCWiderBot:
 
         equity = self.connector.get_equity()
         self._rollover_day(ts, equity)
+        self._check_equity_stop(equity)
 
         # ── 1) detect broker-side SL/TP close ──
         self._check_broker_close()
@@ -873,11 +1004,15 @@ class GoldCWiderBot:
             if pos.bars >= self.cfg.max_hold_bars:
                 self._close_timeout(pos)
 
-        # ── 3) kill switch ──
-        kill = os.path.exists(STOP_FILE)
-        if kill:
+        # ── 3) kill switch (manual file OR equity-stop circuit breaker) ──
+        kill = os.path.exists(STOP_FILE) or os.path.exists(EQUITY_STOP_FILE) or self.equity_stop_triggered
+        if os.path.exists(STOP_FILE):
             self.log.info(f"[KILL-SWITCH] {os.path.basename(STOP_FILE)} exists — "
                            f"blocking new entries (existing position still managed)")
+        if os.path.exists(EQUITY_STOP_FILE) or self.equity_stop_triggered:
+            self.log.warning(f"[EQUITY-STOP] active — blocking new entries "
+                              f"(existing position still managed). Delete "
+                              f"{os.path.basename(EQUITY_STOP_FILE)} to resume.")
 
         # ── 4) new signal — only if room for another position & not blocked ──
         can_open = (len(self.positions) < self.max_positions
@@ -976,8 +1111,6 @@ class GoldCWiderBot:
                         raise
                     except Exception as exc2:
                         self.log.error(f"reconnect ล้มเหลว: {exc2}")
-                        # ไม่ reset consecutive_errors ที่นี่ — ให้ backoff sleep ด้านล่างทำงานปกติ
-                        # reset จะเกิดหลัง reconnect สำเร็จ (try block ด้านบน)
                 time.sleep(min(60, 10 * consecutive_errors))
 
 
@@ -987,7 +1120,7 @@ class GoldCWiderBot:
 def main():
     global SYMBOL, VARIANT_TAG, SL_ATR, TP_ATR, ADX_MIN, RISK_PER_TRADE_PCT
     global TIMEFRAME, MAX_HOLD_BARS, HISTORY_BARS
-    global STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER
+    global STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE
     ap = argparse.ArgumentParser(
         description="CWiderBot — Hybrid Trend-Pullback (C_wider) — DEMO forward-test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1017,6 +1150,11 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="Paper mode สำหรับทดสอบโค้ด (ไม่เชื่อมต่อ MT5, ไม่ส่ง order จริง). "
                          "Default: ปิด (ส่ง order จริงบน DEMO ตามที่ขอ)")
+    ap.add_argument("--allow-real", action="store_true",
+                    help="อนุญาตให้รันบนบัญชีที่ไม่ใช่ DEMO (เช่น Real Cent account). "
+                         "ต้องระบุอย่างชัดเจน มิฉะนั้นระบบปฏิเสธการ start เสมอถ้า "
+                         "MT5 terminal ต่อบัญชีที่ไม่ใช่ demo ไว้ — ป้องกันการเทรดเงินจริง "
+                         "โดยไม่ตั้งใจ")
     ap.add_argument("--timeframe", type=str, default="15m",
                     help="Entry timeframe: '15m' (default), '5m' (M5), '1m' (M1). "
                          "MaxHold auto-set to keep 16h real time: 15m→64, 5m→192, 1m→960 bars.")
@@ -1027,10 +1165,6 @@ def main():
                     help="วินาทีต่อรอบ poll (default 30)")
     ap.add_argument("--capital", type=float, default=0.0,
                     help="Capital USD เริ่มต้น (0 = ดึงจาก MT5 balance)")
-    ap.add_argument("--allow-real", action="store_true",
-                    help="อนุญาตให้รันบนบัญชีที่ไม่ใช่ DEMO (เช่น Real Cent account). "
-                         "ต้องระบุอย่างชัดเจน มิฉะนั้นระบบปฏิเสธการ start เสมอ "
-                         "เมื่อ MT5 แจ้งว่า account type != DEMO")
     args = ap.parse_args()
 
     # Re-initialise all symbol/variant-dependent globals based on CLI args
@@ -1039,7 +1173,7 @@ def main():
     SL_ATR      = args.sl_atr
     TP_ATR      = args.tp_atr
     ADX_MIN     = int(args.adx_min)
-    STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER = _make_paths(SYMBOL, VARIANT_TAG)
+    STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE = _make_paths(SYMBOL, VARIANT_TAG)
 
     # Timeframe-driven config
     tf = args.timeframe.lower()
@@ -1072,10 +1206,10 @@ def main():
     cfg = ForexConfig()
     cfg.symbols            = [SYMBOL]
     cfg.timeframe          = TIMEFRAME
-    cfg.risk_per_trade_pct = RISK_PER_TRADE_PCT  # may have been updated by --risk above
+    cfg.risk_per_trade_pct = RISK_PER_TRADE_PCT
     cfg.magic_number       = MAGIC_NUMBER
     cfg.history_bars       = HISTORY_BARS
-    cfg.max_hold_bars      = MAX_HOLD_BARS  # pin ตรงๆ — ไม่พึ่ง ForexConfig default
+    cfg.max_hold_bars      = MAX_HOLD_BARS
     cfg.poll_interval_sec  = args.poll_interval
     cfg.dry_run            = args.dry_run
     cfg.allow_real         = args.allow_real
