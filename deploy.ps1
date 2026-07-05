@@ -1,5 +1,7 @@
 # deploy.ps1 — pull latest code from GitHub and restart bots
 # Usage: cd Desktop; .\deploy.ps1
+# Deploys adx20tp7 + adx18tp7 on Real Cent account (--allow-real).
+# m5tp7 is permanently retired — not started here.
 
 $DESKTOP = "$env:USERPROFILE\Desktop"
 $REPO    = "$DESKTOP\bot_repo"
@@ -8,7 +10,7 @@ Write-Host "=== Bot Deploy Script ===" -ForegroundColor Cyan
 
 # 1. Check all bots are flat before doing anything
 Write-Host "`n[1] Checking positions..." -ForegroundColor Yellow
-$variants = @("adx20tp7","m5tp7","adx18tp7")
+$variants = @("adx20tp7","adx18tp7")
 $allFlat = $true
 foreach ($v in $variants) {
     $logFile = "$DESKTOP\forex_xauusd_$v.log"
@@ -67,27 +69,29 @@ if ($running) {
     Write-Host "  No bots running." -ForegroundColor Yellow
 }
 
-# 5. Restart all 3 bots
+# 5. Start 2 bots (adx20tp7 + adx18tp7) with --allow-real — m5tp7 permanently retired
 Write-Host "`n[5] Starting bots..." -ForegroundColor Yellow
 Set-Location $DESKTOP
 
-Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30" -WorkingDirectory $DESKTOP -WindowStyle Normal
-Start-Sleep -Seconds 2
+Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real" -WorkingDirectory $DESKTOP -WindowStyle Normal
+Start-Sleep -Seconds 3
 
-Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag m5tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 5m --max-positions 3 --risk 0.30" -WorkingDirectory $DESKTOP -WindowStyle Normal
-Start-Sleep -Seconds 2
-
-Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30" -WorkingDirectory $DESKTOP -WindowStyle Normal
+Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real" -WorkingDirectory $DESKTOP -WindowStyle Normal
 Start-Sleep -Seconds 3
 
 # 6. Verify
 Write-Host "`n[6] Verifying..." -ForegroundColor Yellow
 $count = (Get-Process python* -ErrorAction SilentlyContinue).Count
-$color = if ($count -eq 3) { "Green" } else { "Red" }
-Write-Host "  Running python processes: $count / 3" -ForegroundColor $color
+$color = if ($count -eq 2) { "Green" } else { "Red" }
+Write-Host "  Running python processes: $count / 2" -ForegroundColor $color
 
-if ($count -eq 3) {
-    Write-Host "`nDeploy complete!" -ForegroundColor Cyan
+Write-Host "`n[6b] Check log for REAL-MONEY confirmation..." -ForegroundColor Yellow
+Start-Sleep -Seconds 5
+Get-Content "$DESKTOP\forex_xauusd_adx20tp7.log" -Tail 40 -ErrorAction SilentlyContinue |
+    Select-String "REAL-MONEY|balance=|EQUITY_STOP|REFUSING"
+
+if ($count -eq 2) {
+    Write-Host "`nDeploy complete! Verify 'REAL-MONEY MODE CONFIRMED' in log above." -ForegroundColor Cyan
 } else {
-    Write-Host "`nWarning: expected 3 bots, got $count. Check manually." -ForegroundColor Red
+    Write-Host "`nWarning: expected 2 bots, got $count. Check manually." -ForegroundColor Red
 }
