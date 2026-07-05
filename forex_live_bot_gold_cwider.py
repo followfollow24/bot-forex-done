@@ -20,11 +20,14 @@ DEMO ของ Exness (ผ่าน MT5 terminal local) เพื่อวัด
          backtest C_wider ซึ่งปิดทุกอย่างนี้ด้วยเกณฑ์ trail_*=999)
     - ไม่มี daily rules (no reactive daily stop, no daily loss limit) — เทรดตลอดวัน
 
-[2] DEMO ACCOUNT ONLY
+[2] DEMO BY DEFAULT — REAL ACCOUNT REQUIRES EXPLICIT --allow-real
     - เชื่อมต่อผ่าน MetaTrader5 package (local terminal IPC)
     - หลัง connect จะตรวจ account type ผ่าน connector.is_demo()
-    - ถ้า cfg.dry_run=False (ค่า default — ส่ง order จริงบน demo) แล้วไม่สามารถ
-      ยืนยันได้ว่าเป็นบัญชี DEMO → REFUSE TO START (sys.exit)
+    - ถ้า cfg.dry_run=False (ค่า default) และบัญชีไม่ใช่ DEMO:
+        - ไม่มี --allow-real  → REFUSE TO START (sys.exit) — พฤติกรรม default
+          ยังคงปลอดภัยเหมือนเดิม ป้องกันการรันบัญชีจริงโดยไม่ตั้งใจ
+        - มี --allow-real     → อนุญาตให้รันบัญชีจริงได้ (ต้องตั้งใจส่ง flag
+          นี้มาอย่างชัดเจนเท่านั้น ดู argparse --allow-real ด้านล่าง)
 
 [3] EXECUTION-COST LOGGING (หัวใจของการทดสอบนี้)
     ทุก order (OPEN/CLOSE) → append เข้า fills_log_gold_cwider.csv:
@@ -131,6 +134,14 @@ class HybridM5Strategy(HybridTrendPullback):
     """ADX20_TP7 strategy adapted for M5 entry timeframe.
     H1_BARS=12: 12 × 5min = 1 H1 bar.
     EMA_M15=60: 60 × 5min = 300min ≡ EMA20 on M15 (same real-time lookback).
+
+    [RETIRED — DEAD CODE] --timeframe 5m is now hard-blocked in main() with
+    sys.exit() after live forward-testing on the Real Cent account confirmed
+    this approach loses money: PF=0.203, win_rate=9.1%, net -$271.85 over
+    11 closed trades. This class is therefore currently unreachable — kept
+    only for historical reference so future readers understand what was tried
+    and what the results were. Do not reinstate without a fundamentally
+    different strategy design and a fresh backtest/OOS cycle.
     """
     H1_BARS  = 12
     EMA_M15  = 60
@@ -499,6 +510,7 @@ class GoldCWiderBot:
                     sys.exit(1)
             else:
                 # [FIX C1-4] MT5_LOGIN not set → safety check is disabled; warn loudly
+                # so the operator knows this layer is inactive (was a silent skip before).
                 self.log.warning(
                     "MT5_LOGIN ไม่ได้ตั้งไว้ใน environment — "
                     "login-match safety check ไม่ทำงาน (แนะนำให้ตั้งค่านี้ "
@@ -755,9 +767,10 @@ class GoldCWiderBot:
 
         actual_risk_pct = (sl_pips * pip_value * lot) / equity * 100.0 if equity > 0 else float("inf")
         if actual_risk_pct > self.cfg.max_risk_per_trade_pct:
-            self.log.warning(
-                f"  [MIN-LOT] risk={actual_risk_pct:.2f}% > target={self.cfg.risk_per_trade_pct}% "
-                f"(min_lot={self.cfg.min_lot} forced, SL wide) — trading anyway")
+            self.log.info(
+                f"  [SKIP] risk cap exceeded: actual={actual_risk_pct:.2f}% "
+                f"> max={self.cfg.max_risk_per_trade_pct}%  (lot would be {lot})")
+            return
 
         side    = "long" if long_ else "short"
         comment = f"{VARIANT_TAG[:6].upper()}-{sig.action}"[:16]
@@ -832,7 +845,7 @@ class GoldCWiderBot:
             f"spread={spread:.4f}  slippage={slippage:+.4f}  commission={commission:.4f}")
 
         self._send_telegram_alert(
-            f"⏱ CLOSE-TIMEOUT {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"\U000023F1 CLOSE-TIMEOUT {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
             f"Lot: {pos.lot}\n"
             f"Entry: {pos.entry:.2f}   Fill: {fill_px:.2f}\n"
             f"Net PnL: {net:+.2f}")
@@ -1164,8 +1177,8 @@ def main():
                          "MT5 terminal ต่อบัญชีที่ไม่ใช่ demo ไว้ — ป้องกันการเทรดเงินจริง "
                          "โดยไม่ตั้งใจ")
     ap.add_argument("--timeframe", type=str, default="15m",
-                    help="Entry timeframe: '15m' (default), '5m' (M5), '1m' (M1). "
-                         "MaxHold auto-set to keep 16h real time: 15m→64, 5m→192, 1m→960 bars.")
+                    help="Entry timeframe: '15m' (default), '5m' (blocked — retired after live testing), "
+                         "'1m' (blocked — unvalidated). Only 15m is currently supported for live trading.")
     ap.add_argument("--risk", type=float, default=0.0,
                     help="Risk per trade %% (0 = ใช้ค่า default ของ variant). "
                          "M5 แนะนำ 0.15 (ครึ่งนึงของ M15 เพราะ IS MaxDD สูงกว่า).")
@@ -1186,10 +1199,24 @@ def main():
     # Timeframe-driven config
     tf = args.timeframe.lower()
     if tf == "5m":
-        TIMEFRAME     = "5m"
-        MAX_HOLD_BARS = 192    # 192 × 5min = 960min = 16h
-        HISTORY_BARS  = 2700   # >= HybridM5Strategy.MIN_BARS (2500) + buffer
-        strategy_cls  = HybridM5Strategy
+        # [FIX C2-1] Hard-block --timeframe 5m — this is stronger than the 1m
+        # block below because 5m (m5tp7) was actually run live and confirmed to
+        # lose money, not just an unvalidated placeholder. The message is
+        # intentionally explicit about the live-data evidence so that anyone
+        # who finds this block understands why it exists and what it would take
+        # to justify reopening the path (a fundamentally different strategy,
+        # not just optimism).
+        sys.exit(
+            "[REFUSE TO START] --timeframe 5m (the m5tp7 variant) has been "
+            "PERMANENTLY RETIRED after live forward-testing on the Real Cent "
+            "account confirmed poor performance: PF=0.203, win_rate=9.1%, "
+            "net -$271.85 over 11 closed trades. This is not a theoretical "
+            "concern like the M1 path below — it was tested live with real "
+            "signals and lost money consistently. Do not run this again without "
+            "a deliberate code change here AND a clear reason to believe "
+            "something has fundamentally changed (different signal logic, "
+            "re-validated backtest + OOS cycle), not just by removing this "
+            "sys.exit.")
     elif tf == "1m":
         sys.exit(
             "[REFUSE TO START] --timeframe 1m is an unvalidated placeholder "
@@ -1214,10 +1241,10 @@ def main():
     cfg = ForexConfig()
     cfg.symbols            = [SYMBOL]
     cfg.timeframe          = TIMEFRAME
-    cfg.risk_per_trade_pct = RISK_PER_TRADE_PCT
+    cfg.risk_per_trade_pct = RISK_PER_TRADE_PCT  # may have been updated by --risk above
     cfg.magic_number       = MAGIC_NUMBER
     cfg.history_bars       = HISTORY_BARS
-    cfg.max_hold_bars      = MAX_HOLD_BARS
+    cfg.max_hold_bars      = MAX_HOLD_BARS  # pin ตรงๆ — ไม่พึ่ง ForexConfig default
     cfg.poll_interval_sec  = args.poll_interval
     cfg.dry_run            = args.dry_run
     cfg.allow_real         = args.allow_real
