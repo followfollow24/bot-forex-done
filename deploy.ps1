@@ -1,7 +1,7 @@
-# deploy.ps1 — pull latest code from GitHub and restart bots
+# deploy.ps1 -- pull latest code from GitHub and restart bots
 # Usage: cd Desktop; .\deploy.ps1
 # Deploys adx20tp7 + adx18tp7 on Real Cent account (--allow-real).
-# m5tp7 is permanently retired — not started here.
+# m5tp7 is permanently retired -- not started here.
 
 $DESKTOP = "$env:USERPROFILE\Desktop"
 $REPO    = "$DESKTOP\bot_repo"
@@ -15,8 +15,8 @@ $allFlat = $true
 foreach ($v in $variants) {
     $logFile = "$DESKTOP\forex_xauusd_$v.log"
     if (Test-Path $logFile) {
-        # ใช้ STATUS line ล่าสุดใน 300 บรรทัดท้าย (ไม่ใช้ -Tail 1 เพราะ
-        # บรรทัดสุดท้ายอาจเป็น trades_today=0 แทน STATUS line)
+        # Use last STATUS line in last 300 lines (not just -Tail 1 since
+        # last line may be trades_today=0 not STATUS line)
         $statusLine = Get-Content $logFile -Tail 300 -ErrorAction SilentlyContinue |
                       Select-String "== STATUS ==" | Select-Object -Last 1
         if ($statusLine) {
@@ -38,7 +38,7 @@ foreach ($v in $variants) {
 }
 
 if (-not $allFlat) {
-    Write-Host "`nAborted — wait for all positions to close first." -ForegroundColor Red
+    Write-Host "`nAborted -- wait for all positions to close first." -ForegroundColor Red
     exit 1
 }
 
@@ -60,8 +60,8 @@ Write-Host "  Done." -ForegroundColor Green
 
 # 4. Stop running bots
 Write-Host "`n[4] Stopping bots..." -ForegroundColor Yellow
-# [FIX C4-5] Filter by CommandLine to only kill our forex bot processes,
-# not every python.exe on the machine (e.g. pip, other scripts, VSCode).
+# Filter by CommandLine to only kill our forex bot processes,
+# not every python.exe (pip, other scripts, VSCode, etc.)
 $running = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
            Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }
 if ($running) {
@@ -72,7 +72,7 @@ if ($running) {
     Write-Host "  No forex bots running." -ForegroundColor Yellow
 }
 
-# 5. Start 2 bots (adx20tp7 + adx18tp7) with --allow-real — m5tp7 permanently retired
+# 5. Start 2 bots (adx20tp7 + adx18tp7) with --allow-real -- m5tp7 permanently retired
 Write-Host "`n[5] Starting bots..." -ForegroundColor Yellow
 Set-Location $DESKTOP
 
@@ -90,7 +90,6 @@ Write-Host "  Running python processes: $count / 2" -ForegroundColor $color
 
 Write-Host "`n[6b] Check log for REAL-MONEY confirmation..." -ForegroundColor Yellow
 Start-Sleep -Seconds 5
-# [FIX C4-8] Check both variant logs (was only checking adx20tp7 before)
 foreach ($v in @("adx20tp7", "adx18tp7")) {
     Write-Host "  --- $v ---" -ForegroundColor Cyan
     Get-Content "$DESKTOP\forex_xauusd_$v.log" -Tail 40 -ErrorAction SilentlyContinue |

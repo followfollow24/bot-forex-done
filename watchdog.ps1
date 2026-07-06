@@ -1,36 +1,34 @@
 # =============================================================================
-# watchdog.ps1 — Defense layer #2 (external) สำหรับ forex_live_bot_gold_cwider.py
+# watchdog.ps1 - Defense layer #2 (external) for forex_live_bot_gold_cwider.py
 # =============================================================================
-# ตรวจ STATUS line ล่าสุดของ 3 บอท ถ้าค้างเกิน threshold ต่อ variant → kill process
-# นั้น (เฉพาะตัวที่ค้าง — ไม่แตะตัวอื่น) แล้ว start ใหม่ด้วยคำสั่งเดียวกับ deploy.ps1
+# Check STATUS line of 2 bots. If stale beyond threshold -> kill that process
+# (only the stale one, leave others alone) then restart with same args as deploy.ps1
 #
-# ทำไมต้องมีชั้นนี้เพิ่ม (แม้จะแก้ timeout ในตัว bot แล้ว):
-#   Layer 1 (_call_with_timeout ใน .py) แปลง MT5-IPC-hang ให้กลายเป็น
-#   TimeoutError เพื่อ trigger reconnect ได้ — แต่ thread ที่ค้างจริงจะไม่ถูก
-#   ฆ่า (Python ทำไม่ได้กับ blocking C-call) ถ้า IPC ตายลึกจริงๆ reconnect
-#   อาจไม่ช่วย เพราะ handle เดิมยังค้างอยู่ในโปรเซส วิธีที่รับประกันแก้ได้จริง
-#   คือฆ่า process ทั้งตัวแล้วให้ Windows คืน resource ให้ — นั่นคืองานของสคริปต์นี้
+# Why this layer exists (even after fixing timeout inside bot):
+#   Layer 1 (_call_with_timeout in .py) converts MT5-IPC-hang into TimeoutError
+#   to trigger reconnect -- but the hung thread is NOT killed (Python can't kill
+#   blocking C-calls). If IPC dies deeply, reconnect may not help because the old
+#   handle is still stuck in the process. The only reliable fix is to kill the
+#   whole process and let Windows reclaim resources -- that is this script's job.
 #
-# วิธีใช้:
-#   ตั้งรันผ่าน Task Scheduler ทุก 5-10 นาที (ดู setup_watchdog_task.ps1)
-#   ทดสอบมือ:  cd C:\Users\Administrator\Desktop; .\watchdog.ps1
+# Usage:
+#   Schedule via Task Scheduler every 5-10 minutes (see setup_watchdog_task.ps1)
+#   Manual test: cd C:\Users\Administrator\Desktop; .\watchdog.ps1
 #
-# ข้อควรระวัง:
-#   - อย่ารันถี่กว่า 5 นาที (กัน race กับ deploy.ps1 ที่ Stop-Process ทุก python.exe)
-#   - ถ้ากำลัง deploy.ps1 อยู่พอดี watchdog อาจเห็น log ค้างชั่วคราวระหว่าง
-#     restart แล้ว restart ซ้ำ — ผลกระทบต่ำ (แค่ restart ซ้ำ ไม่เสียหาย) แต่ถ้า
-#     กังวลให้ปิด Task ชั่วคราวก่อนรัน deploy.ps1 ด้วยมือ
+# Caution:
+#   - Do not run more often than every 5 minutes (avoid race with deploy.ps1)
+#   - If deploy.ps1 is running, watchdog may see stale log during restart and
+#     restart again -- low impact (just double-restart) but disable Task if worried
 # =============================================================================
 
 $DESKTOP = "$env:USERPROFILE\Desktop"
-$SYMBOL  = "xauusd"   # ใช้ตรงกับ slug ที่ _make_paths() สร้างไฟล์ (symbol.lower())
+$SYMBOL  = "xauusd"
 
-# ── นิยามบอท 3 ตัว — args ต้องตรงกับ deploy.ps1 เป๊ะๆ ──────────────────────────
+# Bot definitions -- args must match deploy.ps1 exactly
 $bots = @(
     @{
         Variant      = "adx20tp7"
-        StaleMinutes = 30    # M15 → STATUS ทุก ~15 นาที, buffer 2x
-        # [FIX C4-2] Added --allow-real; [FIX C4-1] m5tp7 block removed permanently
+        StaleMinutes = 30
         Args         = "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     },
     @{
@@ -40,7 +38,7 @@ $bots = @(
     }
 )
 
-# ── watchdog เขียน log ของตัวเองแยกจาก bot logs (แยกวันละไฟล์) ─────────────────
+# Watchdog writes its own log separate from bot logs (one file per day)
 $wlogFile = "$DESKTOP\watchdog_$(Get-Date -Format 'yyyy-MM-dd').log"
 function WLog($msg) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
@@ -55,41 +53,41 @@ foreach ($bot in $bots) {
     $logFile = "$DESKTOP\forex_${SYMBOL}_$variant.log"
 
     if (-not (Test-Path $logFile)) {
-        WLog "[$variant] log ไม่พบ ($logFile) — ข้าม (อาจยังไม่เคย start)"
+        WLog "[$variant] log not found ($logFile) -- skipping (bot may not have started yet)"
         continue
     }
 
-    # หา STATUS line ล่าสุดใน 300 บรรทัดท้าย — ตั้งใจไม่ใช้ (Get-Item).LastWriteTime
-    # เฉยๆ เพราะ error-loop (log.error ซ้ำๆ ตอน reconnect ล้มเหลว) ก็ทำให้ไฟล์ดู
-    # "active" ทั้งที่ main loop จริงๆ ไม่ได้ประมวลผลอะไรเลย ต้องเช็ค STATUS line
-    # โดยเฉพาะ เพราะมันแปลว่า loop วิ่งจบรอบจริง
+    # Find latest STATUS line in last 300 lines
+    # Do NOT use (Get-Item).LastWriteTime alone -- error-loops (log.error spam during
+    # reconnect) keep the file "active" even when main loop is frozen. Must check
+    # STATUS line specifically because it means the loop actually completed a cycle.
     $statusLine = Get-Content $logFile -Tail 300 -ErrorAction SilentlyContinue |
                   Select-String "== STATUS ==" | Select-Object -Last 1
 
     if (-not $statusLine) {
-        WLog "[$variant] ไม่พบ STATUS line ใน log ล่าสุด 300 บรรทัด — ถือว่าค้าง"
+        WLog "[$variant] no STATUS line in last 300 lines -- treating as stale"
         $staleMin = 9999
     } else {
-        # รูปแบบ timestamp: "2026-07-03 01:26:00,123 [INFO] == STATUS == ..."
+        # Timestamp format: "2026-07-03 01:26:00,123 [INFO] == STATUS == ..."
         $tsStr = ($statusLine.Line -split '\[')[0].Trim()
         try {
-            $tsClean = $tsStr.Substring(0, 19)   # "yyyy-MM-dd HH:mm:ss"
+            $tsClean = $tsStr.Substring(0, 19)
             $ts = [datetime]::ParseExact($tsClean, "yyyy-MM-dd HH:mm:ss", $null)
             $staleMin = (New-TimeSpan -Start $ts -End (Get-Date)).TotalMinutes
         } catch {
-            WLog "[$variant] parse timestamp ไม่ได้จาก '$tsStr' — ถือว่าค้าง (fail-safe)"
+            WLog "[$variant] cannot parse timestamp from '$tsStr' -- treating as stale (fail-safe)"
             $staleMin = 9999
         }
     }
 
     if ($staleMin -le $bot.StaleMinutes) {
-        WLog "[$variant] OK — STATUS ล่าสุด $([math]::Round($staleMin,1)) นาทีก่อน (threshold=$($bot.StaleMinutes))"
+        WLog "[$variant] OK -- STATUS $([math]::Round($staleMin,1)) min ago (threshold=$($bot.StaleMinutes))"
         continue
     }
 
-    WLog "[$variant] STALE! $([math]::Round($staleMin,1)) นาที > threshold $($bot.StaleMinutes) นาที — restarting"
+    WLog "[$variant] STALE! $([math]::Round($staleMin,1)) min > threshold $($bot.StaleMinutes) -- restarting"
 
-    # ── หา process ที่ command line มี --variant-tag ตัวนี้อยู่ (แม่นกว่าฆ่า python.exe ทุกตัว) ──
+    # Find process by CommandLine (safer than killing all python.exe)
     $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
              Where-Object { $_.CommandLine -like "*--variant-tag $variant*" }
 
@@ -100,7 +98,7 @@ foreach ($bot in $bots) {
         }
         Start-Sleep -Seconds 5
     } else {
-        WLog "[$variant] ไม่พบ process รันอยู่ (ตายไปเงียบๆ แล้ว) — start ใหม่เลยโดยไม่ต้อง kill"
+        WLog "[$variant] no process found (already dead) -- starting fresh"
     }
 
     Start-Process python -ArgumentList $bot.Args -WorkingDirectory $DESKTOP -WindowStyle Normal
@@ -110,4 +108,4 @@ foreach ($bot in $bots) {
 
 $runningCount = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
                   Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }).Count
-WLog "=== watchdog run complete — python bots running: $runningCount / 3 ==="
+WLog "=== watchdog run complete -- python bots running: $runningCount / 2 ==="
