@@ -21,7 +21,7 @@
 #     restart again -- low impact (just double-restart) but disable Task if worried
 # =============================================================================
 
-$DESKTOP = "$env:USERPROFILE\Desktop"
+$DESKTOP = "C:\Users\Administrator\Desktop"  # hardcoded: task runs as SYSTEM, $env:USERPROFILE is wrong
 $SYMBOL  = "xauusd"
 
 # Bot definitions -- args must match deploy.ps1 exactly
