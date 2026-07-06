@@ -14,7 +14,7 @@ SAFETY NOTES:
   - Real cost if Algo Trading is ON: ~one round-trip spread on min lot.
 
 Run on VPS:
-    cd C:\Users\Administrator\Desktop
+    cd C:/Users/Administrator/Desktop
     python test_autotrading.py
 """
 import sys
