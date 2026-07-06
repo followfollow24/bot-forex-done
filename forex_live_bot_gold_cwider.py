@@ -106,6 +106,7 @@ import logging.handlers
 import math
 import os
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -184,8 +185,29 @@ VARIANT_MAGIC_OFFSET = {"cwider": 0, "tp7": 10, "tp8": 20, "mix_a": 30, "mix_b":
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# [FIX a] Lock files live in a fixed system temp directory, NOT under
+# _BASE_DIR. Rationale: _BASE_DIR is derived from __file__, i.e. it depends
+# on which physical copy of this script is executed (e.g.
+# Desktop\forex_live_bot_gold_cwider.py vs
+# Desktop\bot_repo\forex_live_bot_gold_cwider.py, which commonly coexist
+# after a git-based deploy.ps1). If two copies exist and someone runs the
+# bot_repo copy by mistake, _BASE_DIR-based lock files would live in a
+# DIFFERENT folder per copy, so the single-instance lock (flock/msvcrt on
+# LOCK_FILE) would silently fail to detect the duplicate. Both processes
+# would share the same magic number (derived only from SYMBOL+VARIANT_TAG,
+# unaffected by folder) and could both trade the same position -> duplicate
+# real-money orders. tempfile.gettempdir() is a single OS-wide constant
+# independent of which file was launched, so any two invocations of the
+# same symbol+variant always contend for the exact same lock file.
+_LOCK_DIR = tempfile.gettempdir()
+
+
+def _lock_path(symbol: str, variant: str) -> str:
+    return os.path.join(_LOCK_DIR, f"forexbot_{symbol.lower()}_{variant.lower()}.lock")
+
+
 def _make_paths(symbol: str, variant: str = "cwider") -> tuple:
-    """Return (STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE) for symbol+variant."""
+    """Return (STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE, HEARTBEAT_FILE) for symbol+variant."""
     slug = symbol.lower()
     v    = variant.lower()
     base_magic = SYMBOL_MAGIC.get(symbol, 555000 + abs(hash(symbol)) % 999)
@@ -197,22 +219,24 @@ def _make_paths(symbol: str, variant: str = "cwider") -> tuple:
             os.path.join(_BASE_DIR, f"{slug}_cwider_state.json"),
             os.path.join(_BASE_DIR, f"forex_{slug}_cwider.log"),
             os.path.join(_BASE_DIR, f"fills_log_{slug}_cwider.csv"),
-            os.path.join(_BASE_DIR, f"{slug}_cwider.lock"),
+            _lock_path(symbol, v),
             magic,
             os.path.join(_BASE_DIR, f"EQUITY_STOP_{symbol.upper()}"),
+            os.path.join(_BASE_DIR, f"HEARTBEAT_{symbol.upper()}"),
         )
     return (
         os.path.join(_BASE_DIR, f"STOP_{symbol.upper()}_{v.upper()}"),
         os.path.join(_BASE_DIR, f"{slug}_{v}_state.json"),
         os.path.join(_BASE_DIR, f"forex_{slug}_{v}.log"),
         os.path.join(_BASE_DIR, f"fills_log_{slug}_{v}.csv"),
-        os.path.join(_BASE_DIR, f"{slug}_{v}.lock"),
+        _lock_path(symbol, v),
         magic,
         os.path.join(_BASE_DIR, f"EQUITY_STOP_{symbol.upper()}_{v.upper()}"),
+        os.path.join(_BASE_DIR, f"HEARTBEAT_{symbol.upper()}_{v.upper()}"),
     )
 
 # Initialised with defaults; overwritten in main() after argparse
-STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE = _make_paths(SYMBOL)
+STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE, HEARTBEAT_FILE = _make_paths(SYMBOL)
 
 
 
@@ -1063,6 +1087,30 @@ class GoldCWiderBot:
             f"trades_today={self.day_trade_count}")
 
     # ─────────────────────────────────────────────────────────────────────
+    # Heartbeat file (logging-module-independent liveness signal)
+    # ─────────────────────────────────────────────────────────────────────
+    def _write_heartbeat(self):
+        """Write the current UTC timestamp to HEARTBEAT_FILE every loop iteration.
+
+        [WHY] A real incident showed the logging RotatingFileHandler silently
+        stop writing the .log file (no exception) while the process kept running
+        and trading correctly for hours (proven by stdout/console + real OPEN/
+        CLOSE-SL events). That blinded watchdog.ps1 (which parsed "== STATUS =="
+        from the same log file) into thinking a perfectly healthy bot was hung,
+        risking an unnecessary kill+restart.
+
+        This heartbeat is written with a plain open()/write(), NOT through the
+        logging module, so it cannot fail the same silent way. watchdog.ps1
+        checks this file's mtime instead of parsing the log. A write failure
+        (disk full/permission) is caught here and must NOT stop the bot trading.
+        """
+        try:
+            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+                f.write(datetime.now(timezone.utc).isoformat())
+        except Exception as exc:
+            self.log.debug(f"_write_heartbeat: failed: {exc}")
+
+    # ─────────────────────────────────────────────────────────────────────
     # Main loop
     # ─────────────────────────────────────────────────────────────────────
     def run(self):
@@ -1088,6 +1136,7 @@ class GoldCWiderBot:
         while True:
             try:
                 now_ms = int(time.time() * 1000)
+                self._write_heartbeat()
 
                 candles = self._fetch_closed_candles(limit=5)
                 added = self.buf.push(candles) if candles else 0
@@ -1141,7 +1190,7 @@ class GoldCWiderBot:
 def main():
     global SYMBOL, VARIANT_TAG, SL_ATR, TP_ATR, ADX_MIN, RISK_PER_TRADE_PCT
     global TIMEFRAME, MAX_HOLD_BARS, HISTORY_BARS
-    global STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE
+    global STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE, HEARTBEAT_FILE
     ap = argparse.ArgumentParser(
         description="CWiderBot — Hybrid Trend-Pullback (C_wider) — DEMO forward-test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1194,7 +1243,7 @@ def main():
     SL_ATR      = args.sl_atr
     TP_ATR      = args.tp_atr
     ADX_MIN     = int(args.adx_min)
-    STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE = _make_paths(SYMBOL, VARIANT_TAG)
+    STOP_FILE, STATE_FILE, LOG_FILE, FILLS_LOG_FILE, LOCK_FILE, MAGIC_NUMBER, EQUITY_STOP_FILE, HEARTBEAT_FILE = _make_paths(SYMBOL, VARIANT_TAG)
 
     # Timeframe-driven config
     tf = args.timeframe.lower()

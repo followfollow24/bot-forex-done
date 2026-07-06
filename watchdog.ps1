@@ -1,39 +1,58 @@
 # =============================================================================
-# watchdog.ps1 - Defense layer #2 (external) for forex_live_bot_gold_cwider.py
+# watchdog.ps1 - External defense layer for forex_live_bot_gold_cwider.py
 # =============================================================================
-# Check STATUS line of 2 bots. If stale beyond threshold -> kill that process
-# (only the stale one, leave others alone) then restart with same args as deploy.ps1
+# Checks each bot's HEARTBEAT_<SYMBOL>_<VARIANT> file (a plain-text timestamp
+# written every main-loop iteration, independent of the Python logging module).
+# If a bot's heartbeat is stale beyond its threshold, kill that specific process
+# and restart it with the same args used by deploy.ps1. Only the stale variant
+# is touched -- others are left alone.
 #
-# Why this layer exists (even after fixing timeout inside bot):
-#   Layer 1 (_call_with_timeout in .py) converts MT5-IPC-hang into TimeoutError
-#   to trigger reconnect -- but the hung thread is NOT killed (Python can't kill
-#   blocking C-calls). If IPC dies deeply, reconnect may not help because the old
-#   handle is still stuck in the process. The only reliable fix is to kill the
-#   whole process and let Windows reclaim resources -- that is this script's job.
+# [FIX b] Why heartbeat file instead of parsing "== STATUS ==" from the log:
+#   A real incident showed the RotatingFileHandler silently stop writing to the
+#   .log file while the actual bot process kept running and trading correctly
+#   for hours afterward (proven by successful OPEN/CLOSE-SL events and console
+#   output). Watchdog logic based on the log file's last STATUS line would have
+#   seen "stale" and wrongly killed a perfectly healthy bot. HEARTBEAT_FILE is
+#   written with a direct open()/write() call with no logging module involved,
+#   so it cannot fail the same silent way -- if the process is alive and looping,
+#   the heartbeat file's mtime updates every poll_interval_sec (default 30s),
+#   regardless of whatever caused the file-log handler issue.
+#
+# Why this layer exists at all (even with the in-bot MT5-call timeout):
+#   Layer 1 (_call_with_timeout in the .py) converts an MT5 IPC hang into a
+#   TimeoutError to trigger reconnect -- but the truly-hung thread is never
+#   killed (Python cannot kill a blocking C-extension call). If the IPC is
+#   deeply broken, reconnect may not help since the old handle is still stuck
+#   inside the process. The only guaranteed fix is killing the whole process so
+#   Windows reclaims the resource -- that is this script's job.
 #
 # Usage:
-#   Schedule via Task Scheduler every 5-10 minutes (see setup_watchdog_task.ps1)
+#   Run via Task Scheduler every 5 minutes (see setup_watchdog_task.ps1)
 #   Manual test: cd C:\Users\Administrator\Desktop; .\watchdog.ps1
 #
-# Caution:
-#   - Do not run more often than every 5 minutes (avoid race with deploy.ps1)
-#   - If deploy.ps1 is running, watchdog may see stale log during restart and
-#     restart again -- low impact (just double-restart) but disable Task if worried
+# Cautions:
+#   - Do not run more often than every 5 minutes (avoid racing deploy.ps1,
+#     which stops every forex bot process).
+#   - If deploy.ps1 happens to run at the same moment, watchdog may see a
+#     temporarily stale heartbeat and restart redundantly -- low impact (just a
+#     redundant restart), but disable the Task before running deploy.ps1 if worried.
 # =============================================================================
 
 $DESKTOP = "C:\Users\Administrator\Desktop"  # hardcoded: task runs as SYSTEM, $env:USERPROFILE is wrong
-$SYMBOL  = "xauusd"
+$SYMBOL  = "xauusd"                          # must match the slug _make_paths() uses (symbol.lower())
 
-# Bot definitions -- args must match deploy.ps1 exactly
+# Bot definitions -- args must match deploy.ps1 exactly.
+# --allow-real is required: without it the bot exits immediately on a non-demo
+# (Real Cent) account, leaving any open position unmonitored on every restart.
 $bots = @(
     @{
         Variant      = "adx20tp7"
-        StaleMinutes = 30
+        StaleMinutes = 5   # heartbeat updates every poll_interval_sec (~30s) -- 5 min is a generous buffer
         Args         = "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     },
     @{
         Variant      = "adx18tp7"
-        StaleMinutes = 30
+        StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     }
 )
@@ -50,42 +69,22 @@ WLog "=== watchdog run start ==="
 
 foreach ($bot in $bots) {
     $variant = $bot.Variant
-    $logFile = "$DESKTOP\forex_${SYMBOL}_$variant.log"
+    $heartbeatFile = "$DESKTOP\HEARTBEAT_$($SYMBOL.ToUpper())_$($variant.ToUpper())"
 
-    if (-not (Test-Path $logFile)) {
-        WLog "[$variant] log not found ($logFile) -- skipping (bot may not have started yet)"
-        continue
-    }
-
-    # Find latest STATUS line in last 300 lines
-    # Do NOT use (Get-Item).LastWriteTime alone -- error-loops (log.error spam during
-    # reconnect) keep the file "active" even when main loop is frozen. Must check
-    # STATUS line specifically because it means the loop actually completed a cycle.
-    $statusLine = Get-Content $logFile -Tail 300 -ErrorAction SilentlyContinue |
-                  Select-String "== STATUS ==" | Select-Object -Last 1
-
-    if (-not $statusLine) {
-        WLog "[$variant] no STATUS line in last 300 lines -- treating as stale"
+    if (-not (Test-Path $heartbeatFile)) {
+        WLog "[$variant] heartbeat file not found ($heartbeatFile) -- treating as STALE (never started, or running from a different folder)"
         $staleMin = 9999
     } else {
-        # Timestamp format: "2026-07-03 01:26:00,123 [INFO] == STATUS == ..."
-        $tsStr = ($statusLine.Line -split '\[')[0].Trim()
-        try {
-            $tsClean = $tsStr.Substring(0, 19)
-            $ts = [datetime]::ParseExact($tsClean, "yyyy-MM-dd HH:mm:ss", $null)
-            $staleMin = (New-TimeSpan -Start $ts -End (Get-Date)).TotalMinutes
-        } catch {
-            WLog "[$variant] cannot parse timestamp from '$tsStr' -- treating as stale (fail-safe)"
-            $staleMin = 9999
-        }
+        $lastWrite = (Get-Item $heartbeatFile).LastWriteTimeUtc
+        $staleMin  = (New-TimeSpan -Start $lastWrite -End (Get-Date).ToUniversalTime()).TotalMinutes
     }
 
     if ($staleMin -le $bot.StaleMinutes) {
-        WLog "[$variant] OK -- STATUS $([math]::Round($staleMin,1)) min ago (threshold=$($bot.StaleMinutes))"
+        WLog "[$variant] OK -- heartbeat $([math]::Round($staleMin,1)) min ago (threshold=$($bot.StaleMinutes))"
         continue
     }
 
-    WLog "[$variant] STALE! $([math]::Round($staleMin,1)) min > threshold $($bot.StaleMinutes) -- restarting"
+    WLog "[$variant] STALE! $([math]::Round($staleMin,1)) min > threshold $($bot.StaleMinutes) min -- restarting"
 
     # Find process by CommandLine (safer than killing all python.exe)
     $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
@@ -98,7 +97,7 @@ foreach ($bot in $bots) {
         }
         Start-Sleep -Seconds 5
     } else {
-        WLog "[$variant] no process found (already dead) -- starting fresh"
+        WLog "[$variant] no running process found (already dead silently) -- starting fresh"
     }
 
     Start-Process python -ArgumentList $bot.Args -WorkingDirectory $DESKTOP -WindowStyle Normal
