@@ -147,6 +147,89 @@ def report_and_save(df, symbol, tf_key, save=True):
     return df
 
 
+DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+TRADE_MODE = {0: "DISABLED", 1: "LONGONLY", 2: "SHORTONLY", 3: "CLOSEONLY", 4: "FULL"}
+
+SWAP_MODE = {
+    0: "DISABLED", 1: "POINTS", 2: "CURRENCY_SYMBOL", 3: "CURRENCY_MARGIN",
+    4: "CURRENCY_DEPOSIT", 5: "INTEREST_CURRENT", 6: "INTEREST_OPEN",
+    7: "REOPEN_CURRENT", 8: "REOPEN_BID",
+}
+
+
+def _fmt_session(r):
+    """Best-effort extract (from,to) from a symbol_info_session_* result."""
+    if not r:
+        return None
+    for a, b in (("from", "to"), ("frm", "to"), ("From", "To")):
+        f, t = getattr(r, a, None), getattr(r, b, None)
+        if f is not None and t is not None:
+            return f, t
+    try:
+        return r[0], r[1]
+    except Exception:
+        return str(r)
+
+
+def dump_sessions(symbol):
+    """Report trade sessions per weekday so weekend restrictions are visible."""
+    fn = getattr(mt5, "symbol_info_session_trade", None)
+    if fn is None:
+        print("  (symbol_info_session_trade not in this MT5 package -- cannot check sessions)")
+        return
+    for day in range(7):
+        segs = []
+        for s in range(8):
+            try:
+                r = fn(symbol, day, s)
+            except Exception:
+                r = None
+            got = _fmt_session(r)
+            if not got:
+                break
+            segs.append(got)
+        label = "TRADEABLE" if segs else "-- no trade session --"
+        print(f"  {DOW[day]:9s}: {label}   {segs if segs else ''}")
+
+
+def print_symbol_info(symbol):
+    """Dump cost/spec fields needed for a realistic backtest cost model."""
+    si = mt5.symbol_info(symbol)
+    if si is None:
+        print(f"[ERROR] symbol_info({symbol}) is None: {mt5.last_error()}")
+        return
+    point = si.point
+    spread_price = si.spread * point  # spread is in points
+    print("\n" + "=" * 64)
+    print(f"  SYMBOL INFO: {symbol}   (*** use THESE for backtest cost, not Binance ***)")
+    print("=" * 64)
+    print(f"  tradeable      : trade_mode={TRADE_MODE.get(si.trade_mode, si.trade_mode)}")
+    print(f"  bid / ask      : {si.bid} / {si.ask}")
+    print(f"  spread         : {si.spread} points  (= {spread_price:.5f} price)  float={si.spread_float}")
+    print(f"  digits / point : {si.digits} / {point}")
+    print(f"  contract_size  : {si.trade_contract_size}")
+    print(f"  tick_size/val  : {si.trade_tick_size} / {si.trade_tick_value}  "
+          f"(profit={si.trade_tick_value_profit} loss={si.trade_tick_value_loss})")
+    print(f"  volume min/max : {si.volume_min} / {si.volume_max}  step={si.volume_step}")
+    print(f"  currencies     : base={si.currency_base} profit={si.currency_profit} margin={si.currency_margin}")
+    print("  --- SWAP (overnight financing -- CRITICAL for held-overnight trend trades) ---")
+    print(f"  swap_mode      : {SWAP_MODE.get(si.swap_mode, si.swap_mode)}  "
+          f"(how swap_long/short are denominated)")
+    print(f"  swap_long      : {si.swap_long}")
+    print(f"  swap_short     : {si.swap_short}")
+    print(f"  rollover3days  : {DOW[si.swap_rollover3days] if 0 <= si.swap_rollover3days < 7 else si.swap_rollover3days}"
+          f"  (day charged 3x swap)")
+    print("  --- TRADING SESSIONS (per weekday; checks weekend availability) ---")
+    dump_sessions(symbol)
+    print("=" * 64)
+    print("  NOTE swap_mode=POINTS -> swap_long/short are in points/lot/day:")
+    print("       money/lot/day = swap_x * point * contract_size.")
+    print("       swap_mode=PERCENT/INTEREST -> annual % on notional. Convert before")
+    print("       putting into the backtest, and apply on EVERY overnight bar held.")
+    print("=" * 64)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Pull MT5 OHLC history -> backtest CSV")
     ap.add_argument("--symbol", default=None, help="exact symbol name (e.g. BTCUSD, BTCUSDc); if omitted, discover")
@@ -155,6 +238,7 @@ def main():
     ap.add_argument("--start", default="2018-01-01", help="YYYY-MM-DD")
     ap.add_argument("--end", default=None, help="YYYY-MM-DD (default: today)")
     ap.add_argument("--list", action="store_true", help="only list symbols matching --match, then exit")
+    ap.add_argument("--info", action="store_true", help="print symbol_info (spread/swap/sessions) and exit; no history pull")
     args = ap.parse_args()
 
     if not mt5.initialize():
@@ -188,7 +272,13 @@ def main():
     print(f"\n>>> using symbol: {symbol}")
 
     if not mt5.symbol_select(symbol, True):
-        print(f"[WARN] symbol_select({symbol}) failed: {mt5.last_error()} (pull may return nothing)")
+        print(f"[WARN] symbol_select({symbol}) failed: {mt5.last_error()} (info/pull may be incomplete)")
+
+    # ---- INFO mode: spread/swap/sessions only, no history needed ----
+    if args.info:
+        print_symbol_info(symbol)
+        mt5.shutdown()
+        return
 
     start = datetime.strptime(args.start, "%Y-%m-%d")
     end = datetime.strptime(args.end, "%Y-%m-%d") if args.end else datetime.now()
