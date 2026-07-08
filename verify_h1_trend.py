@@ -65,7 +65,7 @@ print("%-17s %9s %9s %9s %6s   %-9s %s"
 print("-" * 92)
 for k in range(n_h1):
     dt = datetime.utcfromtimestamp(h1_t[k])
-    if dt < datetime(2026, 7, 6) or dt >= datetime(2026, 7, 7, 12):
+    if dt < datetime(2026, 7, 7, 12):
         continue
     ef, es, ad, cc = ema_f[k], ema_s[k], adx_a[k], h1_c[k]
     if np.isnan(ef) or np.isnan(es) or np.isnan(ad):
