@@ -40,9 +40,21 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 3) `
     -MultipleInstances IgnoreNew
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Settings $settings -RunLevel Highest -User "SYSTEM" | Out-Null
+# Run as the INTERACTIVE logged-on user (NOT SYSTEM). Root cause of the
+# 2026-07-08 incident: SYSTEM launches the restarted bot into session 0, which
+# cannot attach to the MT5 terminal running in the interactive RDP session ->
+# mt5.initialize() fails -> the bot dies before writing a heartbeat -> watchdog
+# restarts every 5 min forever (confirmed 17h crash-loop, stale counter climbing
+# 800->805 min). Interactive logon spawns the bot in the SAME session as MT5, so
+# restarts actually stick. This also matches how the bots must run anyway (they
+# need the interactive MT5 GUI terminal), so no coverage is lost: if the user is
+# logged off, neither the bots nor MT5 run, and no watchdog is needed.
+$principal = New-ScheduledTaskPrincipal -UserId "Administrator" `
+    -LogonType Interactive -RunLevel Highest
 
-Write-Host "ตั้ง Task Scheduler '$TaskName' สำเร็จ — จะรัน watchdog.ps1 ทุก 5 นาที" -ForegroundColor Green
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+    -Settings $settings -Principal $principal | Out-Null
+
+Write-Host "ตั้ง Task Scheduler '$TaskName' สำเร็จ — จะรัน watchdog.ps1 ทุก 5 นาที (Interactive/Administrator)" -ForegroundColor Green
 Write-Host "ตรวจสอบ: Get-ScheduledTask -TaskName '$TaskName'" -ForegroundColor Cyan
 Write-Host "ปิด/ลบ:  Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false" -ForegroundColor Cyan

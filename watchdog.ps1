@@ -38,7 +38,7 @@
 #     redundant restart), but disable the Task before running deploy.ps1 if worried.
 # =============================================================================
 
-$DESKTOP = "C:\Users\Administrator\Desktop"  # hardcoded: task runs as SYSTEM, $env:USERPROFILE is wrong
+$DESKTOP = "C:\Users\Administrator\Desktop"  # hardcoded & explicit: task now runs as interactive Administrator (see setup_watchdog_task.ps1) so restarts land in the MT5 session
 $SYMBOL  = "xauusd"                          # must match the slug _make_paths() uses (symbol.lower())
 
 # Bot definitions -- args must match deploy.ps1 exactly.
