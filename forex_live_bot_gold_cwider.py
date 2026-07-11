@@ -179,9 +179,19 @@ SYMBOL_MAGIC = {
     "XAUUSD": 555003,
     "EURUSD": 555001,
     "GBPUSD": 555002,
+    # BTCUSDc uses a distinct 666000-series base (not 555xxx) so a magic-number
+    # collision with any gold variant is impossible even if offsets ever overlap.
+    "BTCUSDc": 666000,
 }
 # Magic offset per variant — keeps each symbol+variant pair unique so MT5 can tell positions apart
-VARIANT_MAGIC_OFFSET = {"cwider": 0, "tp7": 10, "tp8": 20, "mix_a": 30, "mix_b": 40, "adx20tp7": 50, "m5tp7": 60, "m5adx18": 70, "adx18tp7": 80}
+VARIANT_MAGIC_OFFSET = {
+    "cwider": 0, "tp7": 10, "tp8": 20, "mix_a": 30, "mix_b": 40,
+    "adx20tp7": 50, "m5tp7": 60, "m5adx18": 70, "adx18tp7": 80,
+    # BTC-HF walk-forward-validated variants (see project_btc_hf_edge.md):
+    #   btc_cons = ADX15/SL4/TP12 (conservative, 27-window PF>1 15/18)
+    #   btc_aggr = ADX12/SL2.5/TP7.5 (aggressive, 27-window PF>1 17/18)
+    "btc_cons": 0, "btc_aggr": 10,
+}
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1305,6 +1315,25 @@ def main():
 
     if args.capital > 0:
         cfg.total_capital_usd = args.capital
+
+    # [BTC-HF] BTCUSDc pip_size/pip_value are NOT in ForexConfig's default dicts
+    # (that dataclass only ships FX-pair + XAUUSD entries) and, unlike XAUUSD,
+    # SYMBOL is passed here as the EXACT real broker symbol ("BTCUSDc", already
+    # confirmed live — see reference_btcusdc_specs.md), so resolve_symbol() will
+    # hit its exact-match branch and self.bsym == SYMBOL. That means
+    # cfg.add_symbol_alias() in connect() is SKIPPED (it only fires when
+    # bsym != SYMBOL, as happens for gold's XAUUSD -> XAUUSDc), so "BTCUSDc"
+    # must be seeded into cfg.pip_size directly here or get_pip_size() falls
+    # back to the wrong default (0.0001, an FX-pair pip size, nonsensical for
+    # a $50k+ asset). Convention: 1 "pip" = $1 of BTC price movement (matches
+    # the validated backtest — btc_walkforward.PIP_SIZE=1.0/PIP_VALUE=0.01 —
+    # so live sizing reproduces the exact same $-per-lot-per-$1-move math the
+    # walk-forward numbers were computed with). Live pip VALUE still comes
+    # from get_pip_value_live() (real MT5 trade_tick_value), matching gold's
+    # already-fixed approach — pip_value_usd_approx below is fallback-only.
+    if SYMBOL == "BTCUSDc":
+        cfg.pip_size["BTCUSDc"] = 1.0
+        cfg.pip_value_usd_approx["BTCUSDc"] = 0.01
 
     if not cfg.dry_run and not _cfg_has_credentials(cfg):
         print("[ERROR] แพ็กเกจ MetaTrader5 ใช้งานไม่ได้ — ต้องรันบน Windows ที่ติดตั้ง "
