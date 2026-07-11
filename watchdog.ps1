@@ -39,21 +39,37 @@
 # =============================================================================
 
 $DESKTOP = "C:\Users\Administrator\Desktop"  # hardcoded & explicit: task now runs as interactive Administrator (see setup_watchdog_task.ps1) so restarts land in the MT5 session
-$SYMBOL  = "xauusd"                          # must match the slug _make_paths() uses (symbol.lower())
 
 # Bot definitions -- args must match deploy.ps1 exactly.
 # --allow-real is required: without it the bot exits immediately on a non-demo
 # (Real Cent) account, leaving any open position unmonitored on every restart.
+# Symbol is per-bot now (was a single global $SYMBOL) since BTC-HF variants use
+# a different symbol (BTCUSDc) than gold (xauusd) -- must match the slug
+# _make_paths() uses (symbol.lower()) for each bot's own heartbeat filename.
 $bots = @(
     @{
+        Symbol       = "xauusd"
         Variant      = "adx20tp7"
         StaleMinutes = 5   # heartbeat updates every poll_interval_sec (~30s) -- 5 min is a generous buffer
         Args         = "forex_live_bot_gold_cwider.py --variant-tag adx20tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 20 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     },
     @{
+        Symbol       = "xauusd"
         Variant      = "adx18tp7"
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --variant-tag adx18tp7 --sl-atr 3.0 --tp-atr 7.0 --adx-min 18 --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_cons"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_cons --sl-atr 4.0 --tp-atr 12.0 --adx-min 15 --timeframe 15m --max-positions 1 --risk 0.20 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_aggr"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_aggr --sl-atr 2.5 --tp-atr 7.5 --adx-min 12 --timeframe 15m --max-positions 1 --risk 0.20 --allow-real"
     }
 )
 
@@ -69,7 +85,7 @@ WLog "=== watchdog run start ==="
 
 foreach ($bot in $bots) {
     $variant = $bot.Variant
-    $heartbeatFile = "$DESKTOP\HEARTBEAT_$($SYMBOL.ToUpper())_$($variant.ToUpper())"
+    $heartbeatFile = "$DESKTOP\HEARTBEAT_$($bot.Symbol.ToUpper())_$($variant.ToUpper())"
 
     if (-not (Test-Path $heartbeatFile)) {
         WLog "[$variant] heartbeat file not found ($heartbeatFile) -- treating as STALE (never started, or running from a different folder)"
@@ -107,4 +123,4 @@ foreach ($bot in $bots) {
 
 $runningCount = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
                   Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }).Count
-WLog "=== watchdog run complete -- python bots running: $runningCount / 2 ==="
+WLog "=== watchdog run complete -- python bots running: $runningCount / 4 ==="
