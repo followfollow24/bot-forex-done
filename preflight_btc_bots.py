@@ -32,7 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from forex_live_bot_gold_cwider import _make_paths, SYMBOL_MAGIC, VARIANT_MAGIC_OFFSET
 
 EXPECTED_LOGIN = 160075275
-SYMBOL = "BTCUSDc"
+SYMBOL = "BTCUSDc"          # exact broker casing -- required for all MT5 API calls
+CANONICAL_SYMBOL = "BTCUSDC"  # matches SYMBOL_MAGIC's key (post-.upper() form the
+# live bot always uses internally -- see forex_live_bot_gold_cwider.py's fix
+# 2026-07-11 for why this must NOT just be SYMBOL)
 
 VARIANTS = [
     ("btc_cons", dict(adx=15, sl=4.0, tp=12.0)),
@@ -113,7 +116,7 @@ def main():
     # ── checks 2/3/5: order roundtrip + telegram, per NEW magic number ──
     print(f"\nCHECKS 2/3/5 [order open/close + Telegram] per variant:")
     for name, cfg in VARIANTS:
-        magic = SYMBOL_MAGIC[SYMBOL] + VARIANT_MAGIC_OFFSET[name]
+        magic = SYMBOL_MAGIC[CANONICAL_SYMBOL] + VARIANT_MAGIC_OFFSET[name]
         print(f"\n  --- {name}  (magic={magic}) ---")
         lot = info.volume_min
         tick = mt5.symbol_info_tick(SYMBOL)
@@ -163,7 +166,12 @@ def main():
     gold_paths = _make_paths("XAUUSD", "adx20tp7")
     all_paths = {"gold_adx20tp7": gold_paths}
     for name, _ in VARIANTS:
-        all_paths[name] = _make_paths(SYMBOL, name)
+        # CANONICAL_SYMBOL here, not SYMBOL -- must match what the real live
+        # bot's main() actually calls _make_paths() with (SYMBOL.upper()),
+        # otherwise this would report a different (wrong, fallback-hashed)
+        # magic number than what really gets used. File paths themselves are
+        # unaffected (slug = symbol.lower() normalizes either casing the same).
+        all_paths[name] = _make_paths(CANONICAL_SYMBOL, name)
     labels = ["STOP", "STATE", "LOG", "FILLS", "LOCK", "MAGIC", "EQUITY_STOP", "HEARTBEAT"]
     seen = {}
     collision = False
