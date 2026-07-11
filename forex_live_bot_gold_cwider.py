@@ -181,7 +181,19 @@ SYMBOL_MAGIC = {
     "GBPUSD": 555002,
     # BTCUSDc uses a distinct 666000-series base (not 555xxx) so a magic-number
     # collision with any gold variant is impossible even if offsets ever overlap.
-    "BTCUSDc": 666000,
+    # KEY IS UPPERCASE ("BTCUSDC") — main() always does SYMBOL=args.symbol.upper(),
+    # so a mixed-case key here ("BTCUSDc") would NEVER match at runtime and this
+    # dict lookup would silently fall through to the hash-based fallback magic
+    # number instead (caught live 2026-07-11: real bot startup banner showed
+    # Magic=555754, not 666xxx -- both bots killed within seconds of learning
+    # this before any signal could fire, no trades were placed). Fixed by using
+    # the same canonical-symbol + alias-copy pattern gold already uses (XAUUSD
+    # canonical -> XAUUSDc alias via add_symbol_alias in connect()): SYMBOL_MAGIC
+    # key AND the pip_size override below both use "BTCUSDC" (post-upper()
+    # canonical); resolve_symbol()'s prefix-match branch is case-insensitive
+    # (compares s.upper()) so it still correctly resolves to the real broker
+    # symbol "BTCUSDc" and add_symbol_alias() copies pip_size across automatically.
+    "BTCUSDC": 666000,
 }
 # Magic offset per variant — keeps each symbol+variant pair unique so MT5 can tell positions apart
 VARIANT_MAGIC_OFFSET = {
@@ -1317,23 +1329,24 @@ def main():
         cfg.total_capital_usd = args.capital
 
     # [BTC-HF] BTCUSDc pip_size/pip_value are NOT in ForexConfig's default dicts
-    # (that dataclass only ships FX-pair + XAUUSD entries) and, unlike XAUUSD,
-    # SYMBOL is passed here as the EXACT real broker symbol ("BTCUSDc", already
-    # confirmed live — see reference_btcusdc_specs.md), so resolve_symbol() will
-    # hit its exact-match branch and self.bsym == SYMBOL. That means
-    # cfg.add_symbol_alias() in connect() is SKIPPED (it only fires when
-    # bsym != SYMBOL, as happens for gold's XAUUSD -> XAUUSDc), so "BTCUSDc"
-    # must be seeded into cfg.pip_size directly here or get_pip_size() falls
-    # back to the wrong default (0.0001, an FX-pair pip size, nonsensical for
-    # a $50k+ asset). Convention: 1 "pip" = $1 of BTC price movement (matches
-    # the validated backtest — btc_walkforward.PIP_SIZE=1.0/PIP_VALUE=0.01 —
-    # so live sizing reproduces the exact same $-per-lot-per-$1-move math the
-    # walk-forward numbers were computed with). Live pip VALUE still comes
-    # from get_pip_value_live() (real MT5 trade_tick_value), matching gold's
-    # already-fixed approach — pip_value_usd_approx below is fallback-only.
-    if SYMBOL == "BTCUSDc":
-        cfg.pip_size["BTCUSDc"] = 1.0
-        cfg.pip_value_usd_approx["BTCUSDc"] = 0.01
+    # (that dataclass only ships FX-pair + XAUUSD entries). SYMBOL here is
+    # ALWAYS the post-.upper() canonical form ("BTCUSDC" — see
+    # SYMBOL = args.symbol.upper() above), which never exact-matches the real
+    # broker symbol "BTCUSDc" (mixed case). resolve_symbol()'s prefix-match
+    # branch handles this case-insensitively and resolves self.bsym to the
+    # real "BTCUSDc", after which connect() calls add_symbol_alias(SYMBOL,
+    # self.bsym) — i.e. add_symbol_alias("BTCUSDC", "BTCUSDc") — which copies
+    # this canonical entry across automatically, same pattern as gold's
+    # XAUUSD -> XAUUSDc. Convention: 1 "pip" = $1 of BTC price movement
+    # (matches the validated backtest — btc_walkforward.PIP_SIZE=1.0/
+    # PIP_VALUE=0.01 — so live sizing reproduces the exact same
+    # $-per-lot-per-$1-move math the walk-forward numbers were computed
+    # with). Live pip VALUE still comes from get_pip_value_live() (real MT5
+    # trade_tick_value), matching gold's already-fixed approach —
+    # pip_value_usd_approx below is fallback-only.
+    if SYMBOL == "BTCUSDC":
+        cfg.pip_size["BTCUSDC"] = 1.0
+        cfg.pip_value_usd_approx["BTCUSDC"] = 0.01
 
     if not cfg.dry_run and not _cfg_has_credentials(cfg):
         print("[ERROR] แพ็กเกจ MetaTrader5 ใช้งานไม่ได้ — ต้องรันบน Windows ที่ติดตั้ง "
