@@ -128,6 +128,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from forex_config import ForexConfig
 from forex_indicators import add_indicators, build_data_dict
 from forex_hybrid_strategy import HybridTrendPullback
+from gold_regime_live_strategy import RegimeFilteredHybridLive
 from forex_executor import MT5Connector, ForexOrderExecutor, _cfg_has_credentials
 
 
@@ -203,6 +204,12 @@ VARIANT_MAGIC_OFFSET = {
     #   btc_cons = ADX15/SL4/TP12 (conservative, 27-window PF>1 15/18)
     #   btc_aggr = ADX12/SL2.5/TP7.5 (aggressive, 27-window PF>1 17/18)
     "btc_cons": 0, "btc_aggr": 10,
+    # Gold regime filter (see gold_regime_live_strategy.py): frozen ADX>22 +
+    # ADX-rising + EMA-gap>1.2xATR(H1) on top of the same SL3/TP7 M15 entry.
+    # Real-engine validated: 2,848 trades/13yr, PF=1.29, MaxDD=10.3%, WF-A
+    # yearly PF>1 12/14yr, half-split H1=1.16->H2=1.37 (no overfit signature).
+    # Offset 100 is well clear of every other gold offset (0-80) on purpose.
+    "regime22": 100,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1236,6 +1243,12 @@ def main():
                     help=f"TP = N × ATR (default {TP_ATR} = C_wider). TP7 variant ใช้ 7.0")
     ap.add_argument("--adx-min", type=float, default=ADX_MIN,
                     help=f"ADX threshold สำหรับ H1 trend filter (default {ADX_MIN}). adx20tp7 ใช้ 20")
+    ap.add_argument("--regime-filter", action="store_true",
+                    help="ใช้ RegimeFilteredHybridLive แทน HybridTrendPullback ธรรมดา -- เพิ่มเงื่อนไข "
+                         "ADX rising + |EMA50-EMA200|>1.2xATR(H1) บน H1 trend array เดิม (ADX_MIN "
+                         "threshold ยังมาจาก --adx-min ตามปกติ, ค่าอื่นทั้งหมดไม่เปลี่ยน). "
+                         "Real-engine validated 2026-07-12: 2,848 trades/13yr PF=1.29 MaxDD=10.3%% "
+                         "WF-A 12/14yr. ดู gold_regime_live_strategy.py. ใช้กับ --variant-tag regime22.")
     ap.add_argument("--max-positions", type=int, default=1,
                     help="จำนวน position พร้อมกันสูงสุดต่อ instance (default 1 = พฤติกรรมเดิม). "
                          "แต่ละ position independent (own entry/SL/TP/lot/bars).")
@@ -1299,6 +1312,12 @@ def main():
         MAX_HOLD_BARS = 64     # 64 × 15min = 960min = 16h
         HISTORY_BARS  = 900
         strategy_cls  = HybridTrendPullback
+
+    if args.regime_filter:
+        # Swaps only the H1 trend array construction (adds frozen ADX-rising +
+        # EMA-gap>1.2xATR conditions on top of the same ADX_MIN threshold) --
+        # M15 entry/SL/TP/cost model untouched. See gold_regime_live_strategy.py.
+        strategy_cls = RegimeFilteredHybridLive
 
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
