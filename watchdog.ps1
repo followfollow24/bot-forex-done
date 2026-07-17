@@ -70,6 +70,15 @@ $bots = @(
         Variant      = "btc_aggr"
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_aggr --sl-atr 2.5 --tp-atr 7.5 --adx-min 12 --timeframe 15m --max-positions 1 --risk 0.20 --allow-real"
+    },
+    @{
+        Symbol       = "xauusd"
+        Variant      = "regime22"
+        StaleMinutes = 5
+        # Gold regime filter (gold_regime_live_strategy.py): frozen ADX>22 + ADX-rising +
+        # EMA-gap>1.2xATR(H1) on top of the same SL3/TP7 M15 entry. Real-engine validated
+        # 2026-07-12: 2,848 trades/13yr, PF=1.29, MaxDD=10.3%, WF-A 12/14yr. magic=555103.
+        Args         = "forex_live_bot_gold_cwider.py --variant-tag regime22 --sl-atr 3.0 --tp-atr 7.0 --adx-min 22 --regime-filter --timeframe 15m --max-positions 3 --risk 0.30 --allow-real"
     }
 )
 
@@ -123,4 +132,4 @@ foreach ($bot in $bots) {
 
 $runningCount = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
                   Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }).Count
-WLog "=== watchdog run complete -- python bots running: $runningCount / 4 ==="
+WLog "=== watchdog run complete -- python bots running: $runningCount / 5 ==="

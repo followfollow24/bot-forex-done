@@ -1,22 +1,25 @@
 # deploy.ps1 -- pull latest code from GitHub and restart bots
 # Usage: cd Desktop; .\deploy.ps1
-# Deploys 4 variants on Real Cent account (--allow-real):
+# Deploys 5 variants on Real Cent account (--allow-real):
 #   gold:  adx20tp7, adx18tp7        (XAUUSDc, risk 0.30%, validated live since 2026-07-04)
 #   BTC-HF: btc_cons, btc_aggr        (BTCUSDc, risk 0.20%, WF+27-window validated,
-#                                       pre-flight-tested 2026-07-11, 0 live trades before this deploy)
+#                                       pre-flight-tested 2026-07-11)
+#   gold regime22 (XAUUSDc, risk 0.30%, frozen ADX>22+ADX-rising+EMA-gap regime
+#                  filter on real M15 engine: 2,848 trades/13yr PF=1.29 MaxDD=10.3%
+#                  WF-A 12/14yr, pre-flight-tested 2026-07-17, 0 live trades before
+#                  this deploy). magic=555103.
 # m5tp7 is permanently retired -- not started here.
 
 $DESKTOP = "$env:USERPROFILE\Desktop"
 $REPO    = "$DESKTOP\bot_repo"
 
-Write-Host "=== Bot Deploy Script (4 variants: gold x2 + BTC-HF x2) ===" -ForegroundColor Cyan
+Write-Host "=== Bot Deploy Script (5 variants: gold x3 + BTC-HF x2) ===" -ForegroundColor Cyan
 
 # 1. Check all bots are flat before doing anything
-# NOTE: only the gold variants are checked for open positions here, because
-# btc_cons/btc_aggr have never run live before this deploy (0 trades) -- there
-# is nothing to check yet on their first-ever start. Once they've run at least
-# once, add their log files to this loop the same way for future redeploys.
-Write-Host "`n[1] Checking positions (gold only -- BTC bots have no prior run)..." -ForegroundColor Yellow
+# NOTE: regime22 has never run live before this deploy (0 trades) -- there is
+# nothing to check yet on its first-ever start, same as btc_cons/btc_aggr were
+# on their first deploy. Once it has run at least once, add it to this loop.
+Write-Host "`n[1] Checking positions (adx20tp7/adx18tp7 only -- BTC + regime22 have no prior run)..." -ForegroundColor Yellow
 $variants = @("adx20tp7","adx18tp7")
 $allFlat = $true
 foreach ($v in $variants) {
@@ -101,16 +104,22 @@ Start-Sleep -Seconds 3
 Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_aggr --sl-atr 2.5 --tp-atr 7.5 --adx-min 12 --timeframe 15m --max-positions 1 --risk 0.20 --allow-real" -WorkingDirectory $DESKTOP -WindowStyle Normal
 Start-Sleep -Seconds 3
 
+# Gold regime filter (ADX22/SL3/TP7 + --regime-filter) -- frozen ADX>22 + ADX-rising +
+# EMA-gap>1.2xATR(H1) on top of the same M15 pullback entry. Real-engine validated
+# 2026-07-12: 2,848 trades/13yr PF=1.29 MaxDD=10.3% WF-A 12/14yr. magic=555103.
+Start-Process python -ArgumentList "forex_live_bot_gold_cwider.py --variant-tag regime22 --sl-atr 3.0 --tp-atr 7.0 --adx-min 22 --regime-filter --timeframe 15m --max-positions 3 --risk 0.30 --allow-real" -WorkingDirectory $DESKTOP -WindowStyle Normal
+Start-Sleep -Seconds 3
+
 # 6. Verify
 Write-Host "`n[6] Verifying..." -ForegroundColor Yellow
 $count = (Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
           Where-Object { $_.CommandLine -like "*forex_live_bot_gold_cwider.py*" }).Count
-$color = if ($count -eq 4) { "Green" } else { "Red" }
-Write-Host "  Running bot processes: $count / 4" -ForegroundColor $color
+$color = if ($count -eq 5) { "Green" } else { "Red" }
+Write-Host "  Running bot processes: $count / 5" -ForegroundColor $color
 
 Write-Host "`n[6b] Check log for REAL-MONEY confirmation..." -ForegroundColor Yellow
 Start-Sleep -Seconds 5
-foreach ($v in @("adx20tp7", "adx18tp7")) {
+foreach ($v in @("adx20tp7", "adx18tp7", "regime22")) {
     Write-Host "  --- $v (gold) ---" -ForegroundColor Cyan
     Get-Content "$DESKTOP\forex_xauusd_$v.log" -Tail 40 -ErrorAction SilentlyContinue |
         Select-String "REAL-MONEY|balance=|EQUITY_STOP|REFUSING|Magic"
@@ -121,8 +130,8 @@ foreach ($v in @("btc_cons", "btc_aggr")) {
         Select-String "REAL-MONEY|balance=|EQUITY_STOP|REFUSING|Magic"
 }
 
-if ($count -eq 4) {
-    Write-Host "`nDeploy complete! Verify 'REAL-MONEY MODE CONFIRMED' in log above for all 4." -ForegroundColor Cyan
+if ($count -eq 5) {
+    Write-Host "`nDeploy complete! Verify 'REAL-MONEY MODE CONFIRMED' in log above for all 5." -ForegroundColor Cyan
 } else {
-    Write-Host "`nWarning: expected 4 bots, got $count. Check manually." -ForegroundColor Red
+    Write-Host "`nWarning: expected 5 bots, got $count. Check manually." -ForegroundColor Red
 }
