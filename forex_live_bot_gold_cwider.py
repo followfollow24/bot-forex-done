@@ -129,6 +129,11 @@ from forex_config import ForexConfig
 from forex_indicators import add_indicators, build_data_dict
 from forex_hybrid_strategy import HybridTrendPullback
 from gold_regime_live_strategy import RegimeFilteredHybridLive
+# NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
+# top-level) because gold_manual_exit_bot.py itself does
+# `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
+# would be a circular import that fails since GoldCWiderBot isn't defined yet
+# at this point in the module.
 from forex_executor import MT5Connector, ForexOrderExecutor, _cfg_has_credentials
 
 
@@ -210,6 +215,12 @@ VARIANT_MAGIC_OFFSET = {
     # yearly PF>1 12/14yr, half-split H1=1.16->H2=1.37 (no overfit signature).
     # Offset 100 is well clear of every other gold offset (0-80) on purpose.
     "regime22": 100,
+    # adx20_manual (see gold_manual_exit_bot.py): same adx20tp7 entry/SL,
+    # TP effectively disabled (--tp-atr set very high via CLI), user closes
+    # manually; bot sends Telegram alerts every +1xATR profit milestone.
+    # NO BACKTEST EXISTS for this variant (manual-close outcomes cannot be
+    # simulated) -- live-only forward test, risk 0.30% per explicit agreement.
+    "adx20_manual": 110,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1249,6 +1260,11 @@ def main():
                          "threshold ยังมาจาก --adx-min ตามปกติ, ค่าอื่นทั้งหมดไม่เปลี่ยน). "
                          "Real-engine validated 2026-07-12: 2,848 trades/13yr PF=1.29 MaxDD=10.3%% "
                          "WF-A 12/14yr. ดู gold_regime_live_strategy.py. ใช้กับ --variant-tag regime22.")
+    ap.add_argument("--manual-exit", action="store_true",
+                    help="ใช้ GoldManualExitBot แทน GoldCWiderBot ปกติ -- entry/SL เหมือนเดิม "
+                         "แต่ TP ไม่ auto-close (ต้องตั้ง --tp-atr สูงมาก เช่น 999 คู่กัน) "
+                         "ส่ง Telegram alert ทุก +1xATR แทน ไม่มี backtest รองรับ ใช้กับ "
+                         "--variant-tag adx20_manual")
     ap.add_argument("--max-positions", type=int, default=1,
                     help="จำนวน position พร้อมกันสูงสุดต่อ instance (default 1 = พฤติกรรมเดิม). "
                          "แต่ละ position independent (own entry/SL/TP/lot/bars).")
@@ -1373,9 +1389,14 @@ def main():
               "หรือใช้ --dry-run เพื่อทดสอบโค้ดแบบ paper")
         sys.exit(1)
 
-    GoldCWiderBot(cfg,
-                  max_positions=args.max_positions,
-                  strategy_cls=strategy_cls).run()
+    bot_cls = GoldCWiderBot
+    if args.manual_exit:
+        from gold_manual_exit_bot import GoldManualExitBot
+        bot_cls = GoldManualExitBot
+
+    bot_cls(cfg,
+            max_positions=args.max_positions,
+            strategy_cls=strategy_cls).run()
 
 
 if __name__ == "__main__":
