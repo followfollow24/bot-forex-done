@@ -8,9 +8,13 @@ TP is effectively disabled (set to a very large ATR multiple via CLI
 the user decides when to close manually via MT5.
 
 In place of an automatic TP, this sends a Telegram alert every time
-unrealized profit crosses a new whole-ATR milestone (+1xATR, +2xATR, ...),
-so the user has the information to make that manual call. Each milestone
-alerts once per position (no repeat spam).
+unrealized P&L crosses a new whole-ATR milestone in either direction
+(+1xATR, +2xATR, ... on profit; -1xATR, -2xATR, ... on drawdown), so the
+user has the information to make that manual call. Each milestone alerts
+once per position -- only when a *new* extreme (further from zero than
+any level already alerted, in that direction) is reached, so recovering
+back toward zero and dipping again to an already-seen level does not
+re-spam.
 
 No backtest exists for this variant -- manual-close outcomes cannot be
 simulated. Entry/SL logic is the already-validated adx20tp7 signal;
@@ -31,7 +35,8 @@ class GoldManualExitBot(GoldCWiderBot):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._alerted_atr_level = {}  # trade_id -> highest whole-ATR milestone already alerted
+        self._alerted_atr_level_max = {}  # trade_id -> highest whole-ATR profit milestone already alerted
+        self._alerted_atr_level_min = {}  # trade_id -> lowest (most negative) whole-ATR drawdown milestone already alerted
 
     def process_bar(self):
         super().process_bar()
@@ -51,21 +56,34 @@ class GoldManualExitBot(GoldCWiderBot):
             direction = 1 if pos.side == "long" else -1
             profit_price = (last_close - pos.entry) * direction
             profit_atr = profit_price / pos.entry_atr
-            level = int(profit_atr)  # floor toward zero: +1.9 -> 1, -0.5 -> 0
-            if level < 1:
-                continue  # only alert on profit milestones, not drawdown
+            level = int(profit_atr)  # floor toward zero: +1.9 -> 1, -0.5 -> 0, -1.9 -> -1
+            if level == 0:
+                continue
 
-            prev = self._alerted_atr_level.get(pos.trade_id, 0)
-            if level > prev:
-                self._alerted_atr_level[pos.trade_id] = level
-                profit_usd = profit_price * pos.lot * self._pip_value_per_lot_approx()
-                self._send_telegram_alert(
-                    f"[ADX20-MANUAL] {pos.side.upper()} magic={self.cfg.magic_number}\n"
-                    f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
-                    f"กำไรตอนนี้: +{profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
-                    f"ผ่านจุด +{level}xATR ใหม่ -- ไม่มี TP อัตโนมัติ ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
-                    f"(entry_atr={pos.entry_atr:.3f}, ts={datetime.now(timezone.utc).isoformat()})"
-                )
+            profit_usd = profit_price * pos.lot * self._pip_value_per_lot_approx()
+
+            if level > 0:
+                prev_max = self._alerted_atr_level_max.get(pos.trade_id, 0)
+                if level > prev_max:
+                    self._alerted_atr_level_max[pos.trade_id] = level
+                    self._send_telegram_alert(
+                        f"[ADX20-MANUAL] {pos.side.upper()} magic={self.cfg.magic_number}\n"
+                        f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
+                        f"กำไรตอนนี้: +{profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
+                        f"ผ่านจุด +{level}xATR ใหม่ -- ไม่มี TP อัตโนมัติ ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
+                        f"(entry_atr={pos.entry_atr:.3f}, ts={datetime.now(timezone.utc).isoformat()})"
+                    )
+            else:
+                prev_min = self._alerted_atr_level_min.get(pos.trade_id, 0)
+                if level < prev_min:
+                    self._alerted_atr_level_min[pos.trade_id] = level
+                    self._send_telegram_alert(
+                        f"[ADX20-MANUAL] {pos.side.upper()} magic={self.cfg.magic_number}\n"
+                        f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
+                        f"ขาดทุนตอนนี้: {profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
+                        f"ผ่านจุด {level}xATR ใหม่ (ขาดทุนเพิ่ม) -- SL อยู่ที่ 3.0xATR, ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
+                        f"(entry_atr={pos.entry_atr:.3f}, ts={datetime.now(timezone.utc).isoformat()})"
+                    )
 
     def _pip_value_per_lot_approx(self):
         # XAUUSDc: 1 lot = pip_value ~ contract_size (already established this
