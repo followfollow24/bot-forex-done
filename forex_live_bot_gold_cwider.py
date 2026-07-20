@@ -346,15 +346,35 @@ class CandleBuffer:
 class GoldCWiderBot:
     def __init__(self, cfg: ForexConfig,
                  max_positions: int = 1,
-                 strategy_cls: type = HybridTrendPullback):
+                 strategy_cls: type = HybridTrendPullback,
+                 sl_atr: Optional[float] = None,
+                 tp_atr: Optional[float] = None,
+                 adx_min: Optional[float] = None):
         self.cfg = cfg
         self.max_positions = max(1, int(max_positions))
         self.log = self._setup_logging()
 
+        # [FIX] sl_atr/tp_atr/adx_min are passed explicitly (falling back to
+        # the module globals only when the caller omits them) rather than
+        # read purely from SL_ATR/TP_ATR/ADX_MIN globals. main()'s
+        # `from gold_manual_exit_bot import GoldManualExitBot` (used for
+        # --manual-exit) makes Python import this same file a second time
+        # under the name "forex_live_bot_gold_cwider" (distinct from the
+        # already-running "__main__" copy), re-running all module-level code
+        # with the hardcoded defaults and never seeing the CLI-arg
+        # reassignment that happens inside __main__'s main(). Because that
+        # second copy is what defines the GoldCWiderBot class actually
+        # instantiated for --manual-exit runs, reading the globals directly
+        # silently ignored --sl-atr/--tp-atr/--adx-min for that path (e.g.
+        # adx20_manual live-traded with TP=7.0xATR and ADX>=22 instead of the
+        # intended TP=999/disabled and ADX>=20). Explicit constructor args
+        # close that gap since they're passed from the correctly-parsed
+        # __main__ instance regardless of which module copy the class itself
+        # came from.
         self.strategy = strategy_cls()
-        self.strategy.sl_atr = SL_ATR
-        self.strategy.tp_atr = TP_ATR
-        self.strategy.ADX_MIN = ADX_MIN
+        self.strategy.sl_atr = SL_ATR if sl_atr is None else sl_atr
+        self.strategy.tp_atr = TP_ATR if tp_atr is None else tp_atr
+        self.strategy.ADX_MIN = ADX_MIN if adx_min is None else adx_min
         # ไม่มี trail/partial/breakeven ใน bot นี้ — ค่าเหล่านี้ไม่ถูกอ้างถึงเลย
 
         self.connector: Optional[MT5Connector] = None
@@ -1396,7 +1416,10 @@ def main():
 
     bot_cls(cfg,
             max_positions=args.max_positions,
-            strategy_cls=strategy_cls).run()
+            strategy_cls=strategy_cls,
+            sl_atr=SL_ATR,
+            tp_atr=TP_ATR,
+            adx_min=ADX_MIN).run()
 
 
 if __name__ == "__main__":
