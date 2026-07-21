@@ -137,24 +137,6 @@ from gold_regime_live_strategy import RegimeFilteredHybridLive
 from forex_executor import MT5Connector, ForexOrderExecutor, _cfg_has_credentials
 
 
-class HybridM5Strategy(HybridTrendPullback):
-    """ADX20_TP7 strategy adapted for M5 entry timeframe.
-    H1_BARS=12: 12 × 5min = 1 H1 bar.
-    EMA_M15=60: 60 × 5min = 300min ≡ EMA20 on M15 (same real-time lookback).
-
-    [RETIRED — DEAD CODE] --timeframe 5m is now hard-blocked in main() with
-    sys.exit() after live forward-testing on the Real Cent account confirmed
-    this approach loses money: PF=0.203, win_rate=9.1%, net -$271.85 over
-    11 closed trades. This class is therefore currently unreachable — kept
-    only for historical reference so future readers understand what was tried
-    and what the results were. Do not reinstate without a fundamentally
-    different strategy design and a fresh backtest/OOS cycle.
-    """
-    H1_BARS  = 12
-    EMA_M15  = 60
-    MIN_BARS = 200 * 12 + 100   # 2500
-
-
 # =============================================================================
 # CONSTANTS — single source of truth, mirrors validated backtest "C_wider"
 # (walk_forward_regime.VARIANTS["C_wider"])
@@ -162,8 +144,8 @@ class HybridM5Strategy(HybridTrendPullback):
 SYMBOL              = "XAUUSD"   # overridden at runtime by --symbol arg
 TIMEFRAME           = "15m"     # entry TF = M15;  trend TF = H1 (resampled inside strategy)
 RISK_PER_TRADE_PCT  = 0.30
-SL_ATR              = 3.0       # variant C_wider: SL = 2.5 x ATR
-TP_ATR              = 7.0       # variant C_wider: TP = 5.0 x ATR
+SL_ATR              = 3.0       # variant C_wider: SL = 3.0 x ATR
+TP_ATR              = 7.0       # variant C_wider: TP = 7.0 x ATR
 ADX_MIN             = 22        # ADX threshold: 22=default, 20=adx20tp7
 # variant C_wider ใช้ ForexConfig() ตรงๆ โดยไม่ override max_hold_bars เลย
 # (walk_forward_regime._run_variant: cfg = ForexConfig(); ไม่มีการแก้ cfg.max_hold_bars
@@ -349,28 +331,55 @@ class GoldCWiderBot:
                  strategy_cls: type = HybridTrendPullback,
                  sl_atr: Optional[float] = None,
                  tp_atr: Optional[float] = None,
-                 adx_min: Optional[float] = None):
+                 adx_min: Optional[float] = None,
+                 symbol: Optional[str] = None,
+                 variant_tag: Optional[str] = None,
+                 timeframe: Optional[str] = None,
+                 stop_file: Optional[str] = None,
+                 state_file: Optional[str] = None,
+                 log_file: Optional[str] = None,
+                 fills_log_file: Optional[str] = None,
+                 lock_file: Optional[str] = None,
+                 equity_stop_file: Optional[str] = None,
+                 heartbeat_file: Optional[str] = None):
         self.cfg = cfg
         self.max_positions = max(1, int(max_positions))
-        self.log = self._setup_logging()
 
-        # [FIX] sl_atr/tp_atr/adx_min are passed explicitly (falling back to
-        # the module globals only when the caller omits them) rather than
-        # read purely from SL_ATR/TP_ATR/ADX_MIN globals. main()'s
+        # [FIX] symbol/variant_tag/timeframe and every *_FILE path are passed
+        # explicitly (falling back to the module globals only when the caller
+        # omits them) rather than read purely from the SYMBOL/VARIANT_TAG/
+        # TIMEFRAME/STOP_FILE/STATE_FILE/LOG_FILE/FILLS_LOG_FILE/LOCK_FILE/
+        # EQUITY_STOP_FILE/HEARTBEAT_FILE globals -- same root cause as the
+        # sl_atr/tp_atr/adx_min fix below: main()'s
         # `from gold_manual_exit_bot import GoldManualExitBot` (used for
         # --manual-exit) makes Python import this same file a second time
         # under the name "forex_live_bot_gold_cwider" (distinct from the
         # already-running "__main__" copy), re-running all module-level code
         # with the hardcoded defaults and never seeing the CLI-arg
-        # reassignment that happens inside __main__'s main(). Because that
+        # reassignments that happen inside __main__'s main(). Since that
         # second copy is what defines the GoldCWiderBot class actually
-        # instantiated for --manual-exit runs, reading the globals directly
-        # silently ignored --sl-atr/--tp-atr/--adx-min for that path (e.g.
-        # adx20_manual live-traded with TP=7.0xATR and ADX>=22 instead of the
-        # intended TP=999/disabled and ADX>=20). Explicit constructor args
-        # close that gap since they're passed from the correctly-parsed
-        # __main__ instance regardless of which module copy the class itself
-        # came from.
+        # instantiated for --manual-exit runs, every one of these globals
+        # silently stayed at its "cwider"/XAUUSD default for adx20_manual
+        # (confirmed live: state file was xauusd_cwider_state.json instead of
+        # xauusd_adx20_manual_state.json, fills log was
+        # fills_log_xauusd_cwider.csv, and critically STOP_FILE/
+        # EQUITY_STOP_FILE/LOCK_FILE were the SHARED "cwider" filenames --
+        # meaning the documented kill-switch STOP_XAUUSD_ADX20_MANUAL never
+        # actually blocked this bot's entries). Explicit constructor args
+        # close that gap the same way sl_atr/tp_atr/adx_min already do.
+        self.symbol       = SYMBOL if symbol is None else symbol
+        self.variant_tag  = VARIANT_TAG if variant_tag is None else variant_tag
+        self.timeframe    = TIMEFRAME if timeframe is None else timeframe
+        self.stop_file         = STOP_FILE if stop_file is None else stop_file
+        self.state_file        = STATE_FILE if state_file is None else state_file
+        self.log_file           = LOG_FILE if log_file is None else log_file
+        self.fills_log_file     = FILLS_LOG_FILE if fills_log_file is None else fills_log_file
+        self.lock_file          = LOCK_FILE if lock_file is None else lock_file
+        self.equity_stop_file   = EQUITY_STOP_FILE if equity_stop_file is None else equity_stop_file
+        self.heartbeat_file     = HEARTBEAT_FILE if heartbeat_file is None else heartbeat_file
+
+        self.log = self._setup_logging()
+
         self.strategy = strategy_cls()
         self.strategy.sl_atr = SL_ATR if sl_atr is None else sl_atr
         self.strategy.tp_atr = TP_ATR if tp_atr is None else tp_atr
@@ -379,7 +388,7 @@ class GoldCWiderBot:
 
         self.connector: Optional[MT5Connector] = None
         self.executor:  Optional[ForexOrderExecutor] = None
-        self.bsym = SYMBOL   # broker symbol (resolved after connect)
+        self.bsym = self.symbol   # broker symbol (resolved after connect)
 
         self._lock_fd: Optional[int] = None  # flock fd ของ single-instance lock (live mode เท่านั้น)
 
@@ -409,7 +418,7 @@ class GoldCWiderBot:
         # ทุก MT5 IPC call ที่อยู่บน hot-path ของ main loop รันผ่าน executor นี้
         # แทนการเรียกตรง เพื่อกัน mt5.copy_rates_from_pos() ค้างไม่มีกำหนด
         self._io_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=MT5_IO_WORKERS, thread_name_prefix=f"mt5-io-{VARIANT_TAG}")
+            max_workers=MT5_IO_WORKERS, thread_name_prefix=f"mt5-io-{self.variant_tag}")
         self._mt5_call_timeout_sec = max(
             MT5_CALL_TIMEOUT_FLOOR_SEC, cfg.poll_interval_sec * 3)
 
@@ -421,7 +430,7 @@ class GoldCWiderBot:
         handlers: list = [logging.StreamHandler(sys.stdout)]
         try:
             handlers.append(logging.handlers.RotatingFileHandler(
-                LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"))
+                self.log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"))
         except Exception:
             pass
         logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers, force=True)
@@ -462,7 +471,7 @@ class GoldCWiderBot:
         """flock-based lock — ปล่อยอัตโนมัติเมื่อ process ตาย (kill -9 ก็ยังปล่อย)
         ไม่เหมือน PID file ที่ค้างเป็น stale lock ได้. ใช้เฉพาะ live mode
         (dry-run ไม่ต่อ MT5 เลย จึงชนกันไม่ได้)."""
-        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o644)
+        fd = os.open(self.lock_file, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             if _HAS_FCNTL:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -474,8 +483,8 @@ class GoldCWiderBot:
         except OSError:
             os.close(fd)
             self.log.error(
-                f"REFUSING TO START: Another {SYMBOL.lower()}_cwider instance is already running "
-                f"(lock held on {os.path.basename(LOCK_FILE)}). "
+                f"REFUSING TO START: Another {self.symbol.lower()}_{self.variant_tag} instance is already running "
+                f"(lock held on {os.path.basename(self.lock_file)}). "
                 f"ฆ่า process เดิมก่อน หรือถ้าแน่ใจว่าไม่มี process ค้าง ให้ลบไฟล์ lock นี้ทิ้ง.")
             sys.exit(1)
         # เก็บ fd ไว้ตลอดอายุ process — ห้าม close (ไม่งั้น lock จะหลุดทันที)
@@ -485,7 +494,7 @@ class GoldCWiderBot:
         except OSError:
             pass
         self._lock_fd = fd
-        self.log.info(f"[LOCK] acquired single-instance lock: {os.path.basename(LOCK_FILE)} (pid={os.getpid()})")
+        self.log.info(f"[LOCK] acquired single-instance lock: {os.path.basename(self.lock_file)} (pid={os.getpid()})")
 
     def _release_single_instance_lock(self):
         if self._lock_fd is not None:
@@ -499,7 +508,7 @@ class GoldCWiderBot:
             except OSError:
                 pass
             try:
-                os.remove(LOCK_FILE)
+                os.remove(self.lock_file)
             except OSError:
                 pass
             self._lock_fd = None
@@ -516,10 +525,10 @@ class GoldCWiderBot:
         self.executor = ForexOrderExecutor(self.connector, self.cfg, self.log)
 
         # ── resolve symbol (gold ชื่อต่างกันแต่ละโบรก) ──
-        self.bsym = self.connector.resolve_symbol(SYMBOL)
-        if self.bsym != SYMBOL:
-            self.cfg.add_symbol_alias(SYMBOL, self.bsym)
-            self.log.info(f"[SYMBOL] {SYMBOL} -> {self.bsym}")
+        self.bsym = self.connector.resolve_symbol(self.symbol)
+        if self.bsym != self.symbol:
+            self.cfg.add_symbol_alias(self.symbol, self.bsym)
+            self.log.info(f"[SYMBOL] {self.symbol} -> {self.bsym}")
 
         if self.cfg.total_capital_usd <= 0:
             self.cfg.total_capital_usd = self.connector.get_balance()
@@ -541,14 +550,14 @@ class GoldCWiderBot:
 
         lines = [
             "=" * 78,
-            f" {SYMBOL} C_WIDER LIVE BOT  —  DEMO FORWARD-TEST (execution-cost measurement)",
+            f" {self.symbol} C_WIDER LIVE BOT  —  DEMO FORWARD-TEST (execution-cost measurement)",
             "=" * 78,
             f"  ACCOUNT TYPE  : {acct_type}   -> {demo_tag}",
             f"  Broker/Server : {broker} / {server}   Login: {login}",
             f"  Balance       : {balance:,.2f} {currency}   Equity: {equity:,.2f} {currency}",
-            f"  Symbol        : {SYMBOL}  ->  resolved broker symbol: {self.bsym}",
+            f"  Symbol        : {self.symbol}  ->  resolved broker symbol: {self.bsym}",
             f"  Strategy      : {self.strategy.name}",
-            f"  Entry TF      : {TIMEFRAME.upper()}    Trend TF: H1 (resampled, EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})",
+            f"  Entry TF      : {self.timeframe.upper()}    Trend TF: H1 (resampled, EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})",
             f"  Exit config   : SL={self.strategy.sl_atr}xATR  TP={self.strategy.tp_atr}xATR"
             f"   | Partial-TP=OFF  Move-to-BE=OFF  Trailing=OFF",
             f"  Max hold      : {self.cfg.max_hold_bars} bars"
@@ -557,13 +566,13 @@ class GoldCWiderBot:
             f"   Max-positions: {self.max_positions}",
             f"  Daily rules   : OFF (no daily loss limit, no reactive stop)",
             f"  Order mode    : {'DRY-RUN (paper, NO real orders)' if self.cfg.dry_run else 'LIVE — places real orders on the account above'}",
-            f"  Kill-switch   : touch {os.path.basename(STOP_FILE)}  (blocks NEW entries only)",
+            f"  Kill-switch   : touch {os.path.basename(self.stop_file)}  (blocks NEW entries only)",
             f"  Equity-stop   : {self.cfg.stop_equity_frac*100:.0f}% drawdown from peak -> "
-            f"touch {os.path.basename(EQUITY_STOP_FILE)} auto-created, blocks NEW entries "
+            f"touch {os.path.basename(self.equity_stop_file)} auto-created, blocks NEW entries "
             f"(delete file to resume)",
             f"  Telegram alert: {'configured ✅' if (os.environ.get('TELEGRAM_BOT_TOKEN') and os.environ.get('TELEGRAM_CHAT_ID')) else 'NOT configured ⚠️ (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env)'}",
             f"  MT5-call timeout : {self._mt5_call_timeout_sec:.0f}s  (fetch hang -> forced reconnect)",
-            f"  Fills log     : {os.path.basename(FILLS_LOG_FILE)}",
+            f"  Fills log     : {os.path.basename(self.fills_log_file)}",
             "=" * 78,
         ]
         for l in lines:
@@ -628,11 +637,11 @@ class GoldCWiderBot:
         if limit + 1 > 999:
             candles = self._call_with_timeout(
                 self.connector.fetch_ohlcv_paginated, self._mt5_call_timeout_sec,
-                self.bsym, TIMEFRAME, limit + 1)
+                self.bsym, self.timeframe, limit + 1)
         else:
             candles = self._call_with_timeout(
                 self.connector.fetch_ohlcv, self._mt5_call_timeout_sec,
-                self.bsym, TIMEFRAME, limit + 1)
+                self.bsym, self.timeframe, limit + 1)
         if not candles:
             return []
         now_ms = int(time.time() * 1000)
@@ -647,9 +656,9 @@ class GoldCWiderBot:
                    comment: str):
         spread   = (ask - bid) if (bid > 0 and ask > 0) else 0.0
         slippage = fill - requested
-        write_header = not os.path.exists(FILLS_LOG_FILE)
+        write_header = not os.path.exists(self.fills_log_file)
         try:
-            with open(FILLS_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            with open(self.fills_log_file, "a", newline="", encoding="utf-8") as f:
                 cols = ["timestamp", "action", "side", "requested_price", "fill_price",
                         "bid", "ask", "spread_at_fill", "slippage", "lot",
                         "commission", "comment"]
@@ -724,16 +733,16 @@ class GoldCWiderBot:
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
+            with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as exc:
             self.log.error(f"save_state: {exc}")
 
     def load_state(self):
-        if not os.path.exists(STATE_FILE):
+        if not os.path.exists(self.state_file):
             return
         try:
-            with open(STATE_FILE, encoding="utf-8") as f:
+            with open(self.state_file, encoding="utf-8") as f:
                 data = json.load(f)
             if "positions" in data:
                 self.positions = [Position(**p) for p in data.get("positions") or []]
@@ -757,9 +766,9 @@ class GoldCWiderBot:
                 self.log.warning(
                     f"[STATE] equity-stop was previously triggered (peak_equity="
                     f"{self.peak_equity:,.2f}) — remains latched until "
-                    f"{os.path.basename(EQUITY_STOP_FILE)} is deleted")
+                    f"{os.path.basename(self.equity_stop_file)} is deleted")
 
-            self.log.info(f"[STATE] loaded {STATE_FILE}")
+            self.log.info(f"[STATE] loaded {self.state_file}")
         except Exception as exc:
             self.log.warning(f"load_state: {exc}")
 
@@ -857,7 +866,7 @@ class GoldCWiderBot:
             return
 
         side    = "long" if long_ else "short"
-        comment = f"{VARIANT_TAG[:6].upper()}-{sig.action}"[:16]
+        comment = f"{self.variant_tag[:6].upper()}-{sig.action}"[:16]
 
         self.log.info(
             f"  [SIGNAL] {sig.action} {self.bsym}  reason={sig.reason}  "
@@ -890,7 +899,7 @@ class GoldCWiderBot:
             f"commission={commission:.4f}")
 
         self._send_telegram_alert(
-            f"\U0001F7E2 OPEN {side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"\U0001F7E2 OPEN {side.upper()} — {self.variant_tag} ({self.bsym})\n"
             f"Lot: {lot}\n"
             f"Entry: {fill_px:.2f}\n"
             f"SL: {sl:.2f}   TP: {tp:.2f}\n"
@@ -906,7 +915,7 @@ class GoldCWiderBot:
             req_px = pos.entry
 
         result = self.executor.close_position_market(
-            self.bsym, pos.side, pos.lot, pos.trade_id, comment=f"{VARIANT_TAG[:6].upper()}-Timeout")
+            self.bsym, pos.side, pos.lot, pos.trade_id, comment=f"{self.variant_tag[:6].upper()}-Timeout")
         if not result:
             self.log.error("  [CLOSE-TIMEOUT FAILED] executor returned empty result — will retry next poll")
             return
@@ -921,7 +930,7 @@ class GoldCWiderBot:
         spread, slippage = self._log_fill(
             action="CLOSE", side=pos.side, requested=req_px, fill=fill_px,
             bid=bid2, ask=ask2, lot=pos.lot, commission=commission,
-            comment=f"{VARIANT_TAG[:6].upper()}-Timeout pnl={net:+.2f}")
+            comment=f"{self.variant_tag[:6].upper()}-Timeout pnl={net:+.2f}")
 
         self.log.info(
             f"  [CLOSE-TIMEOUT] {pos.side.upper()} {self.bsym} lot={pos.lot}  "
@@ -929,7 +938,7 @@ class GoldCWiderBot:
             f"spread={spread:.4f}  slippage={slippage:+.4f}  commission={commission:.4f}")
 
         self._send_telegram_alert(
-            f"\U000023F1 CLOSE-TIMEOUT {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"\U000023F1 CLOSE-TIMEOUT {pos.side.upper()} — {self.variant_tag} ({self.bsym})\n"
             f"Lot: {pos.lot}\n"
             f"Entry: {pos.entry:.2f}   Fill: {fill_px:.2f}\n"
             f"Net PnL: {net:+.2f}")
@@ -991,7 +1000,7 @@ class GoldCWiderBot:
         spread, slippage = self._log_fill(
             action="CLOSE", side=pos.side, requested=requested, fill=fill_px,
             bid=bid2, ask=ask2, lot=pos.lot, commission=commission,
-            comment=f"{VARIANT_TAG[:6].upper()}-{reason} pnl={net:+.2f}")
+            comment=f"{self.variant_tag[:6].upper()}-{reason} pnl={net:+.2f}")
 
         self.log.info(
             f"  [CLOSE-{reason}] {pos.side.upper()} {self.bsym} lot={pos.lot}  "
@@ -1000,7 +1009,7 @@ class GoldCWiderBot:
 
         emoji = "\U0001F534" if net < 0 else "\U0001F7E2"
         self._send_telegram_alert(
-            f"{emoji} CLOSE-{reason} {pos.side.upper()} — {VARIANT_TAG} ({self.bsym})\n"
+            f"{emoji} CLOSE-{reason} {pos.side.upper()} — {self.variant_tag} ({self.bsym})\n"
             f"Lot: {pos.lot}\n"
             f"Entry: {pos.entry:.2f}   Fill: {fill_px:.2f}\n"
             f"Net PnL: {net:+.2f}")
@@ -1066,9 +1075,9 @@ class GoldCWiderBot:
                 f"(peak={self.peak_equity:,.2f}, drawdown={drawdown_pct:.1f}% >= "
                 f"{self.cfg.stop_equity_frac*100:.0f}% threshold). "
                 f"Blocking NEW entries. Existing positions still managed normally. "
-                f"To resume: investigate first, then delete {os.path.basename(EQUITY_STOP_FILE)}")
+                f"To resume: investigate first, then delete {os.path.basename(self.equity_stop_file)}")
             try:
-                with open(EQUITY_STOP_FILE, "w", encoding="utf-8") as f:
+                with open(self.equity_stop_file, "w", encoding="utf-8") as f:
                     f.write(
                         f"Triggered at {datetime.now(timezone.utc).isoformat()}\n"
                         f"peak_equity={self.peak_equity:.2f}\n"
@@ -1081,12 +1090,12 @@ class GoldCWiderBot:
 
             self._send_telegram_alert(
                 f"\U0001F6A8 EQUITY-STOP TRIGGERED \U0001F6A8\n"
-                f"Variant: {VARIANT_TAG} ({SYMBOL})\n"
+                f"Variant: {self.variant_tag} ({self.symbol})\n"
                 f"Peak equity: {self.peak_equity:,.2f}\n"
                 f"Current equity: {equity:,.2f}\n"
                 f"Drawdown: {drawdown_pct:.1f}% (threshold: {self.cfg.stop_equity_frac*100:.0f}%)\n"
                 f"New entries are BLOCKED. Existing positions still managed normally.\n"
-                f"To resume: investigate, then delete {os.path.basename(EQUITY_STOP_FILE)} on the VPS.")
+                f"To resume: investigate, then delete {os.path.basename(self.equity_stop_file)} on the VPS.")
 
     # ─────────────────────────────────────────────────────────────────────
     # Process a newly-closed M15 bar
@@ -1110,14 +1119,14 @@ class GoldCWiderBot:
                 self._close_timeout(pos)
 
         # ── 3) kill switch (manual file OR equity-stop circuit breaker) ──
-        kill = os.path.exists(STOP_FILE) or os.path.exists(EQUITY_STOP_FILE) or self.equity_stop_triggered
-        if os.path.exists(STOP_FILE):
-            self.log.info(f"[KILL-SWITCH] {os.path.basename(STOP_FILE)} exists — "
+        kill = os.path.exists(self.stop_file) or os.path.exists(self.equity_stop_file) or self.equity_stop_triggered
+        if os.path.exists(self.stop_file):
+            self.log.info(f"[KILL-SWITCH] {os.path.basename(self.stop_file)} exists — "
                            f"blocking new entries (existing position still managed)")
-        if os.path.exists(EQUITY_STOP_FILE) or self.equity_stop_triggered:
+        if os.path.exists(self.equity_stop_file) or self.equity_stop_triggered:
             self.log.warning(f"[EQUITY-STOP] active — blocking new entries "
                               f"(existing position still managed). Delete "
-                              f"{os.path.basename(EQUITY_STOP_FILE)} to resume.")
+                              f"{os.path.basename(self.equity_stop_file)} to resume.")
 
         # ── 4) new signal — only if room for another position & not blocked ──
         can_open = (len(self.positions) < self.max_positions
@@ -1165,7 +1174,7 @@ class GoldCWiderBot:
         (disk full/permission) is caught here and must NOT stop the bot trading.
         """
         try:
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+            with open(self.heartbeat_file, "w", encoding="utf-8") as f:
                 f.write(datetime.now(timezone.utc).isoformat())
         except Exception as exc:
             self.log.debug(f"_write_heartbeat: failed: {exc}")
@@ -1419,7 +1428,17 @@ def main():
             strategy_cls=strategy_cls,
             sl_atr=SL_ATR,
             tp_atr=TP_ATR,
-            adx_min=ADX_MIN).run()
+            adx_min=ADX_MIN,
+            symbol=SYMBOL,
+            variant_tag=VARIANT_TAG,
+            timeframe=TIMEFRAME,
+            stop_file=STOP_FILE,
+            state_file=STATE_FILE,
+            log_file=LOG_FILE,
+            fills_log_file=FILLS_LOG_FILE,
+            lock_file=LOCK_FILE,
+            equity_stop_file=EQUITY_STOP_FILE,
+            heartbeat_file=HEARTBEAT_FILE).run()
 
 
 if __name__ == "__main__":
