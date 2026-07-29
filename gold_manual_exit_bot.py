@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-gold_manual_exit_bot.py -- variant "adx20_manual": same entry signal as
-adx20tp7 (H1 trend + M15 pullback, ADX>=20), SL=3.0xATR unchanged, but
-TP is effectively disabled (set to a very large ATR multiple via CLI
---tp-atr, e.g. 999) so the position is never auto-closed at a target --
-the user decides when to close manually via MT5.
+gold_manual_exit_bot.py -- generic manual-exit wrapper, originally built for
+variant "adx20_manual" (gold, H1 trend + M15 pullback, ADX>=20) and reused
+2026-07-29 for the H1 cost/ATR fix across btc_h1_manual / eth_h1_manual /
+gold_h1_manual. Nothing in this class is gold- or symbol-specific -- it only
+touches self.positions / self.bsym / self.cfg / self.variant_tag, all of which
+GoldCWiderBot already sets generically per --symbol/--variant-tag. TP is
+effectively disabled (set to a very large ATR multiple via CLI --tp-atr, e.g.
+999) so the position is never auto-closed at a target -- the user decides when
+to close manually via MT5.
 
 In place of an automatic TP, this sends a Telegram alert every time
 unrealized P&L crosses a new whole-ATR milestone in either direction
@@ -62,12 +66,14 @@ class GoldManualExitBot(GoldCWiderBot):
 
             profit_usd = profit_price * pos.lot * self._pip_value_per_lot_approx()
 
+            tag = self.variant_tag.upper()
+            sym = self.bsym
             if level > 0:
                 prev_max = self._alerted_atr_level_max.get(pos.trade_id, 0)
                 if level > prev_max:
                     self._alerted_atr_level_max[pos.trade_id] = level
                     self._send_telegram_alert(
-                        f"[ADX20-MANUAL] {pos.side.upper()} magic={self.cfg.magic_number}\n"
+                        f"[{tag}] {sym} {pos.side.upper()} magic={self.cfg.magic_number}\n"
                         f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
                         f"กำไรตอนนี้: +{profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
                         f"ผ่านจุด +{level}xATR ใหม่ -- ไม่มี TP อัตโนมัติ ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
@@ -78,7 +84,7 @@ class GoldManualExitBot(GoldCWiderBot):
                 if level < prev_min:
                     self._alerted_atr_level_min[pos.trade_id] = level
                     self._send_telegram_alert(
-                        f"[ADX20-MANUAL] {pos.side.upper()} magic={self.cfg.magic_number}\n"
+                        f"[{tag}] {sym} {pos.side.upper()} magic={self.cfg.magic_number}\n"
                         f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
                         f"ขาดทุนตอนนี้: {profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
                         f"ผ่านจุด {level}xATR ใหม่ (ขาดทุนเพิ่ม) -- SL อยู่ที่ 3.0xATR, ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
@@ -86,11 +92,10 @@ class GoldManualExitBot(GoldCWiderBot):
                     )
 
     def _pip_value_per_lot_approx(self):
-        # XAUUSDc: 1 lot = pip_value ~ contract_size (already established this
-        # session's convention for gold: price move x lot roughly = USD, since
-        # contract_size=100oz standard but live formula reads real tick_value.
-        # Best-effort approximation for the alert text only -- not used for
-        # any order sizing or risk calculation, purely informational.
+        # Reads the real tick_value/tick_size ratio from MT5 for whichever
+        # symbol this instance trades (self.bsym) -- works unchanged for gold,
+        # BTC, or ETH. Best-effort approximation for the alert text only -- not
+        # used for any order sizing or risk calculation, purely informational.
         try:
             if mt5 is not None:
                 info = mt5.symbol_info(self.bsym)

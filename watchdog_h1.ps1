@@ -29,29 +29,36 @@ function WLog($msg) {
 # -----------------------------------------------------------------------------
 #  Bot definitions. Args must match EXACTLY what was launched by hand on
 #  2026-07-29, or a watchdog restart would silently change live parameters:
-#    --timeframe 1h   entry timeframe (NOT 15m -- that is the whole point)
-#    --tp-atr 999     TP disabled; the user closes by hand
-#    --risk 1.90      1.9%, not 2.0: lot is rounded to 2dp, and a round-up past
-#                     the cfg cap of 2.0% makes the bot SKIP the trade entirely
+#    --timeframe 1h    entry timeframe (NOT 15m -- that is the whole point)
+#    --tp-atr 999      TP disabled; the user closes by hand
+#    --manual-exit     loads GoldManualExitBot (gold_manual_exit_bot.py), which
+#                      sends a Telegram alert every time unrealized P&L crosses
+#                      a new whole-ATR milestone in either direction. Without
+#                      this flag the bot just sits at TP=999 with NO alerts at
+#                      all -- added 2026-07-29 after the first deploy omitted
+#                      it. The class is symbol-generic (reads self.bsym /
+#                      self.variant_tag), so it works unchanged for BTC/ETH/gold.
+#    --risk 1.90       1.9%, not 2.0: lot is rounded to 2dp, and a round-up past
+#                      the cfg cap of 2.0% makes the bot SKIP the trade entirely
 # -----------------------------------------------------------------------------
 $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
         Variant      = "eth_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
     },
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --adx-min 22 --regime-filter --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 22 --regime-filter --max-positions 1 --risk 1.90 --allow-real"
     }
 )
 
