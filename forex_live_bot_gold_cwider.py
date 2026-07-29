@@ -182,6 +182,12 @@ SYMBOL_MAGIC = {
     # (compares s.upper()) so it still correctly resolves to the real broker
     # symbol "BTCUSDc" and add_symbol_alias() copies pip_size across automatically.
     "BTCUSDC": 666000,
+    # ETHUSDc, added 2026-07-29. Same uppercase-key rule as BTCUSDC above: this
+    # MUST be "ETHUSDC" (post-.upper()) or the lookup silently falls through to
+    # the hash fallback and the bot runs on an unintended magic number -- the
+    # exact failure caught live on 2026-07-11. 667000-series keeps it clear of
+    # both the gold 555xxx block and BTC's 666xxx block.
+    "ETHUSDC": 667000,
 }
 # Magic offset per variant — keeps each symbol+variant pair unique so MT5 can tell positions apart
 VARIANT_MAGIC_OFFSET = {
@@ -203,6 +209,16 @@ VARIANT_MAGIC_OFFSET = {
     # NO BACKTEST EXISTS for this variant (manual-close outcomes cannot be
     # simulated) -- live-only forward test, risk 0.30% per explicit agreement.
     "adx20_manual": 110,
+    # ── H1 manual-exit variants, added 2026-07-29 ────────────────────────────
+    # Same HybridTrendPullback signal, moved from M15 to H1 entries, TP disabled
+    # so the user closes by hand. The move is driven by cost/ATR: on gold M15
+    # the real $2.85 spread+slippage is ~45% of a bar's ATR and only 21% of
+    # entries ever reach +1R, versus ~24% and 68-73% on H1. On crypto the ratio
+    # is 5-10%, which is why BTC/ETH carry the same signal far better than gold.
+    # Offsets 120-140, clear of every existing gold (0-110) and BTC (0-10) slot.
+    "btc_h1_manual":  120,
+    "eth_h1_manual":  130,
+    "gold_h1_manual": 140,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1306,8 +1322,10 @@ def main():
                          "MT5 terminal ต่อบัญชีที่ไม่ใช่ demo ไว้ — ป้องกันการเทรดเงินจริง "
                          "โดยไม่ตั้งใจ")
     ap.add_argument("--timeframe", type=str, default="15m",
-                    help="Entry timeframe: '15m' (default), '5m' (blocked — retired after live testing), "
-                         "'1m' (blocked — unvalidated). Only 15m is currently supported for live trading.")
+                    help="Entry timeframe: '15m' (default), '1h' (validated 2026-07-29 — "
+                         "far better cost/ATR and entry quality than 15m), "
+                         "'5m' (blocked — retired after live testing), "
+                         "'1m' (blocked — unvalidated).")
     ap.add_argument("--risk", type=float, default=0.0,
                     help="Risk per trade %% (0 = ใช้ค่า default ของ variant). "
                          "M5 แนะนำ 0.15 (ครึ่งนึงของ M15 เพราะ IS MaxDD สูงกว่า).")
@@ -1352,6 +1370,22 @@ def main():
             "(reuses HybridTrendPullback, tuned/backtested for M15 — never "
             "backtested on M1). Do not run this live until a dedicated, "
             "validated M1 strategy class exists.")
+    elif tf == "1h":
+        # [H1] Added 2026-07-29 after the cost/ATR analysis. The M15 path pays
+        # ~$2.85 of spread+slippage against a ~$6 M15 ATR on gold -- ~45% of the
+        # move -- and backtests at PF 0.50 once that real cost is charged. The
+        # SAME strategy on H1 bars faces roughly half that ratio (ATR ~$12), and
+        # on crypto H1 it is ~5-10%. Entry quality measured on MFE improves in
+        # step: on gold, 21% of M15 entries ever reach +1R versus 68-73% on H1.
+        #
+        # Nothing about the signal changes here. HybridTrendPullback resamples
+        # its trend filter from the entry timeframe internally (H1_BARS=4), so
+        # on H1 bars the trend filter becomes H4 -- which is exactly what the
+        # backtest that produced those numbers did (resample to 1h, same class).
+        TIMEFRAME     = "1h"
+        MAX_HOLD_BARS = 64     # 64 × 1h = 64h ≈ 2.7 days
+        HISTORY_BARS  = 900    # 900 H1 bars ≈ 37 days; covers EMA200-on-H4 warm-up
+        strategy_cls  = HybridTrendPullback
     else:
         TIMEFRAME     = "15m"
         MAX_HOLD_BARS = 64     # 64 × 15min = 960min = 16h
@@ -1411,6 +1445,13 @@ def main():
     if SYMBOL == "BTCUSDC":
         cfg.pip_size["BTCUSDC"] = 1.0
         cfg.pip_value_usd_approx["BTCUSDC"] = 0.01
+    elif SYMBOL == "ETHUSDC":
+        # Same treatment as BTCUSDC: 1 "pip" = $1 of ETH price. pip_value here
+        # is fallback only -- the live value comes from get_pip_value_live()
+        # reading the real MT5 trade_tick_value, so an imprecise fallback
+        # cannot mis-size a live order, it only affects dry-run.
+        cfg.pip_size["ETHUSDC"] = 1.0
+        cfg.pip_value_usd_approx["ETHUSDC"] = 0.01
 
     if not cfg.dry_run and not _cfg_has_credentials(cfg):
         print("[ERROR] แพ็กเกจ MetaTrader5 ใช้งานไม่ได้ — ต้องรันบน Windows ที่ติดตั้ง "
