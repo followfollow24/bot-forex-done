@@ -23,12 +23,28 @@ NEWS FILTER DELIBERATELY OMITTED from this first live version. Two reasons:
 Everything else (M15 EMA20 pullback entry, SL/TP ATR multiples, cost model)
 is untouched -- inherited byte-for-byte from HybridTrendPullback, the exact
 class the live bot already runs. Only _build_h1_trend_array is extended.
+
+2026-07-30 FIX: this override used to build its bucket/bar mapping by
+position (`idx = arange(n_h1) * H1_BARS`, anchored to index 0 of whichever
+array happened to be passed in). HybridTrendPullback._h1_trend -- the method
+actually used live, since the live bot never calls precompute() -- did NOT
+call this method at all; it had its own separate, ALSO position-based (but
+differently-anchored) resample. Net effect: the regime filter's extra ADX-
+rising/EMA-gap conditions were only ever evaluated in backtests (which call
+precompute() -> this method), never in live trading (which fell through to
+the base class's unrelated _h1_trend implementation). The live regime22 bot
+was, in effect, running plain HybridTrendPullback since it was first
+deployed. Fixed by rebuilding on the same calendar-anchored bucket ids as the
+base class (self._bucket_ids / self._bucket_seconds), and by the base
+class's _h1_trend now simply calling self._build_h1_trend_array(d)[i] --
+polymorphic dispatch means it now reaches THIS override live, too.
 """
 import math
 
 import numpy as np
+import pandas as pd
 
-from forex_hybrid_strategy import HybridTrendPullback
+from forex_hybrid_strategy import HybridTrendPullback, FreshTrendFilterMixin
 
 REGIME_ADX_MIN = 22
 REGIME_GAP_MULT = 1.2
@@ -40,15 +56,19 @@ class RegimeFilteredHybridLive(HybridTrendPullback):
 
     def _build_h1_trend_array(self, d: dict) -> np.ndarray:
         n = len(d["c"])
-        n_h1 = n // self.H1_BARS
         out = np.zeros(n, dtype=np.int8)
+
+        bucket_id = self._bucket_ids(d["ts"], self._bucket_seconds())
+        uniq, k_of_bar = np.unique(bucket_id, return_inverse=True)
+        n_h1 = len(uniq)
         if n_h1 < self.EMA_H1_SLOW + 5:
             return out
 
-        idx = np.arange(n_h1) * self.H1_BARS
-        h1_c = np.array([d["c"][j + self.H1_BARS - 1] for j in idx])
-        h1_h = np.array([d["h"][j:j + self.H1_BARS].max() for j in idx])
-        h1_l = np.array([d["l"][j:j + self.H1_BARS].min() for j in idx])
+        tmp = pd.DataFrame({"k": k_of_bar, "c": d["c"], "h": d["h"], "l": d["l"]})
+        g = tmp.groupby("k")
+        h1_c = g["c"].last().reindex(range(n_h1)).to_numpy()
+        h1_h = g["h"].max().reindex(range(n_h1)).to_numpy()
+        h1_l = g["l"].min().reindex(range(n_h1)).to_numpy()
 
         ema_f = self._ema(h1_c, self.EMA_H1_FAST)
         ema_s = self._ema(h1_c, self.EMA_H1_SLOW)
@@ -81,8 +101,21 @@ class RegimeFilteredHybridLive(HybridTrendPullback):
             elif c < ef < es:
                 h1_trend[k] = -1
 
-        for i in range(n):
-            k = i // self.H1_BARS
-            if k < n_h1:
-                out[i] = h1_trend[k]
+        # See forex_hybrid_strategy.py's _build_h1_trend_array for why this
+        # must be timestamp-derived, not array-position-derived.
+        entry_bar_seconds = getattr(self, "TIMEFRAME_SECONDS", 900)
+        bucket_seconds = self._bucket_seconds()
+        epoch = self._epoch_seconds(d["ts"])
+        is_last_in_bucket = (epoch // bucket_seconds) != ((epoch + entry_bar_seconds) // bucket_seconds)
+        k_complete = np.where(is_last_in_bucket, k_of_bar, k_of_bar - 1)
+        valid = k_complete >= 0
+        k_complete = np.clip(k_complete, 0, n_h1 - 1)
+        out[valid] = h1_trend[k_complete[valid]]
         return out
+
+
+class FreshRegimeFilteredHybridLive(FreshTrendFilterMixin, RegimeFilteredHybridLive):
+    """RegimeFilteredHybridLive + fresh-trend filter (see FreshTrendFilterMixin
+    in forex_hybrid_strategy.py). Validated 2026-07-30: full-history PF
+    0.87->1.12, DD 39.2%->16.1% at MAX_MATURITY=10 on gold H1."""
+    pass

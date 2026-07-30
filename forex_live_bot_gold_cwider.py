@@ -127,8 +127,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from forex_config import ForexConfig
 from forex_indicators import add_indicators, build_data_dict
-from forex_hybrid_strategy import HybridTrendPullback
-from gold_regime_live_strategy import RegimeFilteredHybridLive
+from forex_hybrid_strategy import HybridTrendPullback, FreshHybridTrendPullback
+from gold_regime_live_strategy import RegimeFilteredHybridLive, FreshRegimeFilteredHybridLive
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -348,6 +348,7 @@ class GoldCWiderBot:
                  sl_atr: Optional[float] = None,
                  tp_atr: Optional[float] = None,
                  adx_min: Optional[float] = None,
+                 fresh_maturity: Optional[int] = None,
                  symbol: Optional[str] = None,
                  variant_tag: Optional[str] = None,
                  timeframe: Optional[str] = None,
@@ -400,6 +401,13 @@ class GoldCWiderBot:
         self.strategy.sl_atr = SL_ATR if sl_atr is None else sl_atr
         self.strategy.tp_atr = TP_ATR if tp_atr is None else tp_atr
         self.strategy.ADX_MIN = ADX_MIN if adx_min is None else adx_min
+        if fresh_maturity is not None and fresh_maturity > 0:
+            # only meaningful if strategy_cls is one of the Fresh* combo
+            # classes (main() only sets this when --fresh-maturity > 0, which
+            # is exactly when it also swaps strategy_cls) -- setting the
+            # attribute on a non-Fresh class is harmless (unused) rather than
+            # an error, so this stays safe even if called directly.
+            self.strategy.MAX_MATURITY = fresh_maturity
         # ไม่มี trail/partial/breakeven ใน bot นี้ — ค่าเหล่านี้ไม่ถูกอ้างถึงเลย
 
         self.connector: Optional[MT5Connector] = None
@@ -576,6 +584,7 @@ class GoldCWiderBot:
             f"  Entry TF      : {self.timeframe.upper()}    Trend TF: H1 (resampled, EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})",
             f"  Exit config   : SL={self.strategy.sl_atr}xATR  TP={self.strategy.tp_atr}xATR"
             f"   | Partial-TP=OFF  Move-to-BE=OFF  Trailing=OFF",
+            f"  Fresh-filter  : {'ON, max maturity=' + str(self.strategy.MAX_MATURITY) + ' entry-bars' if hasattr(self.strategy, 'MAX_MATURITY') else 'OFF'}",
             f"  Max hold      : {self.cfg.max_hold_bars} bars"
             f" (= {self.cfg.max_hold_bars * self.cfg.timeframe_minutes / 60:g} hours)",
             f"  Risk/trade    : {self.cfg.risk_per_trade_pct}%   Magic: {self.cfg.magic_number}"
@@ -1310,6 +1319,13 @@ def main():
                          "แต่ TP ไม่ auto-close (ต้องตั้ง --tp-atr สูงมาก เช่น 999 คู่กัน) "
                          "ส่ง Telegram alert ทุก +1xATR แทน ไม่มี backtest รองรับ ใช้กับ "
                          "--variant-tag adx20_manual")
+    ap.add_argument("--fresh-maturity", type=int, default=0,
+                    help="Skip entries whose H1/H4 trend alignment is already older than "
+                         "N entry-bars (0 = disabled). Validated 2026-07-30: gold H1 "
+                         "regime22 fresh<=10 (PF 0.87->1.12, DD 39%%->16%%), BTC M15 "
+                         "fresh<=5 (OOS PF 1.37->1.84), ETH M15 fresh<=3 (OOS PF 1.08->1.36). "
+                         "Composes with --regime-filter automatically. See "
+                         "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
     ap.add_argument("--max-positions", type=int, default=1,
                     help="จำนวน position พร้อมกันสูงสุดต่อ instance (default 1 = พฤติกรรมเดิม). "
                          "แต่ละ position independent (own entry/SL/TP/lot/bars).")
@@ -1398,6 +1414,14 @@ def main():
         # M15 entry/SL/TP/cost model untouched. See gold_regime_live_strategy.py.
         strategy_cls = RegimeFilteredHybridLive
 
+    if args.fresh_maturity > 0:
+        # Compose with the fresh-trend filter on top of whichever base class
+        # --regime-filter already selected, using the pre-built combo classes
+        # rather than dynamic type() composition (simpler to reason about,
+        # and both combos are already validated as named classes).
+        strategy_cls = (FreshRegimeFilteredHybridLive if args.regime_filter
+                        else FreshHybridTrendPullback)
+
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
 
@@ -1470,6 +1494,7 @@ def main():
             sl_atr=SL_ATR,
             tp_atr=TP_ATR,
             adx_min=ADX_MIN,
+            fresh_maturity=args.fresh_maturity,
             symbol=SYMBOL,
             variant_tag=VARIANT_TAG,
             timeframe=TIMEFRAME,

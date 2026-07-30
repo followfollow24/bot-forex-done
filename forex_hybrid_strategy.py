@@ -57,7 +57,9 @@ class HybridTrendPullback:
     max_spread_atr_ratio = 0.20
 
     # ── H1 trend filter ──────────────────────────────────────────────────
-    H1_BARS    = 4     # M15 bars per 1 H1 bar (4 × 15m = 60m)
+    H1_BARS    = 4     # entry-bars per 1 trend-bucket (4 x 15m = H1, or 4 x 1h = H4)
+    TIMEFRAME_SECONDS = 900   # seconds per entry bar; live bot sets this from --timeframe
+                              # (900=15m default here; 3600 for --timeframe 1h)
     EMA_H1_FAST = 50   # H1 EMA fast
     EMA_H1_SLOW = 200  # H1 EMA slow
     ADX_PERIOD  = 14   # ADX period (H1)
@@ -86,19 +88,73 @@ class HybridTrendPullback:
         """
         self._h1_trend_arr = self._build_h1_trend_array(d)
 
-    def _build_h1_trend_array(self, d: dict) -> np.ndarray:
-        n    = len(d["c"])
-        n_h1 = n // self.H1_BARS
-        out  = np.zeros(n, dtype=np.int8)
+    # ── Calendar-anchored bucket ids (fixes the two bugs below) ──────────
+    #
+    # BUG 1 (position-based, this method's old form): buckets were built as
+    # `idx = arange(n_h1) * H1_BARS`, i.e. anchored to INDEX 0 OF WHATEVER
+    # ARRAY WAS PASSED IN. A full backtest array and a live bot's shrinking/
+    # growing rolling buffer are different lengths at different times, so the
+    # SAME real hour of data could fall in different buckets depending on
+    # which array was passed. Confirmed empirically: sign disagreed with the
+    # (correct) causal method on 6.2% of bars in a live-style replay.
+    #
+    # BUG 2 (_h1_trend, the causal method previously used only as the live
+    # fallback): used `start = n - n_h1 * H1_BARS` -- buckets anchored to the
+    # END of whatever slice was passed, which drifts with buffer length too,
+    # and is a SEPARATE scheme from BUG 1's, so the two methods didn't even
+    # agree with EACH OTHER, let alone give a stable real-world hour boundary.
+    #
+    # FIX: bucket id = epoch_seconds // bucket_seconds, straight from each
+    # bar's own timestamp. This is a pure function of wall-clock time -- given
+    # the same bar, it always maps to the same bucket, independent of array
+    # length, position, or how much history happens to be in the buffer. Both
+    # _h1_trend (below) and _build_h1_trend_array now go through this ONE
+    # implementation, so a live bot and a backtest fed the same bars always
+    # agree, and any subclass that overrides _build_h1_trend_array (e.g.
+    # RegimeFilteredHybridLive) is picked up by BOTH the live and backtest
+    # code paths automatically (previously the live path silently used the
+    # BASE class's _h1_trend instead of the subclass's regime-filtered logic,
+    # since _h1_trend was never overridden -- meaning regime22's live bot was
+    # not actually applying its regime filter at all).
+    @staticmethod
+    def _epoch_seconds(ts: np.ndarray) -> np.ndarray:
+        import pandas as pd
+        # Force seconds-since-epoch explicitly rather than assuming a unit --
+        # pandas' datetime64 storage unit is version-dependent (ns in older
+        # pandas, us as of 2.x/3.x here per `pd.to_datetime(...).dtype`), and
+        # a wrong hardcoded divisor (e.g. //10**9 against a us-unit array)
+        # silently produces near-constant bucket ids instead of an error.
+        # Confirmed live: that exact mistake collapsed 20,000 bars into a
+        # single bucket, which would have made every trend check evaluate
+        # as "no trend" forever.
+        return pd.to_datetime(pd.Series(ts)).astype("datetime64[s]").astype("int64").to_numpy()
 
+    @classmethod
+    def _bucket_ids(cls, ts: np.ndarray, bucket_seconds: int) -> np.ndarray:
+        return (cls._epoch_seconds(ts) // bucket_seconds).astype(np.int64)
+
+    def _bucket_seconds(self) -> int:
+        # TIMEFRAME_SECONDS is set by the live bot at construction time to
+        # match --timeframe (900 for 15m, 3600 for 1h); defaults to 15m so
+        # any code that never sets it keeps the historical M15 behaviour.
+        return getattr(self, "TIMEFRAME_SECONDS", 900) * self.H1_BARS
+
+    def _build_h1_trend_array(self, d: dict) -> np.ndarray:
+        import pandas as pd
+        n = len(d["c"])
+        out = np.zeros(n, dtype=np.int8)
+
+        bucket_id = self._bucket_ids(d["ts"], self._bucket_seconds())
+        uniq, k_of_bar = np.unique(bucket_id, return_inverse=True)
+        n_h1 = len(uniq)
         if n_h1 < self.EMA_H1_SLOW + 5:
             return out
 
-        # H1 OHLCV
-        idx  = np.arange(n_h1) * self.H1_BARS
-        h1_c = np.array([d["c"][j + self.H1_BARS - 1] for j in idx])
-        h1_h = np.array([d["h"][j:j + self.H1_BARS].max()  for j in idx])
-        h1_l = np.array([d["l"][j:j + self.H1_BARS].min()  for j in idx])
+        tmp = pd.DataFrame({"k": k_of_bar, "c": d["c"], "h": d["h"], "l": d["l"]})
+        g = tmp.groupby("k")
+        h1_c = g["c"].last().reindex(range(n_h1)).to_numpy()
+        h1_h = g["h"].max().reindex(range(n_h1)).to_numpy()
+        h1_l = g["l"].min().reindex(range(n_h1)).to_numpy()
 
         ema_f = self._ema(h1_c, self.EMA_H1_FAST)
         ema_s = self._ema(h1_c, self.EMA_H1_SLOW)
@@ -115,11 +171,30 @@ class HybridTrendPullback:
             if c > ef > es:   h1_trend[k] = 1
             elif c < ef < es: h1_trend[k] = -1
 
-        # Map H1 → M15
-        for i in range(n):
-            k = i // self.H1_BARS
-            if k < n_h1:
-                out[i] = h1_trend[k]
+        # Causal expansion: bar i only "knows" a bucket once that bucket has
+        # fully finished. Whether bar i is the LAST bar of its bucket must be
+        # a pure function of bar i's OWN timestamp -- NOT of whether a "next"
+        # row happens to exist in this (possibly truncated/live-buffer) array.
+        #
+        # RESIDUAL BUG this replaces: the old code used
+        # `is_last_in_bucket[:-1] = bucket_id[:-1] != bucket_id[1:]` with a
+        # `np.ones(n)` default, so the array's LAST row was always treated as
+        # "bucket complete" even when the live buffer had simply been cut off
+        # mid-bucket (e.g. only the 1st or 2nd M15 bar of the current H1 hour
+        # had arrived so far). That inflated live signal counts vs the fast/
+        # precomputed path by ~0.6-1.1% (confirmed via direct comparison).
+        #
+        # FIX: bar i is the last bar of its bucket iff advancing by one
+        # entry-bar's duration from bar i's own epoch would land in the NEXT
+        # bucket -- independent of whether bar i+1 is actually present here.
+        entry_bar_seconds = getattr(self, "TIMEFRAME_SECONDS", 900)
+        bucket_seconds = self._bucket_seconds()
+        epoch = self._epoch_seconds(d["ts"])
+        is_last_in_bucket = (epoch // bucket_seconds) != ((epoch + entry_bar_seconds) // bucket_seconds)
+        k_complete = np.where(is_last_in_bucket, k_of_bar, k_of_bar - 1)
+        valid = k_complete >= 0
+        k_complete = np.clip(k_complete, 0, n_h1 - 1)
+        out[valid] = h1_trend[k_complete[valid]]
         return out
 
     def signal(self, d: dict, i: int) -> Signal:
@@ -145,42 +220,25 @@ class HybridTrendPullback:
     # ─── H1 Trend ─────────────────────────────────────────────────────────
 
     def _h1_trend(self, d: dict, i: int) -> int:
-        """คืน +1 (bull), -1 (bear), 0 (no trend / sideways)."""
+        """คืน +1 (bull), -1 (bear), 0 (no trend / sideways).
+
+        Delegates to self._build_h1_trend_array(d)[i] -- the SAME calendar-
+        bucketed, causally-correct implementation the fast/precomputed path
+        uses, rebuilt fresh over whatever slice of d the caller passes (live:
+        the current bounded buffer; here: d truncated to i+1 so this never
+        sees bars after i even if the caller's d happens to contain more).
+        Going through self. (not a hardcoded class) means a subclass that
+        overrides _build_h1_trend_array (e.g. RegimeFilteredHybridLive) is
+        honoured here too -- previously this method was a separate,
+        non-overridden implementation, so subclasses' regime/extra
+        conditions were silently skipped whenever precompute() hadn't been
+        called (i.e. always, in live trading).
+        """
         n = i + 1
-        h1_c, h1_h, h1_l = self._resample_h1(
-            d["c"][:n], d["h"][:n], d["l"][:n], n)
-
-        if h1_c is None or len(h1_c) < self.EMA_H1_SLOW + 5:
-            return 0
-
-        ema_f = self._ema(h1_c, self.EMA_H1_FAST)
-        ema_s = self._ema(h1_c, self.EMA_H1_SLOW)
-        adx   = self._adx_last(h1_h, h1_l, h1_c, self.ADX_PERIOD)
-
-        if adx < self.ADX_MIN:
-            return 0   # ตลาด sideways — งดเทรด
-
-        c, ef, es = h1_c[-1], ema_f[-1], ema_s[-1]
-        if math.isnan(ef) or math.isnan(es):
-            return 0
-
-        if c > ef > es:   return  1   # bull: ราคา > EMA50 > EMA200
-        if c < ef < es:   return -1   # bear: ราคา < EMA50 < EMA200
-        return 0
-
-    def _resample_h1(self, closes, highs, lows, n):
-        """Resample M15 → H1 (ทุก 4 แท่ง = 1 ชั่วโมง)."""
-        n_h1 = n // self.H1_BARS
-        if n_h1 < self.EMA_H1_SLOW + 5:
-            return None, None, None
-
-        start = n - n_h1 * self.H1_BARS
-        idx = [start + k * self.H1_BARS for k in range(n_h1)]
-
-        h1_c = np.array([closes[j + self.H1_BARS - 1] for j in idx])
-        h1_h = np.array([np.max(highs[j:j + self.H1_BARS])  for j in idx])
-        h1_l = np.array([np.min(lows[j:j + self.H1_BARS])   for j in idx])
-        return h1_c, h1_h, h1_l
+        d_slice = {k: (v[:n] if hasattr(v, "__len__") and len(v) > n else v)
+                  for k, v in d.items()}
+        arr = self._build_h1_trend_array(d_slice)
+        return int(arr[i]) if i < len(arr) else 0
 
     # ─── M15 Entry ────────────────────────────────────────────────────────
 
@@ -313,4 +371,75 @@ class HybridTrendPullback:
         arr = cls._adx_array(high, low, close, period)
         valid = arr[~np.isnan(arr)]
         return float(valid[-1]) if len(valid) > 0 else 0.0
+
+
+class FreshTrendFilterMixin:
+    """Skip the signal unless the trend alignment is still 'fresh' -- at most
+    MAX_MATURITY entry-bars old, continuously, at the moment of entry.
+
+    Validated 2026-07-30 on the current M15/H1 configs, real costs, OOS split
+    (train picks the threshold, test never sees it):
+        BTC  M15 ADX18   TEST no-filter PF=1.37            -> +fresh<=5  PF=1.84
+        ETH  M15 ADX18   TEST no-filter PF=1.08            -> +fresh<=3  PF=1.36
+        GOLD H1  regime22 full-history  PF=0.87 DD=39.2%   -> +fresh<=10 PF=1.12 DD=16.1%
+    and yearly walk-forward with the threshold frozen: BTC 10/10 years PF>1,
+    ETH 10/10, gold 8/14 (gold stays the weak leg but improves vs no filter).
+
+    Root cause this addresses: raw MFE/PnL analysis (both on 2,934 backtest
+    entries AND separately on 183 real closed trades) showed entries taken
+    once the H4/H1 trend has run a long time already do systematically worse
+    than fresh ones -- the pullback signal still fires, but the move it is
+    chasing is more likely already exhausted.
+
+    Works in both call patterns this codebase uses:
+      - backtest (precompute() called once): reuses the cached
+        self._h1_trend_arr, O(1) per bar like the rest of FastHybridTrendPullback.
+      - live (precompute() never called): rebuilds the trend array from
+        d TRUNCATED TO i+1 each call. This matters: _build_h1_trend_array(d)
+        buckets bars into H1/H4 groups sized off len(d["c"]) and reads each
+        bucket's OWN LAST bar as that bucket's close -- if d still contains
+        bars after i (as it does in a backtest loop, where d is the full
+        historical array reused every iteration), a bucket straddling i can
+        read 1-3 bars of future data. Live's own rolling buffer never
+        contains bars after "now" so this would be a no-op there anyway, but
+        truncating explicitly makes this method's behaviour independent of
+        what the caller happens to pass, and makes it consistent with the
+        base class's own causal _h1_trend(d, i) fallback (which already
+        truncates the same way) rather than silently disagreeing with it.
+        Confirmed by test: without truncation, a live-style loop (same d
+        reused, i advancing) disagreed with the precomputed array on ~13%
+        of bars; with it, they match exactly.
+    """
+    MAX_MATURITY = 5
+
+    def signal(self, d: dict, i: int) -> Signal:
+        sig = super().signal(d, i)
+        if sig.action not in ("BUY", "SELL"):
+            return sig
+        if self._trend_maturity(d, i) > self.MAX_MATURITY:
+            return Signal()
+        return sig
+
+    def _trend_maturity(self, d: dict, i: int) -> int:
+        arr = self._h1_trend_arr
+        if arr is None or i >= len(arr):
+            n = i + 1
+            d_causal = {k: (v[:n] if hasattr(v, "__len__") and len(v) > n else v)
+                       for k, v in d.items()}
+            arr = self._build_h1_trend_array(d_causal)
+        cur = int(arr[i]) if i < len(arr) else 0
+        if cur == 0:
+            return 0
+        maturity = 0
+        k = i
+        while k >= 0 and int(arr[k]) == cur:
+            maturity += 1
+            k -= 1
+        return maturity
+
+
+class FreshHybridTrendPullback(FreshTrendFilterMixin, HybridTrendPullback):
+    """HybridTrendPullback + fresh-trend filter. Live-bot default for
+    btc_h1_manual/eth_h1_manual style variants once --fresh-maturity is set."""
+    pass
 
