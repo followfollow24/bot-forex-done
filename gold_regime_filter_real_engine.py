@@ -58,16 +58,30 @@ class RegimeFilteredHybrid(FastHybridTrendPullback):
     """
 
     def _build_h1_trend_array(self, d: dict) -> np.ndarray:
+        # [FIX 2026-07-30] was position-based (idx = arange(n_h1)*H1_BARS,
+        # anchored to index 0 of whatever array was passed in) -- look-ahead
+        # bias near bucket boundaries, and disagreed with the live causal
+        # path. Rebuilt on the same calendar/timestamp-anchored bucket ids as
+        # forex_hybrid_strategy.HybridTrendPullback / gold_regime_live_strategy
+        # .RegimeFilteredHybridLive (self._bucket_ids/self._bucket_seconds).
+        # This file is research-only (not used by any live bot -- the live
+        # regime22 bot uses RegimeFilteredHybridLive), but any PF/Sharpe
+        # numbers this script printed before this fix used the buggy array
+        # and should not be trusted without rerunning.
         n = len(d["c"])
-        n_h1 = n // self.H1_BARS
         out = np.zeros(n, dtype=np.int8)
+
+        bucket_id = self._bucket_ids(d["ts"], self._bucket_seconds())
+        uniq, k_of_bar = np.unique(bucket_id, return_inverse=True)
+        n_h1 = len(uniq)
         if n_h1 < self.EMA_H1_SLOW + 5:
             return out
 
-        idx = np.arange(n_h1) * self.H1_BARS
-        h1_c = np.array([d["c"][j + self.H1_BARS - 1] for j in idx])
-        h1_h = np.array([d["h"][j:j + self.H1_BARS].max() for j in idx])
-        h1_l = np.array([d["l"][j:j + self.H1_BARS].min() for j in idx])
+        tmp = pd.DataFrame({"k": k_of_bar, "c": d["c"], "h": d["h"], "l": d["l"]})
+        g = tmp.groupby("k")
+        h1_c = g["c"].last().reindex(range(n_h1)).to_numpy()
+        h1_h = g["h"].max().reindex(range(n_h1)).to_numpy()
+        h1_l = g["l"].min().reindex(range(n_h1)).to_numpy()
 
         ema_f = self._ema(h1_c, self.EMA_H1_FAST)
         ema_s = self._ema(h1_c, self.EMA_H1_SLOW)
@@ -100,10 +114,20 @@ class RegimeFilteredHybrid(FastHybridTrendPullback):
             elif c < ef < es:
                 h1_trend[k] = -1
 
-        for i in range(n):
-            k = i // self.H1_BARS
-            if k < n_h1:
-                out[i] = h1_trend[k]
+        # Causal expansion (see forex_hybrid_strategy.py for why this must be
+        # timestamp-derived): bar i only "knows" a bucket once it has
+        # actually completed. The old `out[i] = h1_trend[i // H1_BARS]` used
+        # the bucket bar i falls INSIDE, not the last COMPLETED one -- i.e.
+        # every bar in a bucket saw that bucket's full-bucket EMA/ADX value,
+        # including bars from later in the same bucket. Real look-ahead.
+        entry_bar_seconds = getattr(self, "TIMEFRAME_SECONDS", 900)
+        bucket_seconds = self._bucket_seconds()
+        epoch = self._epoch_seconds(d["ts"])
+        is_last_in_bucket = (epoch // bucket_seconds) != ((epoch + entry_bar_seconds) // bucket_seconds)
+        k_complete = np.where(is_last_in_bucket, k_of_bar, k_of_bar - 1)
+        valid = k_complete >= 0
+        k_complete = np.clip(k_complete, 0, n_h1 - 1)
+        out[valid] = h1_trend[k_complete[valid]]
         return out
 
 

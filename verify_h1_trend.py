@@ -12,6 +12,7 @@ code was working correctly and simply caught a trend that was about to flip.
 ASCII-only. Runs on the VPS from the repo dir.
 """
 import numpy as np
+import pandas as pd
 import MetaTrader5 as mt5
 from datetime import datetime, timezone
 from forex_hybrid_strategy import HybridTrendPullback
@@ -35,7 +36,13 @@ c   = np.array([r["close"]for r in rates], dtype=float)
 print("M15 bars: %d   %s -> %s (UTC)"
       % (len(c), datetime.utcfromtimestamp(t[0]), datetime.utcfromtimestamp(t[-1])))
 
-d = {"o": o, "h": h, "l": l, "c": c}
+# [FIX 2026-07-30] d["ts"] is required by the now-fixed, calendar-anchored
+# _build_h1_trend_array/_h1_trend (see forex_hybrid_strategy.py) -- this
+# script predates that fix and had no "ts" key at all, which would now raise
+# a KeyError. Build it the same way forex_indicators.build_data_dict does
+# (string-formatted timestamps), from MT5's raw epoch-seconds "time" field.
+ts = pd.to_datetime(t, unit="s").astype(str).to_numpy()
+d = {"o": o, "h": h, "l": l, "c": c, "ts": ts}
 
 strat = HybridTrendPullback()
 strat.ADX_MIN = ADX_MIN
@@ -43,13 +50,22 @@ strat.precompute(d)                     # builds strat._h1_trend_arr (M15-mapped
 trend_arr = strat._h1_trend_arr
 
 # ---- rebuild the SAME H1 arrays the class used, to show WHY ----
+# [FIX 2026-07-30] was position-based (idx = arange(n_h1)*H1_BARS, anchored
+# to index 0 of whatever array was passed in) -- this diagnostic display
+# block now mirrors the class's own calendar/timestamp-anchored bucketing
+# (self._bucket_ids/_bucket_seconds) so what's printed here matches what
+# strat._h1_trend_arr actually contains.
 H = HybridTrendPullback.H1_BARS
-n = len(c); n_h1 = n // H
-idx = np.arange(n_h1) * H
-h1_c = np.array([c[j + H - 1] for j in idx])
-h1_h = np.array([h[j:j+H].max() for j in idx])
-h1_l = np.array([l[j:j+H].min() for j in idx])
-h1_t = np.array([t[j] for j in idx])            # H1 open time (approx)
+n = len(c)
+bucket_id = strat._bucket_ids(ts, strat._bucket_seconds())
+uniq, k_of_bar = np.unique(bucket_id, return_inverse=True)
+n_h1 = len(uniq)
+tmp = pd.DataFrame({"k": k_of_bar, "c": c, "h": h, "l": l, "t": t})
+g = tmp.groupby("k")
+h1_c = g["c"].last().reindex(range(n_h1)).to_numpy()
+h1_h = g["h"].max().reindex(range(n_h1)).to_numpy()
+h1_l = g["l"].min().reindex(range(n_h1)).to_numpy()
+h1_t = g["t"].first().reindex(range(n_h1)).to_numpy()   # H1 open time (approx)
 ema_f = HybridTrendPullback._ema(h1_c, HybridTrendPullback.EMA_H1_FAST)
 ema_s = HybridTrendPullback._ema(h1_c, HybridTrendPullback.EMA_H1_SLOW)
 adx_a = HybridTrendPullback._adx_array(h1_h, h1_l, h1_c, HybridTrendPullback.ADX_PERIOD)
