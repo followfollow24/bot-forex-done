@@ -39,6 +39,19 @@ class GoldManualExitBot(GoldCWiderBot):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # [FIX 2026-07-31] "Manual exit" means no automatic profit-taking at
+        # all -- not just no fixed TP. HybridTrendPullback already defaults
+        # trail_atr_mult/trail_activation_atr to 999 (off), so this was a
+        # no-op for btc_h1_manual/eth_h1_manual/gold_h1_manual. But
+        # GoldDailyDonchianBreakout defaults trailing ON (3.0xATR, activates
+        # at 1.0xATR) since that's how it was validated (PF 2.44/DD 3.1%) --
+        # left as-is, this class's trailing stop would still auto-close
+        # positions, defeating the entire point of routing through
+        # GoldManualExitBot. Force it off here so ANY strategy run through
+        # this wrapper is unambiguously SL-only + manual close, matching
+        # what "--manual-exit" actually promises regardless of strategy_cls.
+        self.strategy.trail_atr_mult = 999.0
+        self.strategy.trail_activation_atr = 999.0
         self._alerted_atr_level_max = {}  # trade_id -> highest whole-ATR profit milestone already alerted
         self._alerted_atr_level_min = {}  # trade_id -> lowest (most negative) whole-ATR drawdown milestone already alerted
 
