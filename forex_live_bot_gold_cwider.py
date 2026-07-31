@@ -130,6 +130,7 @@ from forex_indicators import add_indicators, build_data_dict
 from forex_hybrid_strategy import HybridTrendPullback, FreshHybridTrendPullback
 from gold_regime_live_strategy import RegimeFilteredHybridLive, FreshRegimeFilteredHybridLive
 from gold_daily_breakout_strategy import GoldDailyDonchianBreakout
+from btc_donchian_breakout_strategy import BTCH1DonchianBreakout
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -241,6 +242,12 @@ VARIANT_MAGIC_OFFSET = {
     # PF=2.44/DD=3.1%, 12/14 years profitable. Offset 150, clear of every
     # existing slot.
     "gold_daily_breakout": 150,
+    # btc_h1_breakout (see btc_donchian_breakout_strategy.py): Donchian
+    # breakout on H1, run ALONGSIDE btc_h1_manual (not replacing it) as a
+    # second, structurally different BTC signal. OOS PF=1.17/Sharpe=0.87,
+    # corr=0.29 to btc_h1_manual. Offset 20, clear of BTC's existing 0/10
+    # slots (btc_cons/btc_aggr).
+    "btc_h1_breakout": 20,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -371,6 +378,8 @@ class GoldCWiderBot:
                  tp_atr: Optional[float] = None,
                  adx_min: Optional[float] = None,
                  fresh_maturity: Optional[int] = None,
+                 donch_win: Optional[int] = None,
+                 breakout_margin_atr: Optional[float] = None,
                  symbol: Optional[str] = None,
                  variant_tag: Optional[str] = None,
                  timeframe: Optional[str] = None,
@@ -442,6 +451,10 @@ class GoldCWiderBot:
             # attribute on a non-Fresh class is harmless (unused) rather than
             # an error, so this stays safe even if called directly.
             self.strategy.MAX_MATURITY = fresh_maturity
+        if donch_win is not None and hasattr(self.strategy, "DONCH_WIN"):
+            self.strategy.DONCH_WIN = donch_win
+        if breakout_margin_atr is not None and hasattr(self.strategy, "BREAKOUT_MARGIN_ATR"):
+            self.strategy.BREAKOUT_MARGIN_ATR = breakout_margin_atr
         # ไม่มี trail/partial/breakeven ใน bot นี้ — ค่าเหล่านี้ไม่ถูกอ้างถึงเลย
 
         self.connector: Optional[MT5Connector] = None
@@ -1374,6 +1387,25 @@ def main():
                          "Do not enable this without rerunning "
                          "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
+    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian"],
+                    help="'auto' (default): pick strategy_cls from --timeframe/--regime-filter/"
+                         "--fresh-maturity as usual. 'donchian': force "
+                         "GoldDailyDonchianBreakout regardless of --timeframe (works on any "
+                         "entry timeframe -- window/margin are in units of entry bars, not "
+                         "calendar days, once --timeframe != 1d), ignoring --regime-filter/"
+                         "--fresh-maturity/--adx-min (all HybridTrendPullback-family options "
+                         "that don't apply to a Donchian channel). 2026-07-31: validated for "
+                         "BTCUSDc on --timeframe 1h (OOS PF=1.17, Sharpe=0.87, 7/10yr PF>1, "
+                         "corr=0.29 to the existing pullback signal) -- see "
+                         "btc_donchian_breakout_strategy.py.")
+    ap.add_argument("--donch-win", type=int, default=None,
+                    help="Donchian channel lookback in entry-bars, overrides the strategy "
+                         "class default (80). Only meaningful with --strategy donchian or "
+                         "--timeframe 1d.")
+    ap.add_argument("--breakout-margin-atr", type=float, default=None,
+                    help="Require the close to clear the channel by this many xATR before "
+                         "counting as a breakout, overrides the class default (0.25). Only "
+                         "meaningful with --strategy donchian or --timeframe 1d.")
     ap.add_argument("--max-positions", type=int, default=1,
                     help="จำนวน position พร้อมกันสูงสุดต่อ instance (default 1 = พฤติกรรมเดิม). "
                          "แต่ละ position independent (own entry/SL/TP/lot/bars).")
@@ -1488,6 +1520,21 @@ def main():
         strategy_cls = (FreshRegimeFilteredHybridLive if args.regime_filter
                         else FreshHybridTrendPullback)
 
+    if args.strategy == "donchian":
+        # Overrides whatever --timeframe/--regime-filter/--fresh-maturity
+        # picked above -- Donchian breakout is a completely different signal
+        # (single rolling channel, no H1_BARS trend bucketing at all), so
+        # those HybridTrendPullback-family options don't compose with it.
+        # See btc_donchian_breakout_strategy.py for the BTC H1 validation
+        # this was built for; reuses the same generic mechanics as
+        # gold_daily_breakout_strategy.py (--timeframe 1d path above).
+        if args.regime_filter or args.fresh_maturity > 0:
+            print("[WARN] --strategy donchian ignores --regime-filter/"
+                  "--fresh-maturity/--adx-min (none of them apply to a "
+                  "Donchian channel) -- proceeding without them.",
+                  file=sys.stderr)
+        strategy_cls = BTCH1DonchianBreakout
+
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
 
@@ -1561,6 +1608,8 @@ def main():
             tp_atr=TP_ATR,
             adx_min=ADX_MIN,
             fresh_maturity=args.fresh_maturity,
+            donch_win=args.donch_win,
+            breakout_margin_atr=args.breakout_margin_atr,
             symbol=SYMBOL,
             variant_tag=VARIANT_TAG,
             timeframe=TIMEFRAME,
