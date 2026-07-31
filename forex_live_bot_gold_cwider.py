@@ -129,6 +129,7 @@ from forex_config import ForexConfig
 from forex_indicators import add_indicators, build_data_dict
 from forex_hybrid_strategy import HybridTrendPullback, FreshHybridTrendPullback
 from gold_regime_live_strategy import RegimeFilteredHybridLive, FreshRegimeFilteredHybridLive
+from gold_daily_breakout_strategy import GoldDailyDonchianBreakout
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -219,6 +220,13 @@ VARIANT_MAGIC_OFFSET = {
     "btc_h1_manual":  120,
     "eth_h1_manual":  130,
     "gold_h1_manual": 140,
+    # gold_daily_breakout (see gold_daily_breakout_strategy.py): Donchian
+    # channel breakout, --timeframe 1d only. Structurally different signal
+    # from every HybridTrendPullback-family variant above (momentum/breakout,
+    # not pullback-to-EMA) -- OOS-validated PF=3.22/DD=2.9%, full-history
+    # PF=2.44/DD=3.1%, 12/14 years profitable. Offset 150, clear of every
+    # existing slot.
+    "gold_daily_breakout": 150,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -398,6 +406,18 @@ class GoldCWiderBot:
         self.log = self._setup_logging()
 
         self.strategy = strategy_cls()
+        # [FIX 2026-07-30] TIMEFRAME_SECONDS must match self.timeframe (the
+        # ACTUAL entry-bar spacing fetched from MT5), not the class default of
+        # 900 (15m). _bucket_seconds() = TIMEFRAME_SECONDS * H1_BARS(4) -- if
+        # this is left at 900 while --timeframe 1h feeds native H1 candles,
+        # the trend bucket (meant to be 4x the entry bar = H4) collapses to
+        # exactly 1 entry bar per bucket, silently disabling all H4
+        # aggregation (EMA50/200/ADX14 would run directly on raw H1 bars
+        # instead of on 4-bar H4 candles). Confirmed by tracing through
+        # _bucket_seconds()/_build_h1_trend_array before this fix existed.
+        tf_mul_sec = {"m": 60, "h": 3600, "d": 86400}
+        _tf_v, _tf_u = int(self.timeframe[:-1]), self.timeframe[-1]
+        self.strategy.TIMEFRAME_SECONDS = _tf_v * tf_mul_sec.get(_tf_u, 60)
         self.strategy.sl_atr = SL_ATR if sl_atr is None else sl_atr
         self.strategy.tp_atr = TP_ATR if tp_atr is None else tp_atr
         self.strategy.ADX_MIN = ADX_MIN if adx_min is None else adx_min
@@ -581,9 +601,19 @@ class GoldCWiderBot:
             f"  Balance       : {balance:,.2f} {currency}   Equity: {equity:,.2f} {currency}",
             f"  Symbol        : {self.symbol}  ->  resolved broker symbol: {self.bsym}",
             f"  Strategy      : {self.strategy.name}",
-            f"  Entry TF      : {self.timeframe.upper()}    Trend TF: H1 (resampled, EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})",
+            (f"  Entry TF      : {self.timeframe.upper()}    Trend TF: H1 (resampled, "
+             f"EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})"
+             if hasattr(self.strategy, "EMA_H1_FAST") else
+             f"  Entry TF      : {self.timeframe.upper()}    "
+             f"Signal: {self.strategy.DONCH_WIN}-bar Donchian breakout"
+             f" (margin={self.strategy.BREAKOUT_MARGIN_ATR}xATR)"
+             if hasattr(self.strategy, "DONCH_WIN") else
+             f"  Entry TF      : {self.timeframe.upper()}"),
             f"  Exit config   : SL={self.strategy.sl_atr}xATR  TP={self.strategy.tp_atr}xATR"
-            f"   | Partial-TP=OFF  Move-to-BE=OFF  Trailing=OFF",
+            + (f"   | Trailing={self.strategy.trail_atr_mult}xATR"
+               f" activate@{self.strategy.trail_activation_atr}xATR"
+               if getattr(self.strategy, "trail_atr_mult", 999.0) < 900
+               else "   | Partial-TP=OFF  Move-to-BE=OFF  Trailing=OFF"),
             f"  Fresh-filter  : {'ON, max maturity=' + str(self.strategy.MAX_MATURITY) + ' entry-bars' if hasattr(self.strategy, 'MAX_MATURITY') else 'OFF'}",
             f"  Max hold      : {self.cfg.max_hold_bars} bars"
             f" (= {self.cfg.max_hold_bars * self.cfg.timeframe_minutes / 60:g} hours)",
@@ -1321,10 +1351,14 @@ def main():
                          "--variant-tag adx20_manual")
     ap.add_argument("--fresh-maturity", type=int, default=0,
                     help="Skip entries whose H1/H4 trend alignment is already older than "
-                         "N entry-bars (0 = disabled). Validated 2026-07-30: gold H1 "
-                         "regime22 fresh<=10 (PF 0.87->1.12, DD 39%%->16%%), BTC M15 "
-                         "fresh<=5 (OOS PF 1.37->1.84), ETH M15 fresh<=3 (OOS PF 1.08->1.36). "
-                         "Composes with --regime-filter automatically. See "
+                         "N entry-bars (0 = disabled). CAUTION: the 2026-07-30 numbers "
+                         "this flag was originally validated against were computed with a "
+                         "since-fixed look-ahead bug in the H1/H4 bucket calculation -- "
+                         "re-validated 2026-07-31 with the corrected engine: gold regime22 "
+                         "has NO edge with or without this filter (PF<1, DD>30%%), and for "
+                         "BTC/ETH the filter made results WORSE than no filter, not better. "
+                         "Do not enable this without rerunning "
+                         "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
     ap.add_argument("--max-positions", type=int, default=1,
                     help="จำนวน position พร้อมกันสูงสุดต่อ instance (default 1 = พฤติกรรมเดิม). "
@@ -1340,6 +1374,9 @@ def main():
     ap.add_argument("--timeframe", type=str, default="15m",
                     help="Entry timeframe: '15m' (default), '1h' (validated 2026-07-29 — "
                          "far better cost/ATR and entry quality than 15m), "
+                         "'1d' (Donchian breakout only — see gold_daily_breakout_strategy.py; "
+                         "auto-selects GoldDailyDonchianBreakout, ignores "
+                         "--regime-filter/--fresh-maturity/--adx-min), "
                          "'5m' (blocked — retired after live testing), "
                          "'1m' (blocked — unvalidated).")
     ap.add_argument("--risk", type=float, default=0.0,
@@ -1402,19 +1439,34 @@ def main():
         MAX_HOLD_BARS = 64     # 64 × 1h = 64h ≈ 2.7 days
         HISTORY_BARS  = 900    # 900 H1 bars ≈ 37 days; covers EMA200-on-H4 warm-up
         strategy_cls  = HybridTrendPullback
+    elif tf in ("1d", "d", "daily"):
+        # [DAILY] Added 2026-07-31 for gold_daily_breakout -- see
+        # gold_daily_breakout_strategy.py for the full validation summary.
+        # Structurally different from every branch above (Donchian breakout,
+        # not H1_BARS trend-pullback), so --regime-filter/--fresh-maturity
+        # don't apply here and are ignored below with a warning if passed.
+        TIMEFRAME     = "1d"
+        MAX_HOLD_BARS = 20     # 20 trading days cap; trailing stop does most exits
+        HISTORY_BARS  = 500    # ~500 daily bars covers DONCH_WIN=80 + margin
+        strategy_cls  = GoldDailyDonchianBreakout
     else:
         TIMEFRAME     = "15m"
         MAX_HOLD_BARS = 64     # 64 × 15min = 960min = 16h
         HISTORY_BARS  = 900
         strategy_cls  = HybridTrendPullback
 
-    if args.regime_filter:
+    if tf in ("1d", "d", "daily") and (args.regime_filter or args.fresh_maturity > 0):
+        print("[WARN] --regime-filter/--fresh-maturity are HybridTrendPullback-"
+              "family options (H1_BARS trend array) and do not apply to "
+              "GoldDailyDonchianBreakout (--timeframe 1d) -- ignoring them.",
+              file=sys.stderr)
+    elif args.regime_filter:
         # Swaps only the H1 trend array construction (adds frozen ADX-rising +
         # EMA-gap>1.2xATR conditions on top of the same ADX_MIN threshold) --
         # M15 entry/SL/TP/cost model untouched. See gold_regime_live_strategy.py.
         strategy_cls = RegimeFilteredHybridLive
 
-    if args.fresh_maturity > 0:
+    if tf not in ("1d", "d", "daily") and args.fresh_maturity > 0:
         # Compose with the fresh-trend filter on top of whichever base class
         # --regime-filter already selected, using the pre-built combo classes
         # rather than dynamic type() composition (simpler to reason about,
