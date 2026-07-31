@@ -166,6 +166,20 @@ MT5_IO_WORKERS             = 3
 # Magic numbers per symbol (base 555000 + index)
 SYMBOL_MAGIC = {
     "XAUUSD": 555003,
+    # [FIX 2026-07-31] "XAUUSD" alone NEVER matches at runtime: main() always
+    # does SYMBOL=args.symbol.upper(), and every gold bot is launched with
+    # --symbol XAUUSDc (broker cent-suffix), so SYMBOL is always "XAUUSDC"
+    # (with the C). This is the EXACT bug already caught and fixed for BTC/ETH
+    # below on 2026-07-11 (see BTCUSDC/ETHUSDC comments) but never applied to
+    # gold -- every gold variant (gold_h1_manual, gold_daily_breakout, etc.)
+    # has been silently falling through to the hash-based fallback magic
+    # number the whole time, which is not stable across restarts (Python's
+    # str hash is randomized per-process by default) -- a bot that crashes
+    # and restarts while holding an open position would get a NEW magic
+    # number and fail to recognize its own position. Kept "XAUUSD" (no C)
+    # too since preflight_gold_regime.py/preflight_gold_manual.py index this
+    # dict directly with that key.
+    "XAUUSDC": 555003,
     "EURUSD": 555001,
     "GBPUSD": 555002,
     # BTCUSDc uses a distinct 666000-series base (not 555xxx) so a magic-number
