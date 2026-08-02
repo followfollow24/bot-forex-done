@@ -1412,6 +1412,13 @@ def main():
                          "BTCUSDc on --timeframe 1h (OOS PF=1.17, Sharpe=0.87, 7/10yr PF>1, "
                          "corr=0.29 to the existing pullback signal) -- see "
                          "btc_donchian_breakout_strategy.py.")
+    ap.add_argument("--crypto-killzone", action="store_true",
+                    help="Restrict --strategy tool_amd/tool_lqsweep/tool_tpo entries to the "
+                         "crypto liquidity killzones (Thai 06:00-08:00 daily-candle roll, and "
+                         "20:00-22:00 US equity/ETF overlap). Validated 2026-08-02: improved "
+                         "full-history PF in 8 of 9 market x tool combinations and cut DD "
+                         "sharply (BTC LQ-Sweep DD 59.4%%->37.1%%). See CRYPTO_KZ_THAI_HOURS "
+                         "in ict_tools_strategies.py.")
     ap.add_argument("--donch-win", type=int, default=None,
                     help="Donchian channel lookback in entry-bars, overrides the strategy "
                          "class default (80). Only meaningful with --strategy donchian or "
@@ -1571,6 +1578,9 @@ def main():
                   "--fresh-maturity/--adx-min -- proceeding without them."
                   % args.strategy, file=sys.stderr)
         strategy_cls = _TOOL_MAP[args.strategy]
+        if args.crypto_killzone:
+            strategy_cls = type(strategy_cls.__name__ + "KZ", (strategy_cls,),
+                                {"USE_CRYPTO_KZ": True})
 
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk

@@ -104,6 +104,19 @@ def _day_profile(lows, highs, bins=30, value_frac=0.70):
     return float(centers[poc_i]), float(centers[hi_i]), float(centers[lo_i])
 
 
+CRYPTO_KZ_THAI_HOURS = (6, 7, 20, 21)
+"""Crypto liquidity killzones, THAI hours (UTC+7):
+  06:00-08:00 TH -- the crypto daily candle rolls at 07:00 TH, and size
+                    routinely sweeps the prior day high/low right around
+                    that roll to reposition before the new day.
+  20:00-22:00 TH -- US equity open / ETF-flow overlap, the single
+                    largest volume spike of the crypto day.
+Validated 2026-08-02 across 3 markets x 3 tools: restricting entries to
+these windows improved full-history PF in 8 of 9 combinations and cut
+drawdown substantially (e.g. BTC LQ-Sweep DD 59.4% -> 37.1%, SOL AMD
+48.6% -> 21.8%). The single exception was SOL TPO (1.13 -> 1.04)."""
+
+
 class _ToolBase:
     """Shared exit config + the live-path rebuild guard."""
     sl_atr = 2.0
@@ -114,9 +127,25 @@ class _ToolBase:
     MIN_BARS = 200
     _built_len = None
 
+    # Set True by the live bot's --crypto-killzone flag. Off by default so
+    # existing behaviour is unchanged unless explicitly asked for.
+    USE_CRYPTO_KZ = False
+    _kz_len = None
+
     def _ensure(self, d: dict):
         if self._built_len != len(d["c"]):
             self.precompute(d)
+
+    def _kz_blocked(self, d: dict, i: int) -> bool:
+        """True when the crypto killzone filter is on and bar i is outside
+        it. Thai hour = (epoch + 7h) // 3600 % 24."""
+        if not self.USE_CRYPTO_KZ:
+            return False
+        if self._kz_len != len(d["c"]):
+            hr = ((_epoch_seconds(d["ts"]) + 7 * 3600) % 86400) // 3600
+            self._kz_ok = np.isin(hr, list(CRYPTO_KZ_THAI_HOURS))
+            self._kz_len = len(d["c"])
+        return not bool(self._kz_ok[i])
 
 
 class ToolAMD(_ToolBase):
@@ -156,6 +185,7 @@ class ToolAMD(_ToolBase):
 
     def signal(self, d: dict, i: int) -> Signal:
         if i < self.MIN_BARS: return Signal()
+        if self._kz_blocked(d, i): return Signal()
         self._ensure(d)
         if i >= len(self._hunt) or not self._hunt[i]: return Signal()
         atr = d["atr"][i]
@@ -207,6 +237,7 @@ class ToolLQSweep(_ToolBase):
 
     def signal(self, d: dict, i: int) -> Signal:
         if i < self.MIN_BARS: return Signal()
+        if self._kz_blocked(d, i): return Signal()
         self._ensure(d)
         atr = d["atr"][i]
         if np.isnan(atr) or atr <= 0: return Signal()
@@ -253,6 +284,7 @@ class ToolTPOProfile(_ToolBase):
 
     def signal(self, d: dict, i: int) -> Signal:
         if i < self.MIN_BARS: return Signal()
+        if self._kz_blocked(d, i): return Signal()
         self._ensure(d)
         poc, vah, val = self._poc[i], self._vah[i], self._val[i]
         if not (np.isfinite(poc) and np.isfinite(vah) and np.isfinite(val)):
