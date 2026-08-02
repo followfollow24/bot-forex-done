@@ -131,6 +131,7 @@ from forex_hybrid_strategy import HybridTrendPullback, FreshHybridTrendPullback
 from gold_regime_live_strategy import RegimeFilteredHybridLive, FreshRegimeFilteredHybridLive
 from gold_daily_breakout_strategy import GoldDailyDonchianBreakout
 from btc_donchian_breakout_strategy import BTCH1DonchianBreakout
+from amd_sweep_tpo_strategy import AMDSweepTPO
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -248,6 +249,11 @@ VARIANT_MAGIC_OFFSET = {
     # corr=0.29 to btc_h1_manual. Offset 20, clear of BTC's existing 0/10
     # slots (btc_cons/btc_aggr).
     "btc_h1_breakout": 20,
+    # btc_amd_sweep (see amd_sweep_tpo_strategy.py): AMD + liquidity sweep
+    # + TPO profile. FAILED backtest (BTC H1 PF 0.96, best of a family that
+    # ranged 0.32-0.96) -- deployed as an entry signal only, at reduced
+    # risk, by explicit user decision after being shown these numbers.
+    "btc_amd_sweep": 30,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1387,7 +1393,7 @@ def main():
                          "Do not enable this without rerunning "
                          "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
-    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian"],
+    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd"],
                     help="'auto' (default): pick strategy_cls from --timeframe/--regime-filter/"
                          "--fresh-maturity as usual. 'donchian': force "
                          "GoldDailyDonchianBreakout regardless of --timeframe (works on any "
@@ -1534,6 +1540,17 @@ def main():
                   "Donchian channel) -- proceeding without them.",
                   file=sys.stderr)
         strategy_cls = BTCH1DonchianBreakout
+
+    if args.strategy == "amd":
+        # AMD + liquidity sweep + TPO profile. Like 'donchian' this is a
+        # standalone signal -- none of the HybridTrendPullback-family
+        # options compose with it. See amd_sweep_tpo_strategy.py for the
+        # (failing) validation record this was deployed against.
+        if args.regime_filter or args.fresh_maturity > 0:
+            print("[WARN] --strategy amd ignores --regime-filter/"
+                  "--fresh-maturity/--adx-min -- proceeding without them.",
+                  file=sys.stderr)
+        strategy_cls = AMDSweepTPO
 
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
