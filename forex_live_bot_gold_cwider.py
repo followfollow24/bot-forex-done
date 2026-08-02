@@ -132,6 +132,7 @@ from gold_regime_live_strategy import RegimeFilteredHybridLive, FreshRegimeFilte
 from gold_daily_breakout_strategy import GoldDailyDonchianBreakout
 from btc_donchian_breakout_strategy import BTCH1DonchianBreakout
 from amd_sweep_tpo_strategy import AMDSweepTPO
+from ict_tools_strategies import ToolAMD, ToolLQSweep, ToolTPOProfile
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -254,6 +255,13 @@ VARIANT_MAGIC_OFFSET = {
     # ranged 0.32-0.96) -- deployed as an entry signal only, at reduced
     # risk, by explicit user decision after being shown these numbers.
     "btc_amd_sweep": 30,
+    # One bot per ICT tool (see ict_tools_strategies.py). Splitting the
+    # three apart beat the combined btc_amd_sweep on every one of them
+    # (combined PF 0.96 vs AMD 1.01 / LQ 1.06 / TPO 1.14 on BTC H1) --
+    # stacking them as one filter chain was destroying signal.
+    "btc_amd": 40,
+    "btc_lqsweep": 50,
+    "btc_tpo": 60,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1393,7 +1401,7 @@ def main():
                          "Do not enable this without rerunning "
                          "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
-    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd"],
+    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd", "tool_amd", "tool_lqsweep", "tool_tpo"],
                     help="'auto' (default): pick strategy_cls from --timeframe/--regime-filter/"
                          "--fresh-maturity as usual. 'donchian': force "
                          "GoldDailyDonchianBreakout regardless of --timeframe (works on any "
@@ -1551,6 +1559,18 @@ def main():
                   "--fresh-maturity/--adx-min -- proceeding without them.",
                   file=sys.stderr)
         strategy_cls = AMDSweepTPO
+
+    _TOOL_MAP = {"tool_amd": ToolAMD, "tool_lqsweep": ToolLQSweep,
+                 "tool_tpo": ToolTPOProfile}
+    if args.strategy in _TOOL_MAP:
+        # One ICT tool in isolation -- see ict_tools_strategies.py for the
+        # per-tool OOS record. Standalone signals: none of the
+        # HybridTrendPullback-family options compose with them.
+        if args.regime_filter or args.fresh_maturity > 0:
+            print("[WARN] --strategy %s ignores --regime-filter/"
+                  "--fresh-maturity/--adx-min -- proceeding without them."
+                  % args.strategy, file=sys.stderr)
+        strategy_cls = _TOOL_MAP[args.strategy]
 
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
