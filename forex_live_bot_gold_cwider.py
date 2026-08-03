@@ -133,6 +133,7 @@ from gold_daily_breakout_strategy import GoldDailyDonchianBreakout
 from btc_donchian_breakout_strategy import BTCH1DonchianBreakout
 from amd_sweep_tpo_strategy import AMDSweepTPO
 from ict_tools_strategies import ToolAMD, ToolLQSweep, ToolTPOProfile
+from gold_momentum_rsi_strategy import GoldMomentumRSI
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -262,6 +263,13 @@ VARIANT_MAGIC_OFFSET = {
     "btc_amd": 40,
     "btc_lqsweep": 50,
     "btc_tpo": 60,
+    # gold_momentum_rsi (see gold_momentum_rsi_strategy.py): momentum +
+    # RSI-recent entry, 3rd iteration of a gold trend+RSI family tested
+    # 2026-08-03. FAILS backtest (PF 0.41 real cost, PF 0.93 even at
+    # ZERO cost, OOS train/test both negative and consistent -- a real,
+    # mild, persistent negative edge, not overfitting). Deployed as
+    # entry-signal-only at reduced risk by explicit user decision.
+    "gold_momentum_rsi": 70,
 }
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1401,7 +1409,7 @@ def main():
                          "Do not enable this without rerunning "
                          "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
-    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd", "tool_amd", "tool_lqsweep", "tool_tpo"],
+    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd", "tool_amd", "tool_lqsweep", "tool_tpo", "gold_mom_rsi"],
                     help="'auto' (default): pick strategy_cls from --timeframe/--regime-filter/"
                          "--fresh-maturity as usual. 'donchian': force "
                          "GoldDailyDonchianBreakout regardless of --timeframe (works on any "
@@ -1581,6 +1589,15 @@ def main():
         if args.crypto_killzone:
             strategy_cls = type(strategy_cls.__name__ + "KZ", (strategy_cls,),
                                 {"USE_CRYPTO_KZ": True})
+
+    if args.strategy == "gold_mom_rsi":
+        # Standalone signal -- see gold_momentum_rsi_strategy.py for the
+        # (failing) validation record this was deployed against.
+        if args.regime_filter or args.fresh_maturity > 0:
+            print("[WARN] --strategy gold_mom_rsi ignores --regime-filter/"
+                  "--fresh-maturity/--adx-min -- proceeding without them.",
+                  file=sys.stderr)
+        strategy_cls = GoldMomentumRSI
 
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
