@@ -56,6 +56,25 @@ function WLog($msg) {
 #       passed: HybridTrendPullback (never precompute'd, as live runs it) gives
 #       0 signal mismatches vs the validated FastHybridTrendPullback path over
 #       1,155 real BUY/SELL signals.
+#
+#  [2026-08-05] gold_h1_manual updated -- and TWO drifts corrected at the same
+#  time. What was ACTUALLY running differed from this file in two ways: the
+#  running process had NO --regime-filter and --risk 0.30, while this file said
+#  --regime-filter and --risk 1.90. A watchdog restart would have switched the
+#  regime filter ON and multiplied risk by 6x, silently.
+#    new config: --adx-min 10 --touch-tolerance 0.012 --risk 0.30, no regime filter
+#    Validated at the CORRECT gold spread of 0.24 (see the spread note below):
+#      OOS split  train PF 1.24 / Sharpe 0.62 -> OOS PF 1.21 / Sharpe 0.57
+#      yearly WF  11/14 years PF>1
+#      old live (adx22, no regime, touch 0.0015): OOS PF 1.15 / Sharpe 0.27
+#    Trades roughly TRIPLE (48/yr -> 141/yr) while quality improves.
+#
+#  GOLD SPREAD WARNING: the real XAUUSDc spread is $0.24 (measured live from
+#  MT5 2026-08-05: point 0.001, 240 points). Many backtest scripts in this repo
+#  hardcode 2.85, which is ~12x too large -- it is 255% of gold's M15 ATR, which
+#  no broker charges. Every gold "failure" computed at 2.85 must be re-tested
+#  before being believed; gold_h1_manual itself flips from PF 0.63 to PF 1.07
+#  purely from that correction.
 # -----------------------------------------------------------------------------
 $bots = @(
     @{
@@ -74,7 +93,7 @@ $bots = @(
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 22 --regime-filter --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
     }
 )
 
