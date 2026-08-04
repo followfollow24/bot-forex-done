@@ -399,6 +399,7 @@ class GoldCWiderBot:
                  sl_atr: Optional[float] = None,
                  tp_atr: Optional[float] = None,
                  adx_min: Optional[float] = None,
+                 touch_tolerance: Optional[float] = None,
                  fresh_maturity: Optional[int] = None,
                  donch_win: Optional[int] = None,
                  breakout_margin_atr: Optional[float] = None,
@@ -466,6 +467,14 @@ class GoldCWiderBot:
         self.strategy.sl_atr = SL_ATR if sl_atr is None else sl_atr
         self.strategy.tp_atr = TP_ATR if tp_atr is None else tp_atr
         self.strategy.ADX_MIN = ADX_MIN if adx_min is None else adx_min
+        # [2026-08-05] TOUCH_TOLERANCE = how far price may sit from the M15/entry
+        # EMA20 and still count as a "pullback touch". Class default 0.0015 was
+        # never tuned; a wider band (0.012) tested materially better on BTC H1
+        # (OOS Sharpe 0.81 -> 1.00, CAGR +11% -> +21%, 9/10 yrs PF>1, same DD
+        # and near-identical trade frequency). Only the trend-pullback family
+        # has this attribute -- hasattr guard keeps donchian/tool_*/mom_rsi safe.
+        if touch_tolerance is not None and hasattr(self.strategy, "TOUCH_TOLERANCE"):
+            self.strategy.TOUCH_TOLERANCE = touch_tolerance
         if fresh_maturity is not None and fresh_maturity > 0:
             # only meaningful if strategy_cls is one of the Fresh* combo
             # classes (main() only sets this when --fresh-maturity > 0, which
@@ -1387,6 +1396,10 @@ def main():
                     help=f"TP = N × ATR (default {TP_ATR} = C_wider). TP7 variant ใช้ 7.0")
     ap.add_argument("--adx-min", type=float, default=ADX_MIN,
                     help=f"ADX threshold สำหรับ H1 trend filter (default {ADX_MIN}). adx20tp7 ใช้ 20")
+    ap.add_argument("--touch-tolerance", type=float, default=None,
+                    help="ความกว้างของแถบ pullback รอบ EMA20 (class default 0.0015). "
+                         "BTC H1 validated 2026-08-05: 0.012 ให้ OOS Sharpe 1.00 (vs 0.81 ที่ค่า default) "
+                         "CAGR +21%% (vs +11%%) DD ใกล้เดิม 9/10 ปี PF>1 -- ใช้กับ trend-pullback family เท่านั้น")
     ap.add_argument("--regime-filter", action="store_true",
                     help="ใช้ RegimeFilteredHybridLive แทน HybridTrendPullback ธรรมดา -- เพิ่มเงื่อนไข "
                          "ADX rising + |EMA50-EMA200|>1.2xATR(H1) บน H1 trend array เดิม (ADX_MIN "
@@ -1671,6 +1684,7 @@ def main():
             sl_atr=SL_ATR,
             tp_atr=TP_ATR,
             adx_min=ADX_MIN,
+            touch_tolerance=args.touch_tolerance,
             fresh_maturity=args.fresh_maturity,
             donch_win=args.donch_win,
             breakout_margin_atr=args.breakout_margin_atr,

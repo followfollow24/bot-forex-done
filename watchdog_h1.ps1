@@ -40,13 +40,29 @@ function WLog($msg) {
 #                      self.variant_tag), so it works unchanged for BTC/ETH/gold.
 #    --risk 1.90       1.9%, not 2.0: lot is rounded to 2dp, and a round-up past
 #                      the cfg cap of 2.0% makes the bot SKIP the trade entirely
+#
+#  [2026-08-05] btc_h1_manual updated -- TWO changes, both deliberate:
+#    1. --risk 1.90 -> 1.00. The 2026-08-02 risk-parity rebalance (deploy_kz.ps1)
+#       changed the RUNNING process to 1.00 but never updated this file, so any
+#       watchdog restart would have silently reverted the approved rebalance back
+#       to 1.90. This file now matches what is actually live.
+#    2. --adx-min 18 -> 10, plus --touch-tolerance 0.012 (class default 0.0015).
+#       Validated 2026-08-05 on the fixed engine, BTC H1, real costs:
+#         OOS split  train PF 1.51/Sharpe 1.93 -> OOS PF 1.29/Sharpe 1.00
+#         yearly WF  9/10 years PF>1 (only 2022 bear fails, PF 0.69)
+#         vs the old adx18/0.0015 config: OOS Sharpe 0.81, CAGR +11%
+#       Trade frequency is essentially unchanged (~0.33 -> ~0.36 trades/day);
+#       the gain is signal QUALITY, not more trades. Live-path causal check
+#       passed: HybridTrendPullback (never precompute'd, as live runs it) gives
+#       0 signal mismatches vs the validated FastHybridTrendPullback path over
+#       1,155 real BUY/SELL signals.
 # -----------------------------------------------------------------------------
 $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
