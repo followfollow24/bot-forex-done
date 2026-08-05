@@ -1213,6 +1213,23 @@ class GoldCWiderBot:
     # ─────────────────────────────────────────────────────────────────────
     # Process a newly-closed M15 bar
     # ─────────────────────────────────────────────────────────────────────
+    def on_poll(self):
+        """Hook that runs on EVERY main-loop poll (~poll_interval_sec), not only
+        when a new bar closes. Base implementation is a no-op.
+
+        [2026-08-05] Added because GoldManualExitBot's +/-1xATR Telegram alerts
+        were wired into process_bar(), which the main loop only calls when
+        `added` > 0 -- i.e. once per CLOSED BAR. On the H1 bots that meant the
+        alert could only ever fire once an hour (once a DAY for
+        gold_daily_breakout), using the just-closed bar's close price. A move
+        that reached +2xATR mid-hour and retraced before the bar closed
+        produced no alert at all -- exactly the case that matters most for
+        bots running --manual-exit, where the user is the one deciding when to
+        close. Overridden in GoldManualExitBot to run the ATR-milestone check
+        against the LIVE tick instead.
+        """
+        return
+
     def process_bar(self):
         d = self.buf.d
         i = len(d["c"]) - 1
@@ -1326,6 +1343,16 @@ class GoldCWiderBot:
 
                 if added and self.buf.ready:
                     self.process_bar()
+
+                # Every poll, regardless of whether a bar closed. Keep this
+                # AFTER process_bar() so a just-opened position is already in
+                # self.positions on the same iteration. Must never raise --
+                # the trading loop takes priority over notifications.
+                if self.buf.ready:
+                    try:
+                        self.on_poll()
+                    except Exception as exc:
+                        self.log.error(f"[ON_POLL] ignored error: {exc}")
 
                 if now_ms - last_status_ms >= tf_ms:
                     self.log_status()

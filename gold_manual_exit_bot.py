@@ -55,9 +55,36 @@ class GoldManualExitBot(GoldCWiderBot):
         self._alerted_atr_level_max = {}  # trade_id -> highest whole-ATR profit milestone already alerted
         self._alerted_atr_level_min = {}  # trade_id -> lowest (most negative) whole-ATR drawdown milestone already alerted
 
-    def process_bar(self):
-        super().process_bar()
+    def on_poll(self):
+        """[FIX 2026-08-05] The ATR-milestone check used to hang off
+        process_bar(), which the main loop only calls when a new bar CLOSES.
+        On the H1 bots that capped alerts at one check per hour (once a DAY on
+        gold_daily_breakout), evaluated against the closed bar's close -- so a
+        spike to +2xATR that retraced before the hour ended was never
+        reported. Running it from on_poll() instead checks every
+        poll_interval_sec (~30s) against the LIVE tick. The
+        _alerted_atr_level_max/min ratchets still guarantee one message per
+        whole-ATR level per trade, so the higher check rate cannot cause spam.
+        """
         self._check_atr_milestones()
+
+    def _live_price(self, side: str):
+        """Live tick price to value an open position against, or None.
+
+        Uses the price the position would actually CLOSE at -- bid for a long,
+        ask for a short -- so the reported P&L matches what the user would get
+        by closing right now, rather than being optimistic by one spread.
+        """
+        try:
+            if mt5 is None:
+                return None
+            tick = mt5.symbol_info_tick(self.bsym)
+            if tick is None:
+                return None
+            px = tick.bid if side == "long" else tick.ask
+            return float(px) if px and px > 0 else None
+        except Exception:
+            return None
 
     def _check_atr_milestones(self):
         if not self.positions:
@@ -65,12 +92,13 @@ class GoldManualExitBot(GoldCWiderBot):
         d = self.buf.d
         if d is None:
             return
-        last_close = float(d["c"][-1])
+        bar_close = float(d["c"][-1])
 
         for pos in self.positions:
             if pos.entry_atr <= 0:
                 continue
             direction = 1 if pos.side == "long" else -1
+            last_close = self._live_price(pos.side) or bar_close
             profit_price = (last_close - pos.entry) * direction
             profit_atr = profit_price / pos.entry_atr
             level = int(profit_atr)  # floor toward zero: +1.9 -> 1, -0.5 -> 0, -1.9 -> -1
