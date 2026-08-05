@@ -905,17 +905,25 @@ class GoldCWiderBot:
                 and int(p.get("magic", 0) or 0) == self.cfg.magic_number]
         broker_ids = {str(p.get("id", "")) for p in mine}
 
-        # 1) drop tracked positions that no longer exist at broker
-        #    (closed by SL/TP/manual while the bot was down — can't reconstruct fill)
-        still_tracked = []
-        for pos in self.positions:
-            if pos.trade_id in broker_ids:
-                still_tracked.append(pos)
-            else:
+        # 1) any tracked position no longer at the broker was closed while
+        #    this bot was down (or fell into the once-per-hour close-detection
+        #    gap that existed before the 2026-08-05 on_poll() fix). Report it
+        #    like a normal close instead of silently discarding it.
+        #    [FIX 2026-08-05] This branch previously only logged a warning
+        #    and dropped the position -- the user got ZERO notification for
+        #    any position that happened to close while a bot was mid-restart.
+        #    Every deploy restarts one or more bots, so on a day with several
+        #    deploys this was a real, recurring silent-close path, not a rare
+        #    edge case -- root-caused from a live user report of "only one
+        #    notification the whole time" for a trade that, on inspection,
+        #    closed at the broker exactly during a restart window. Reuses
+        #    _log_broker_close() (same as a close detected live) with a wide
+        #    lookback since we don't know how long the bot was down for.
+        for pos in list(self.positions):
+            if pos.trade_id not in broker_ids:
                 self.log.warning(f"[RECOVER] tracked position {pos.trade_id} ไม่มีที่ broker "
-                                 f"— เคลียร์ทิ้ง (อาจถูกปิดไปแล้วตอนบอทไม่ทำงาน)")
-                self.executor.release_order_key(self.bsym, pos.side, pos.lot)
-        self.positions = still_tracked
+                                 f"— ปิดไปแล้วตอนบอทไม่ทำงาน, ส่ง best-effort close report")
+                self._log_broker_close(pos, lookback_minutes=1440)
 
         # 2) adopt any broker positions we are not yet tracking
         tracked_ids = {p.trade_id for p in self.positions}
@@ -924,6 +932,22 @@ class GoldCWiderBot:
             if pid in tracked_ids:
                 continue
             side = "long" if str(p.get("type", "")).endswith("BUY") else "short"
+            # [FIX 2026-08-05] entry_atr was hardcoded 0.0 here, which
+            # PERMANENTLY silences the +/-ATR milestone alerts for any
+            # adopted position (_check_atr_milestones skips entry_atr<=0
+            # unconditionally, for the whole life of the trade). The real
+            # entry-bar ATR is unknowable for a position this bot never
+            # opened itself, but boot_buffer() has already run by this point
+            # in startup, so the buffer's most recent ATR is a reasonable
+            # stand-in -- far better than a value that guarantees silence.
+            est_atr = 0.0
+            try:
+                if self.buf.d is not None:
+                    a = self.buf.d["atr"][-1]
+                    if a and a > 0:
+                        est_atr = float(a)
+            except Exception:
+                pass
             new_pos = Position(
                 side=side,
                 entry=float(p.get("openPrice", 0) or 0),
@@ -931,7 +955,7 @@ class GoldCWiderBot:
                 tp=float(p.get("takeProfit", 0) or 0),
                 lot=float(p.get("volume", 0) or 0),
                 trade_id=pid,
-                entry_atr=0.0,
+                entry_atr=est_atr,
                 entry_ts=datetime.now(timezone.utc).isoformat(),
                 bars=0,
                 entry_comm=0.0,
@@ -1082,10 +1106,10 @@ class GoldCWiderBot:
             if pos.trade_id not in open_ids:
                 self._log_broker_close(pos)   # ปิดไปแล้วฝั่ง broker → log + remove
 
-    def _log_broker_close(self, pos: Position):
+    def _log_broker_close(self, pos: Position, lookback_minutes: int = 30):
         # ปิดไปแล้ว (SL/TP/manual จากฝั่ง broker) — best-effort หา fill/commission จริง
         bid, ask = self.connector.get_current_price(self.bsym)
-        deals = self.connector.get_position_deals(pos.trade_id, lookback_minutes=30)
+        deals = self.connector.get_position_deals(pos.trade_id, lookback_minutes=lookback_minutes)
         close_deals = [dl for dl in deals if str(dl.get("entryType", "")).endswith("OUT")]
 
         fill_px    = None
