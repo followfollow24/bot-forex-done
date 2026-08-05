@@ -86,7 +86,7 @@ if ($before -eq $after) {
 }
 
 Write-Host "=== 7. confirm the new code is actually live ===" -ForegroundColor Cyan
-$hasFix = Select-String -Path "$Desktop\forex_live_bot_gold_cwider.py" -Pattern "ส่ง best-effort close report" -Quiet
+$hasFix = Select-String -Path "$Desktop\forex_live_bot_gold_cwider.py" -Pattern "best-effort close report" -Quiet
 Write-Host "  recover_position() silent-drop fix present : $hasFix"
 
 Write-Host "=== 8. any RECOVER events this restart (should now show alerts sent, not just warnings) ===" -ForegroundColor Cyan
