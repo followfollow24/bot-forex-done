@@ -659,7 +659,15 @@ class GoldCWiderBot:
             f"  Balance       : {balance:,.2f} {currency}   Equity: {equity:,.2f} {currency}",
             f"  Symbol        : {self.symbol}  ->  resolved broker symbol: {self.bsym}",
             f"  Strategy      : {self.strategy.name}",
-            (f"  Entry TF      : {self.timeframe.upper()}    Trend TF: H1 (resampled, "
+            # [FIX 2026-08-05] The trend timeframe was hardcoded as "H1" here,
+            # which was wrong for every bot launched with --timeframe 1h. The
+            # real trend bucket is _bucket_seconds() = TIMEFRAME_SECONDS x
+            # H1_BARS(4), so an H1-entry bot has always used an H4 trend, and a
+            # 15m-entry bot an H1 trend. The banner claimed H1 in both cases,
+            # which is exactly the sort of thing that makes an audit of "what
+            # timeframes am I actually trading" come out wrong. Derived now.
+            (f"  Entry TF      : {self.timeframe.upper()}    "
+             f"Trend TF: {self._fmt_trend_tf()} (resampled, "
              f"EMA{self.strategy.EMA_H1_FAST}/{self.strategy.EMA_H1_SLOW}, ADX>={self.strategy.ADX_MIN})"
              if hasattr(self.strategy, "EMA_H1_FAST") else
              f"  Entry TF      : {self.timeframe.upper()}    "
@@ -1213,6 +1221,22 @@ class GoldCWiderBot:
     # ─────────────────────────────────────────────────────────────────────
     # Process a newly-closed M15 bar
     # ─────────────────────────────────────────────────────────────────────
+    def _fmt_trend_tf(self) -> str:
+        """Human label for the ACTUAL trend bucket the strategy aggregates to.
+
+        _bucket_seconds() = TIMEFRAME_SECONDS * H1_BARS, so this is derived
+        rather than assumed -- see the banner comment for why that matters.
+        """
+        try:
+            secs = int(self.strategy._bucket_seconds())
+        except Exception:
+            return "?"
+        if secs % 86400 == 0:
+            return f"D{secs // 86400}" if secs != 86400 else "D1"
+        if secs % 3600 == 0:
+            return f"H{secs // 3600}"
+        return f"M{max(1, secs // 60)}"
+
     def on_poll(self):
         """Hook that runs on EVERY main-loop poll (~poll_interval_sec), not only
         when a new bar closes. Base implementation is a no-op.
