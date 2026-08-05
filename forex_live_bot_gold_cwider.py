@@ -1251,8 +1251,22 @@ class GoldCWiderBot:
         bots running --manual-exit, where the user is the one deciding when to
         close. Overridden in GoldManualExitBot to run the ATR-milestone check
         against the LIVE tick instead.
+
+        [FIX 2026-08-05, part 2] Also runs _check_broker_close() here now.
+        That check -- and the Telegram CLOSE alert it sends -- used to live
+        exclusively in process_bar(), so a position closed by the broker (SL
+        hit, or the user closing it by hand in the MT5 terminal) was only
+        NOTICED, and only alerted on, at the next bar close: up to an hour
+        late on the H1 bots. The open/milestone alerts arrived promptly
+        (open is decided at bar close, which is already timely; milestones
+        were already fixed in part 1 above) but the close alert lagged behind
+        by however long was left in the hour -- exactly the "profit went up,
+        then it closed, and I only got one notification the whole time"
+        pattern this was fixed for. Now checked every ~30s like the
+        milestones are. Idempotent: a position already removed from
+        self.positions on a prior poll is simply not in the loop again.
         """
-        return
+        self._check_broker_close()
 
     def process_bar(self):
         d = self.buf.d
@@ -1264,6 +1278,9 @@ class GoldCWiderBot:
         self._check_equity_stop(equity)
 
         # ── 1) detect broker-side SL/TP close ──
+        # [2026-08-05] Also covered every ~30s by on_poll() now (see above);
+        # kept here too so a position that closed and reopened within the
+        # same bar is still caught even if on_poll() is ever disabled.
         self._check_broker_close()
 
         # ── 2) manage open positions: timeout only (SL/TP are broker-managed) ──

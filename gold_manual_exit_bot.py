@@ -65,7 +65,17 @@ class GoldManualExitBot(GoldCWiderBot):
         poll_interval_sec (~30s) against the LIVE tick. The
         _alerted_atr_level_max/min ratchets still guarantee one message per
         whole-ATR level per trade, so the higher check rate cannot cause spam.
+
+        [FIX 2026-08-05, part 2] MUST call super().on_poll() -- overriding
+        without it was itself a bug: GoldCWiderBot.on_poll() now also runs
+        _check_broker_close() (the CLOSE-alert check) every ~30s, and EVERY
+        live bot runs through this subclass (all 9 use --manual-exit), so
+        skipping the super() call would have silently kept close-detection
+        latency at up to an hour for 100% of the fleet -- the exact bug this
+        commit exists to fix, reintroduced by omission one class down. Caught
+        in review before deploy, not from a live incident.
         """
+        super().on_poll()
         self._check_atr_milestones()
 
     def _live_price(self, side: str):
