@@ -75,25 +75,41 @@ function WLog($msg) {
 #  no broker charges. Every gold "failure" computed at 2.85 must be re-tested
 #  before being believed; gold_h1_manual itself flips from PF 0.63 to PF 1.07
 #  purely from that correction.
+#
+#  [2026-08-07] --tp-atr 999 -> 5.0 on all three. User wants a real broker-side
+#  safety TP so a big unrealized gain can't fully round-trip back to a loss
+#  while unattended (asleep / not watching). This is a genuine MT5 TP order
+#  sent at position-open (forex_live_bot_gold_cwider.py _open_position()), so
+#  it fires even if the bot process hangs -- unlike the milestone Telegram
+#  alerts, which need the process alive to send.
+#  Backtested tradeoff before choosing this (adx10/touch0.012 configs, real
+#  costs): BTC Sharpe 1.30->1.26 CAGR +21.5%->+16.2%; GOLD Sharpe 0.58->0.32
+#  CAGR +6.3%->+1.6% (the biggest hit -- gold's edge leans on a few large
+#  winners); ETH Sharpe 0.21->0.20 (near neutral). A trailing-stop-after-+5xATR
+#  alternative preserves more edge (gold Sharpe actually improves to 0.60) but
+#  requires live code that does not exist yet -- modify_sl() in
+#  forex_executor.py has zero callers anywhere in this repo, so no live bot
+#  has ever actually trailed a stop. User chose the flat TP now over waiting
+#  for that to be built and causally verified.
 # -----------------------------------------------------------------------------
 $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
         Variant      = "eth_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
     },
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 999 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
     }
 )
 
