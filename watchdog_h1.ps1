@@ -92,24 +92,46 @@ function WLog($msg) {
 #  has ever actually trailed a stop. User chose the flat TP now over waiting
 #  for that to be built and causally verified.
 # -----------------------------------------------------------------------------
+#  [2026-08-07 #2] SL/TP retune on the three trend-pullback manual bots:
+#    btc_h1_manual  : --sl-atr 3.0 -> 2.5   --tp-atr 5.0 -> 15.0
+#    gold_h1_manual : --sl-atr 3.0 -> 2.5   --tp-atr 5.0 -> 15.0
+#    eth_h1_manual  : --sl-atr 3.0 (kept)   --tp-atr 5.0 -> 15.0
+#  Validated same day (fixed engine, real costs, corrected $0.24 gold spread):
+#    BTC  SL2.5/TP15: PF 1.28 Sharpe 1.33 CAGR +22.9% | OOS half 2: Sharpe 0.90
+#         CAGR +20.0% (beats live SL3/TP5's OOS +14.7%) | yearly WF 9/10 PF>1
+#    GOLD SL2.5/TP15: PF 1.19 Sharpe 0.71 CAGR +5.5% DD 14.6% | OOS half 2
+#         Sharpe 0.98 (train 0.37 -- no overfit signature) | yearly WF 10/14
+#    ETH  edge too thin to rank SL2.5 vs SL3.0 (all noise-level); kept SL3.0,
+#         which points slightly better at TP15 (Sharpe 0.27 vs 0.12).
+#  Neighbour grid around 2.5/15 is a plateau (BTC Sharpe 1.21-1.35), not a
+#  lone spike. TP15 is still hit ~8-11 times/yr (6-7% of trades) -- rare by
+#  design; it is the unattended-safety cap, not the routine exit. Exit mix at
+#  TP15: ~58-64% SL, ~29-36% max-hold timeout (64 bars), rest TP.
+#  EXPECTATION SET HONESTLY: combined portfolio backtest = ~+40%/yr = ~0.1%/day.
+#  The user's stated 0.3%/day goal is NOT reachable from SL/TP tuning at
+#  acceptable risk (3x risk -> DD from ~58% toward wipeout); it needs 3-5 more
+#  uncorrelated edges (same conclusion as the 2026-07-09 target reset).
+#  The other 6 bots (donchian/tool_*/momentum families) keep TP5: SL2.5/TP15
+#  was validated on the trend-pullback family only.
+# -----------------------------------------------------------------------------
 $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
         Variant      = "eth_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 15.0 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
     },
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 5.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
     }
 )
 
