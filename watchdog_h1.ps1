@@ -147,6 +147,29 @@ $bots = @(
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --block-hours 20-01 --allow-real"
+    },
+    # [2026-08-08] Two NEW daily sleeves (portfolio diversification toward the
+    # 0.3%/day target -- see newbot_refs/FROZEN_SPECS.md for the frozen rules
+    # and _preflight_daily_sleeves.py for the deploy gate, 0 mismatches vs
+    # 2471+2393+3240 days of reference history). Different script
+    # (daily_sleeves_bot.py, not forex_live_bot_gold_cwider.py), different
+    # cadence (one decision/day at UTC 00:0x, heartbeat every ~60s regardless
+    # -- same 5min staleness threshold still applies). Started small on the
+    # Real Cent account per explicit user instruction (funding sleeve risk
+    # 0.3%/trade; combo sleeve alloc 10% of equity) -- NOT yet execution-
+    # burned-in beyond the first live cycle. Scale up only after several
+    # clean daily cycles are observed.
+    @{
+        Symbol       = "crypto"
+        Variant      = "funding_contrarian"
+        StaleMinutes = 5
+        Args         = "daily_sleeves_bot.py --sleeve funding --variant-tag funding_contrarian --risk 0.3 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_combo_lb"
+        StaleMinutes = 5
+        Args         = "daily_sleeves_bot.py --sleeve combo --variant-tag btc_combo_lb --alloc 0.10 --allow-real"
     }
 )
 

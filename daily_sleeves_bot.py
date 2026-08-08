@@ -324,11 +324,31 @@ class DailySleevesBot:
         if not self._mt5(self.connector.connect):
             self.log.error("MT5 connect failed")
             sys.exit(1)
+
+        # ── Same demo/real safety gate as every other bot in this repo
+        #    (forex_live_bot_gold_cwider.py _print_banner_and_verify_demo):
+        #    refuse to place real orders on a non-demo account unless
+        #    --allow-real was passed explicitly. --dry-run always exempt.
+        info = self.connector.get_account_info()
+        is_demo = self.connector.is_demo()
+        if not self.cfg.dry_run and not is_demo and not self.cfg.allow_real:
+            self.log.error(
+                "REFUSING TO START: account is NOT confirmed DEMO "
+                f"(type={info.get('type', 'UNKNOWN')}) and --allow-real was "
+                "not passed. Use --dry-run to test, or --allow-real to "
+                "confirm you intend to trade this real account.")
+            sys.exit(1)
+        acct_tag = "DEMO" if is_demo else ("LIVE (--allow-real)" if self.cfg.allow_real else "UNKNOWN")
+
         wanted = ["BTCUSDC", "ETHUSDC"] if self.sleeve == "funding" else ["BTCUSDC"]
         for s in wanted:
             self.symbols[s] = self.connector.resolve_symbol(s)
         eq = self._mt5(self.connector.get_equity)
         self.log.info("=" * 70)
+        self.log.info(f"  ACCOUNT: {acct_tag}  login={info.get('login','?')}  "
+                      f"server={info.get('server','?')}  "
+                      f"balance={info.get('balance', eq):.2f} {info.get('currency','USD')}")
+        self.log.info(f"  Order mode: {'DRY-RUN (paper, NO real orders)' if self.cfg.dry_run else 'LIVE — places real orders'}")
         self.log.info(f"  DAILY SLEEVE '{self.sleeve}'  variant={self.variant_tag}  "
                       f"magic={MAGIC[self.sleeve]}")
         self.log.info(f"  symbols={self.symbols}  equity={eq:.2f}  "
