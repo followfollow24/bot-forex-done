@@ -37,6 +37,15 @@ MAGIC_LABEL = {
     666050: "btc_lqsweep",
     666060: "btc_tpo",
     667130: "eth_h1_manual",
+    668001: "funding_contrarian",
+    668002: "btc_combo_lb",
+}
+
+# Per-bot actual start date (when it started running its CURRENT config) --
+# used only for trades/day; falls back to the CLI start date if absent.
+BOT_START = {
+    668001: "2026-08-08",
+    668002: "2026-08-08",
 }
 
 start_arg = sys.argv[1] if len(sys.argv) > 1 else "2026-07-29"
@@ -80,17 +89,26 @@ print("=" * 88)
 print(f" TRADE SUMMARY since {start_arg}  (closing deals, magic resolved via position_id)")
 print("=" * 88)
 
+# show every bot even with 0 closed trades yet (e.g. brand-new daily sleeves)
+all_magics = sorted(set(MAGIC_LABEL) | set(by_magic), key=lambda m: MAGIC_LABEL.get(m, "zz"))
+
 tot_n = tot_win = 0
 tot_pnl = 0.0
-for magic, ds in sorted(by_magic.items(), key=lambda kv: MAGIC_LABEL.get(kv[0], "zz")):
+now = datetime.now()
+for magic in all_magics:
+    ds = by_magic.get(magic, [])
     label = MAGIC_LABEL.get(magic, f"magic={magic}")
     n = len(ds)
     wins = sum(1 for d in ds if d.profit > 0)
     losses = sum(1 for d in ds if d.profit < 0)
     pnl = sum(d.profit + d.swap + d.commission for d in ds)
     wr = 100 * wins / n if n else 0
+    bot_start = datetime.strptime(BOT_START.get(magic, start_arg), "%Y-%m-%d")
+    days = max((now - max(bot_start, start)).total_seconds() / 86400.0, 0.001)
+    tpd = n / days
     print(f"  {label:<22} n={n:>3}  win={wins:>3} loss={losses:>3}  "
-          f"win%={wr:5.1f}  net_pnl={pnl:+9.2f}")
+          f"win%={wr:5.1f}  net_pnl={pnl:+9.2f}  trades/day={tpd:5.2f}"
+          f"  (over {days:.1f}d)")
     tot_n += n
     tot_win += wins
     tot_pnl += pnl
