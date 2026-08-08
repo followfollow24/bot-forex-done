@@ -114,12 +114,27 @@ function WLog($msg) {
 #  The other 6 bots (donchian/tool_*/momentum families) keep TP5: SL2.5/TP15
 #  was validated on the trend-pullback family only.
 # -----------------------------------------------------------------------------
+#  [2026-08-08] ENTRY GATES added to two bots (validated 2026-08-07 on the
+#  SL2.5/TP15 base, adversarially verified, live-path causal check passed
+#  with 0 mismatches -- see gate_* functions in forex_live_bot_gold_cwider.py):
+#    gold_h1_manual : --block-hours 20-01
+#        blocks entries whose fill lands in UTC [20:00,01:00) -- the
+#        pre-rollover / late-NY dead zone. Sharpe 0.71->0.95, CAGR
+#        +5.50->+7.07%, DD 14.6->12.3%, yearly PF>1 10/14 -> 12/14.
+#    btc_h1_manual  : --xasset-short-gate ETHUSDc:36:168
+#        blocks SHORT entries unless ETH/BTC ratio EMA36>EMA168 (H1).
+#        Sharpe 1.33->1.47, CAGR +22.9->+24.2%, DD 22.6->12.2%;
+#        2022 bear loss -23.5%->-12.1%.
+#  REJECTED in the same round (do not add): funding-a70 filter and the
+#  a70+r36S stack -- both worse than base in the recent OOS half.
+#  Gates are fail-open: any evaluation error = entry allowed = old behavior.
+# -----------------------------------------------------------------------------
 $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --xasset-short-gate ETHUSDc:36:168 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
@@ -131,7 +146,7 @@ $bots = @(
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --block-hours 20-01 --allow-real"
     }
 )
 

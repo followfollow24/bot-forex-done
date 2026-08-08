@@ -390,6 +390,74 @@ class CandleBuffer:
 
 
 # =============================================================================
+#  Entry gates — pure functions (no MT5 import so they unit-test off-VPS)
+#
+#  [2026-08-07] Both gates were adversarially verified (independent
+#  re-implementation) on the sl3/tp999 base, then RE-validated on the
+#  SL2.5/TP15 base the bots now run:
+#
+#  gate_time_allow (gold_h1_manual):  block entries whose FILL happens in
+#    UTC hours {20..23, 0} (pre-rollover / late-NY dead zone).
+#    XAUUSD H1 2013-2026, SL2.5/TP15: Sharpe 0.71->0.95, CAGR +5.50->+7.07%,
+#    DD 14.6->12.3%, yearly PF>1 10/14 -> 12/14; plateau confirmed
+#    (BLK19_01 / BLK20_02 neighbours also beat base).
+#    Hour semantics: the backtest blocks by the FILL bar's open hour, and the
+#    gold CSV clock was empirically pinned to fixed UTC+0 (DST analysis of
+#    714 weekend closures + hourly vol profile). Live fills happen at market
+#    immediately after bar close, so hour(now UTC) IS the fill hour — no
+#    broker-clock conversion needed, deliberately avoiding a dependency on
+#    the broker's (DST-shifting) server timezone.
+#
+#  gate_r36s_allow_short (btc_h1_manual):  block SHORT entries unless the
+#    ETH/BTC close ratio's EMA36 > EMA168 (H1).
+#    BTCUSDc H1 2017-2026, SL2.5/TP15: Sharpe 1.33->1.47, CAGR +22.9->+24.2%,
+#    DD 22.6->12.2%; H2-half strictly better; 2022 bear loss -23.5%->-12.1%.
+#    Robust to 1-2 bar signal lag (SHIFT test Sharpe 1.46/1.48), which is what
+#    makes a live fetch-at-entry implementation safe.
+#    NOTE: the funding-a70 gate and the a70+r36S stack were REJECTED on this
+#    base (2nd half worse than base) — do not add them here without a fresh
+#    validation round.
+#
+#  Design rule: gates only ever REMOVE entries. Every failure path
+#  (missing data, fetch timeout, misconfig) fails OPEN = behave exactly like
+#  the un-gated bot. A totally broken gate cannot make the bot worse than
+#  what ran before it existed.
+# =============================================================================
+
+def gate_time_allow(fill_utc_hour: int, lo: int, hi: int) -> bool:
+    """Allow-mask for the time gate: block fill hours in wrapped [lo, hi).
+
+    Mirrors block_allow() in _uc_verify_gold_time.py exactly:
+    lo<hi  -> block lo <= h < hi ;  lo>=hi -> block h >= lo OR h < hi.
+    """
+    h = int(fill_utc_hour) % 24
+    if lo < hi:
+        blocked = (h >= lo) and (h < hi)
+    else:
+        blocked = (h >= lo) or (h < hi)
+    return not blocked
+
+
+def gate_r36s_allow_short(eth_closes, btc_closes,
+                          fast: int = 36, slow: int = 168) -> bool:
+    """Allow shorts only while ETH/BTC ratio EMA(fast) > EMA(slow).
+
+    Mirrors short_mask() in _uc_verify_crossasset.py exactly:
+    ratio = eth/btc on aligned H1 closes, pandas ewm(span, adjust=False),
+    evaluated at the last (= signal) bar. Caller must pass series aligned
+    bar-for-bar and ending at the last CLOSED bar. Needs enough history for
+    EMA168 convergence — with >=600 bars the initial-condition residue is
+    <0.1% weight; callers should fail OPEN below that.
+    """
+    eth = pd.Series(list(eth_closes), dtype=float)
+    btc = pd.Series(list(btc_closes), dtype=float)
+    ratio = eth / btc
+    e_f = ratio.ewm(span=fast, adjust=False).mean().iloc[-1]
+    e_s = ratio.ewm(span=slow, adjust=False).mean().iloc[-1]
+    return bool(e_f > e_s)
+
+
+# =============================================================================
 # BOT
 # =============================================================================
 class GoldCWiderBot:
@@ -412,9 +480,24 @@ class GoldCWiderBot:
                  fills_log_file: Optional[str] = None,
                  lock_file: Optional[str] = None,
                  equity_stop_file: Optional[str] = None,
-                 heartbeat_file: Optional[str] = None):
+                 heartbeat_file: Optional[str] = None,
+                 block_hours: Optional[str] = None,
+                 xasset_short_gate: Optional[str] = None):
         self.cfg = cfg
         self.max_positions = max(1, int(max_positions))
+
+        # ── Entry gates (validated 2026-08-07 — see the gate_* functions'
+        #    docblock above for the numbers). Parse early so a malformed flag
+        #    kills the bot AT START (visible) instead of silently at the first
+        #    entry decision hours later.
+        self.block_hours: Optional[tuple] = None          # (lo, hi) wrapped UTC
+        if block_hours:
+            lo_s, hi_s = block_hours.split("-")
+            self.block_hours = (int(lo_s) % 24, int(hi_s) % 24)
+        self.xasset_gate: Optional[tuple] = None          # (symbol, fast, slow)
+        if xasset_short_gate:
+            g_sym, g_fast, g_slow = xasset_short_gate.split(":")
+            self.xasset_gate = (g_sym, int(g_fast), int(g_slow))
 
         # [FIX] symbol/variant_tag/timeframe and every *_FILE path are passed
         # explicitly (falling back to the module globals only when the caller
@@ -681,6 +764,12 @@ class GoldCWiderBot:
                if getattr(self.strategy, "trail_atr_mult", 999.0) < 900
                else "   | Partial-TP=OFF  Move-to-BE=OFF  Trailing=OFF"),
             f"  Fresh-filter  : {'ON, max maturity=' + str(self.strategy.MAX_MATURITY) + ' entry-bars' if hasattr(self.strategy, 'MAX_MATURITY') else 'OFF'}",
+            f"  Entry gates   : time-block="
+            + (f"UTC [{self.block_hours[0]:02d},{self.block_hours[1]:02d}) ON"
+               if self.block_hours else "OFF")
+            + "  xasset-short="
+            + (f"{self.xasset_gate[0]} EMA{self.xasset_gate[1]}/{self.xasset_gate[2]} ON"
+               if self.xasset_gate else "OFF"),
             f"  Max hold      : {self.cfg.max_hold_bars} bars"
             f" (= {self.cfg.max_hold_bars * self.cfg.timeframe_minutes / 60:g} hours)",
             f"  Risk/trade    : {self.cfg.risk_per_trade_pct}%   Magic: {self.cfg.magic_number}"
@@ -1328,10 +1417,75 @@ class GoldCWiderBot:
                     and not kill)
         if can_open:
             sig = self.strategy.signal(d, i)
-            if sig.action in ("BUY", "SELL"):
+            if sig.action in ("BUY", "SELL") and self._entry_gates_allow(sig, d, i):
                 self._open_position(sig, d, i)
 
         self.save_state()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Entry gates (see gate_* pure functions near CandleBuffer for the
+    # validation record; this method only wires them to live data)
+    # ─────────────────────────────────────────────────────────────────────
+    def _entry_gates_allow(self, sig, d: dict, i: int) -> bool:
+        """Return False to veto this entry. EVERY failure path returns True
+        (fail-open): a gate that cannot evaluate must behave like no gate,
+        never like a stuck kill-switch."""
+        # ── time gate: live fills happen at market right after bar close, so
+        #    the wall clock AT THE ENTRY DECISION is the fill time. Using
+        #    datetime.now(UTC) instead of bar-timestamp+offset removes the
+        #    broker-server-timezone dependency entirely (Exness-style servers
+        #    shift with DST; the validated gate window is fixed UTC).
+        if self.block_hours is not None:
+            try:
+                h = datetime.now(timezone.utc).hour
+                if not gate_time_allow(h, *self.block_hours):
+                    self.log.info(
+                        f"[GATE][time] veto {sig.action} — fill hour {h:02d} UTC "
+                        f"inside blocked [{self.block_hours[0]:02d},"
+                        f"{self.block_hours[1]:02d}) window")
+                    return False
+            except Exception as e:
+                self.log.warning(f"[GATE][time] evaluation failed ({e}) — fail-open")
+
+        # ── cross-asset short gate (SELL only)
+        if self.xasset_gate is not None and sig.action == "SELL":
+            try:
+                g_sym, g_fast, g_slow = self.xasset_gate
+                # 990 bars: below fetch_ohlcv's single-call cap AND enough for
+                # EMA168 convergence (initial-condition weight ~6e-5)
+                candles = self._call_with_timeout(
+                    self.connector.fetch_ohlcv, self._mt5_call_timeout_sec,
+                    g_sym, self.timeframe, 990)
+                if not candles:
+                    self.log.warning(
+                        f"[GATE][r36s] no {g_sym} candles — fail-open")
+                    return True
+                # closed bars only, same rule as _fetch_closed_candles()
+                now_ms = int(time.time() * 1000)
+                tf_ms  = self.cfg.timeframe_ms
+                closed = {int(c[0]): float(c[4]) for c in candles
+                          if c[0] + tf_ms + 3000 <= now_ms}
+                # align bar-for-bar with our own buffer on bar-open timestamps
+                pairs = [(float(r[4]), closed[int(r[0])])
+                         for r in self.buf._rows if int(r[0]) in closed]
+                if len(pairs) < 600:
+                    self.log.warning(
+                        f"[GATE][r36s] only {len(pairs)} aligned bars (<600) — "
+                        f"fail-open")
+                    return True
+                btc_closes = [p[0] for p in pairs]
+                gate_closes = [p[1] for p in pairs]
+                if not gate_r36s_allow_short(gate_closes, btc_closes,
+                                             g_fast, g_slow):
+                    self.log.info(
+                        f"[GATE][r36s] veto SELL — {g_sym}/{self.bsym} ratio "
+                        f"EMA{g_fast} <= EMA{g_slow} (shorting against the "
+                        f"cross-asset regime)")
+                    return False
+            except Exception as e:
+                self.log.warning(f"[GATE][r36s] evaluation failed ({e}) — fail-open")
+
+        return True
 
     # ─────────────────────────────────────────────────────────────────────
     # Status line
@@ -1564,6 +1718,19 @@ def main():
                          "M5 แนะนำ 0.15 (ครึ่งนึงของ M15 เพราะ IS MaxDD สูงกว่า).")
     ap.add_argument("--poll-interval", type=int, default=30,
                     help="วินาทีต่อรอบ poll (default 30)")
+    ap.add_argument("--block-hours", type=str, default=None,
+                    help="Entry time-gate: block entries whose fill hour (UTC, "
+                         "wall clock at the entry decision) falls in the wrapped "
+                         "window 'LO-HI', e.g. '20-01' blocks 20:00-00:59 UTC. "
+                         "Validated 2026-08-07 on gold H1 SL2.5/TP15 "
+                         "(Sharpe 0.71->0.95). Fail-open on any error.")
+    ap.add_argument("--xasset-short-gate", type=str, default=None,
+                    help="Cross-asset SHORT gate 'SYMBOL:FAST:SLOW', e.g. "
+                         "'ETHUSDc:36:168': block SELL entries unless the "
+                         "SYMBOL/own-symbol close ratio EMA(FAST) > EMA(SLOW) "
+                         "on the entry timeframe. Validated 2026-08-07 on BTC "
+                         "H1 SL2.5/TP15 (Sharpe 1.33->1.47, DD 22.6->12.2%). "
+                         "Fail-open on any error.")
     ap.add_argument("--capital", type=float, default=0.0,
                     help="Capital USD เริ่มต้น (0 = ดึงจาก MT5 balance)")
     args = ap.parse_args()
@@ -1789,7 +1956,9 @@ def main():
             fills_log_file=FILLS_LOG_FILE,
             lock_file=LOCK_FILE,
             equity_stop_file=EQUITY_STOP_FILE,
-            heartbeat_file=HEARTBEAT_FILE).run()
+            heartbeat_file=HEARTBEAT_FILE,
+            block_hours=args.block_hours,
+            xasset_short_gate=args.xasset_short_gate).run()
 
 
 if __name__ == "__main__":
