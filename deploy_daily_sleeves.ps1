@@ -22,19 +22,19 @@ Write-Host "=== 1. pull latest code ===" -ForegroundColor Cyan
 Set-Location $Repo
 git pull origin main
 Copy-Item daily_sleeves_bot.py $Desktop -Force
-Copy-Item _preflight_daily_sleeves.py $Desktop -Force
+Copy-Item _preflight_daily_sleeves_vps.py $Desktop -Force
 if (-not (Test-Path "$Desktop\newbot_refs")) { New-Item -ItemType Directory "$Desktop\newbot_refs" | Out-Null }
 Copy-Item newbot_refs\* "$Desktop\newbot_refs" -Force -Recurse
 Copy-Item watchdog_h1.ps1 $Desktop -Force
 
-Write-Host "=== 2. re-run preflight on the VPS itself (same Python env as live) ===" -ForegroundColor Cyan
+Write-Host "=== 2. VPS preflight: real Binance + real MT5 fetch vs frozen reference ===" -ForegroundColor Cyan
 Set-Location $Desktop
-python _preflight_daily_sleeves.py
+python _preflight_daily_sleeves_vps.py
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ABORT: preflight failed on VPS -- do not deploy." -ForegroundColor Red
     exit 1
 }
-Write-Host "  preflight PASS" -ForegroundColor Green
+Write-Host "  preflight PASS (live Binance fetch + live MT5 fetch both match frozen reference)" -ForegroundColor Green
 
 Write-Host "=== 3. dry-run smoke test (no real orders) ===" -ForegroundColor Cyan
 $dryFunding = Start-Process python -ArgumentList "daily_sleeves_bot.py --sleeve funding --variant-tag funding_smoketest --dry-run" -WorkingDirectory $Desktop -PassThru -WindowStyle Normal
