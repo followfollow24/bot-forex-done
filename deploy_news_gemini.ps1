@@ -20,8 +20,8 @@ Set-Location $Repo
 git pull origin main
 Copy-Item news_gemini_bot.py, requirements.txt $Desktop -Force
 if (-not (Test-Path "$Desktop\.env")) {
-    Write-Host "ABORT: $Desktop\.env not found -- create it with GEMINI_API_KEY, "
-               "TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID first." -ForegroundColor Red
+    Write-Host ("ABORT: $Desktop\.env not found -- create it with GEMINI_API_KEY, " +
+               "TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID first.") -ForegroundColor Red
     exit 1
 }
 $envContent = Get-Content "$Desktop\.env" -Raw
@@ -43,8 +43,8 @@ Write-Host "=== 3. refuse to run if already running (avoid duplicate magic 66900
 $existing = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
             Where-Object { $_.CommandLine -match "news_gemini_bot\.py" }
 if ($existing) {
-    Write-Host "ABORT: news_gemini_bot.py already running (PID $($existing.ProcessId)). "
-               "Stop it first if you intend to restart." -ForegroundColor Red
+    Write-Host ("ABORT: news_gemini_bot.py already running (PID $($existing.ProcessId)). " +
+               "Stop it first if you intend to restart.") -ForegroundColor Red
     exit 1
 }
 
