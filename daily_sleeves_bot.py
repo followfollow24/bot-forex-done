@@ -473,10 +473,44 @@ class DailySleevesBot:
                     self.log.warning(f"[{binance}] no price — skip entry")
                     continue
                 sd = 2.5 * atr
-                coins = min(eq * self.risk_pct / 100.0 / sd, 3.0 * eq / px)
-                lot = round(coins / 0.01, 2)             # contract 0.01 coin/lot
+                # [2026-08-10 SIZING BUG FIX] the previous formula
+                # ("coins = risk_cash/sd; lot = coins/0.01") assumed a fixed
+                # 0.01-coin-per-lot contract with NO real tick-value lookup,
+                # so on this CENT account it sized positions ~100x too big
+                # (confirmed live: a $174 equity, 0.3%-risk BTC short came
+                # out at 1.46 lot / ~$50 max stop-loss instead of ~0.01 lot /
+                # ~$0.50 — both funding_contrarian positions were emergency-
+                # closed the same day, real loss $13.20). Fixed by using the
+                # EXACT same pip_size/pip_value_live pattern the validated H1
+                # bots use (_open_position() in forex_live_bot_gold_cwider.py)
+                # — get_pip_value_live() reads MT5's real trade_tick_value,
+                # which is account-currency-correct for cent accounts
+                # automatically; no manual USC/USD conversion needed or safe
+                # to hand-roll again.
+                pip_size  = self.cfg.get_pip_size(bsym)
+                pip_value = self._mt5(self.connector.get_pip_value_live, bsym)
+                sd_pips = sd / pip_size
+                if sd_pips <= 0 or pip_value <= 0:
+                    self.log.warning(f"[{binance}] invalid pip_value — skip entry")
+                    continue
+                risk_cash = eq * self.risk_pct / 100.0
+                lot = round(risk_cash / (sd_pips * pip_value), 2)
                 if lot < 0.01:
                     self.log.warning(f"[{binance}] lot rounds to 0 — skip entry")
+                    continue
+                # hard circuit-breaker: independently verify the ACTUAL risk
+                # this lot represents is within 1.5x the intended risk before
+                # ever sending the order — catches any future unit-mismatch
+                # the same way, instead of trusting the formula blindly.
+                actual_risk_pct = (sd_pips * pip_value * lot) / eq * 100.0 if eq > 0 else float("inf")
+                if actual_risk_pct > self.risk_pct * 1.5:
+                    self.log.error(
+                        f"[{binance}] SIZING SANITY CHECK FAILED: lot={lot} implies "
+                        f"actual_risk={actual_risk_pct:.2f}% > 1.5x intended "
+                        f"{self.risk_pct}% — REFUSING to open (possible bug)")
+                    self._telegram(f"⛔ {self.variant_tag}: {binance} sizing sanity "
+                                   f"check failed (implied risk {actual_risk_pct:.1f}% "
+                                   f"vs intended {self.risk_pct}%) — entry refused")
                     continue
                 side = "long" if bias == 1 else "short"
                 sl = px - sd if bias == 1 else px + sd
@@ -569,8 +603,25 @@ class DailySleevesBot:
         bid, ask = self._mt5(self.connector.get_current_price, bsym)
         px = (bid + ask) / 2 if bid > 0 else float(row["close"])
         alloc = eq * self.alloc_frac
+
+        # [2026-08-10 SIZING BUG FIX] same class of bug as the funding sleeve
+        # (see the long comment in _decide_funding): "px * 0.01" assumed a
+        # fixed 0.01-coin-per-lot contract with no real tick-value lookup.
+        # Fixed the same way: notional value of 1.0 lot = px * pip_value
+        # (pip_value = account-currency profit per $1 move per lot, read
+        # from MT5's real trade_tick_value via get_pip_value_live() — this
+        # is exactly what forex_live_bot_gold_cwider.py's proven-safe
+        # _open_position() uses, and it self-corrects for cent accounts).
+        pip_size  = self.cfg.get_pip_size(bsym)
+        pip_value = self._mt5(self.connector.get_pip_value_live, bsym)
+        if pip_value <= 0:
+            self.log.error("[combo] invalid pip_value — REFUSING to trade")
+            self._telegram(f"⛔ {self.variant_tag}: invalid pip_value — not trading")
+            return
+        lot_notional = (px / pip_size) * pip_value        # account-currency value of 1.0 lot
+
         # min-lot guard (spec): refuse if a 1/3 step can't be represented
-        step_notional = 0.01 * px * 0.01                 # volume_step 0.01 lot
+        step_notional = 0.01 * lot_notional               # volume_step 0.01 lot
         if alloc / 3.0 < 2 * step_notional:
             self.log.error(f"[combo] alloc {alloc:.2f} too small for 1/3 steps — "
                            f"REFUSING to trade")
@@ -578,7 +629,22 @@ class DailySleevesBot:
                            f"position steps — not trading")
             return
 
-        target_lots = round(tf * alloc / (px * 0.01), 2)
+        target_lots = round(tf * alloc / lot_notional, 2)
+        # hard circuit-breaker: independently verify the notional this lot
+        # represents is within 1.5x the intended allocation before ever
+        # sending an order — catches any future unit-mismatch the same way,
+        # instead of trusting the formula blindly.
+        actual_notional = target_lots * lot_notional
+        if actual_notional > alloc * 1.5:
+            self.log.error(
+                f"[combo] SIZING SANITY CHECK FAILED: target_lots={target_lots} implies "
+                f"notional={actual_notional:.2f} > 1.5x intended alloc={alloc:.2f} "
+                f"— REFUSING to trade (possible bug)")
+            self._telegram(f"⛔ {self.variant_tag}: sizing sanity check failed "
+                           f"(notional {actual_notional:.2f} vs alloc {alloc:.2f}) "
+                           f"— rebalance refused")
+            return
+
         own = self._own_positions(bsym)
         cur_lots = round(sum(float(p["volume"]) for p in own
                              if p["type"] == "buy"), 2)
