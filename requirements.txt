@@ -7,4 +7,5 @@ numpy>=1.24
 pandas>=2.0
 python-dotenv>=1.0
 metaapi-cloud-sdk>=27.0.0
-google-genai>=0.3.0   # news_gemini_bot.py
+google-genai>=0.3.0   # news_gemini_bot.py (Gemini half of dual-consensus)
+openai>=2.0.0          # news_gemini_bot.py (OpenAI half of dual-consensus)

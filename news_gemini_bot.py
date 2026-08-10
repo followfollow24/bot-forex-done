@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-news_gemini_bot.py -- 2026-08-10. Live news-driven trading signal using
-Gemini + Google Search grounding, trading XAUUSDc / BTCUSDc / ETHUSDc.
+news_gemini_bot.py -- 2026-08-10/11. Live news-driven trading signal using
+DUAL-PROVIDER CONSENSUS (Gemini + OpenAI, each with their own live web
+search), trading XAUUSDc / BTCUSDc / ETHUSDc.
 
 [!!] UNVALIDATED STRATEGY -- unlike every other bot in this repo, this one
 has NO historical backtest (an LLM's news judgement today is not the same
@@ -12,14 +13,28 @@ small size, with Telegram alerts on every decision. Every safety net below
 exists BECAUSE of that -- read them before loosening any of them.
 
 Design (all deliberate, not defaults):
+  - DUAL-PROVIDER CONSENSUS (2026-08-11, added at user's request after the
+    single-provider version hit Gemini's free-tier grounding quota): Gemini
+    and OpenAI each run a FULLY INDEPENDENT news scan every cycle -- neither
+    sees the other's output. A symbol only becomes tradeable if BOTH scans
+    separately surfaced a candidate for it with the SAME direction, and each
+    candidate independently passes its own confidence/tier-1-source gate.
+    This is deliberately NOT "ask model B to confirm model A's claim" --
+    that anchors B toward agreeing. Two blind scans that happen to agree is
+    a much stronger signal than one model rubber-stamping another.
+    OPENAI_API_KEY is OPTIONAL at the code level: if unset, the bot still
+    runs (heartbeat, position watching, time-stops) but every cycle is
+    logged as "dual-consensus unavailable" and no new entries are taken --
+    same fail-safe philosophy as everything else here, not a crash.
   - Poll cadence: once per NEWS_POLL_MIN minutes (default 45). News-driven
     setups do not need bar-close timing; a fixed wall-clock cadence keeps
-    Gemini spend and API quota bounded and predictable.
-  - Source gating: Gemini must return structured JSON (schema below) citing
-    a source name/URL per candidate. The code -- NOT the model -- checks the
-    source domain against TIER1_DOMAINS. A model that just says "trust me"
-    with no checkable source is treated as unsourced and skipped.
-  - Confidence gate: candidates below CONF_MIN are skipped.
+    LLM spend and API quota bounded and predictable.
+  - Source gating: each provider must return structured JSON (schema below)
+    citing a source name/URL per candidate. The code -- NOT the model --
+    checks the source domain against TIER1_DOMAINS. A model that just says
+    "trust me" with no checkable source is treated as unsourced and skipped.
+  - Confidence gate: candidates below CONF_MIN are skipped (checked per
+    provider, before cross-checking).
   - Dedup: a story already acted on (by URL) blocks re-entry on the same
     symbol for DEDUP_HOURS, so one headline can't trigger repeated entries
     as it gets rephrased across poll cycles.
@@ -38,9 +53,9 @@ Design (all deliberate, not defaults):
     (default 3) auto-writes a STOP file and alerts -- requires a human to
     clear it. There is no backtest to say "3 losses is normal variance",
     so the breaker is deliberately tight.
-  - Fail-safe on EVERY external call (Gemini quota/error, MT5 timeout,
-    malformed JSON): skip this cycle, alert, never guess. A skipped cycle
-    is always safe; a guessed one is not.
+  - Fail-safe on EVERY external call (either provider's quota/error, MT5
+    timeout, malformed JSON): skip this cycle, alert, never guess. A
+    skipped cycle is always safe; a guessed one is not.
 
 CLI:
   python news_gemini_bot.py --allow-real
@@ -194,6 +209,92 @@ def gemini_scan(api_key: str, model: str, lookback_min: int) -> list:
     return data.get("candidates", [])
 
 
+def openai_scan(api_key: str, model: str, lookback_min: int) -> list:
+    """OpenAI equivalent of gemini_scan() -- SAME prompt template, its OWN
+    independent web search, same 2-pass search-then-structure pattern (the
+    Responses API does not reliably combine a tool call with a forced
+    strict json_schema output in one turn either). Raises on any failure --
+    caller must treat ANY exception as 'skip this cycle'."""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    prompt = PROMPT_TEMPLATE.format(
+        lookback_min=lookback_min,
+        now_utc=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        time_stop_h=TIME_STOP_HOURS)
+
+    # Pass 1: web-search-grounded free text.
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+        tools=[{"type": "web_search"}],
+    )
+    grounded_text = resp.output_text or ""
+
+    # Pass 2: structure pass 1's findings into the strict schema (no new
+    # search -- can't invent sources pass 1 didn't cite).
+    resp2 = client.responses.create(
+        model=model,
+        input=(
+            "Convert the following news findings into the required JSON "
+            "schema. Do not add any candidate not already present in the "
+            "findings text; if the findings text has no concrete news "
+            "meeting the bar, return an empty candidates list.\n\n"
+            f"FINDINGS:\n{grounded_text}"
+        ),
+        text={"format": {
+            "type": "json_schema",
+            "name": "news_candidates",
+            "schema": RESPONSE_SCHEMA,
+            "strict": True,
+        }},
+    )
+    data = json.loads(resp2.output_text)
+    return data.get("candidates", [])
+
+
+def cross_check_consensus(gemini_candidates: list, openai_candidates: list) -> list:
+    """DUAL-PROVIDER CONSENSUS: a symbol is only tradeable if BOTH providers'
+    independent scans separately produced a directional candidate for it,
+    the directions agree, and each side individually clears CONF_MIN and a
+    tier-1 source domain (checked here, not just trusted from either model).
+    Returns merged candidates carrying both sides' headline/source/reasoning
+    for a fully auditable Telegram alert.
+    """
+    def eligible(c):
+        return (c.get("signal") in ("long", "short")
+               and float(c.get("confidence", 0) or 0) >= CONF_MIN
+               and _domain(c.get("source_url", "")) in TIER1_DOMAINS)
+
+    by_symbol_g = {}
+    for c in gemini_candidates:
+        if eligible(c):
+            by_symbol_g.setdefault(c["symbol"], []).append(c)
+    by_symbol_o = {}
+    for c in openai_candidates:
+        if eligible(c):
+            by_symbol_o.setdefault(c["symbol"], []).append(c)
+
+    confirmed = []
+    for symbol in set(by_symbol_g) & set(by_symbol_o):
+        for g in by_symbol_g[symbol]:
+            for o in by_symbol_o[symbol]:
+                if g["signal"] != o["signal"]:
+                    continue
+                confirmed.append({
+                    "symbol": symbol,
+                    "signal": g["signal"],
+                    "confidence": min(float(g["confidence"]), float(o["confidence"])),
+                    "headline": f"[Gemini] {g.get('headline','')}  |  "
+                               f"[OpenAI] {o.get('headline','')}",
+                    "source_name": f"{g.get('source_name','')} + {o.get('source_name','')}",
+                    "source_url": g.get("source_url", ""),  # primary citation for dedup
+                    "reasoning": f"GEMINI: {g.get('reasoning','')}\n\n"
+                                f"OPENAI: {o.get('reasoning','')}",
+                })
+    return confirmed
+
+
 class NewsGeminiBot:
     def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int):
         self.cfg = cfg
@@ -215,6 +316,8 @@ class NewsGeminiBot:
 
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
         self.gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+        self.openai_key = os.environ.get("OPENAI_API_KEY", "")
+        self.openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
         self.state = self._load_state()
         self.symbols: dict = {}
@@ -302,16 +405,23 @@ class NewsGeminiBot:
             self.symbols[canon] = self.connector.resolve_symbol(canon)
         eq = self._mt5(self.connector.get_equity)
         self.log.info("=" * 70)
-        self.log.info(f"  NEWS-GEMINI BOT  magic={MAGIC}  symbols={self.symbols}")
+        self.log.info(f"  NEWS BOT (dual-provider consensus)  magic={MAGIC}  "
+                      f"symbols={self.symbols}")
         self.log.info(f"  equity={eq:.2f}  risk/trade={self.risk_pct}%  "
-                      f"poll={self.poll_min}min  model={self.gemini_model}")
+                      f"poll={self.poll_min}min")
+        self.log.info(f"  gemini model={self.gemini_model}")
+        openai_status = ("configured" if self.openai_key else
+                        "NOT SET -- dual-consensus unavailable, bot will idle "
+                        "(no new entries) until OPENAI_API_KEY is added to .env")
+        self.log.info(f"  openai model={self.openai_model}  {openai_status}")
         self.log.info(f"  kill-switch: {os.path.basename(self.stop_file)}  "
                       f"breaker: {os.path.basename(self.breaker_file)}")
         self.log.info("  ** UNVALIDATED STRATEGY -- no historical backtest exists "
                       "for this signal source. Live by explicit user decision. **")
         self.log.info("=" * 70)
         self._telegram(f"\U0001F680 START news_gemini  equity={eq:.2f}  "
-                       f"risk={self.risk_pct}%/trade  poll={self.poll_min}min")
+                       f"risk={self.risk_pct}%/trade  poll={self.poll_min}min  "
+                       f"dual-consensus={'ON' if self.openai_key else 'OFF (Gemini only, no OpenAI key -- idling)'}")
 
         while True:
             try:
@@ -409,27 +519,52 @@ class NewsGeminiBot:
                            f"after review.")
 
     # ── decision cycle ───────────────────────────────────────────────────
-    def _poll_cycle(self):
-        self.log.info("── news poll cycle ──")
+    def _safe_scan(self, name: str, fn, api_key: str, model: str) -> Optional[list]:
+        """Returns the candidate list, or None on ANY failure (quota, error,
+        malformed JSON) -- None means 'skip this cycle', never partial-trust."""
         try:
-            candidates = gemini_scan(self.gemini_key, self.gemini_model, self.poll_min)
+            return fn(api_key, model, self.poll_min)
         except Exception as e:
             msg = str(e)
-            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
-                self.log.warning(f"[GEMINI] quota exceeded -- skip cycle: {msg[:200]}")
-                self._telegram("⚠️ news_gemini: Gemini API quota exceeded — "
-                               "skipped this cycle (fail-safe, no trades)")
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
+                self.log.warning(f"[{name.upper()}] quota exceeded -- skip cycle: {msg[:200]}")
+                self._telegram(f"⚠️ news_gemini: {name} API quota exceeded — "
+                               f"skipped this cycle (fail-safe, no trades)")
             else:
-                self.log.error(f"[GEMINI] scan failed -- skip cycle: {msg[:300]}")
-                self._telegram(f"⚠️ news_gemini: scan failed — skipped this "
-                               f"cycle: {msg[:150]}")
+                self.log.error(f"[{name.upper()}] scan failed -- skip cycle: {msg[:300]}")
+                self._telegram(f"⚠️ news_gemini: {name} scan failed — skipped "
+                               f"this cycle: {msg[:150]}")
+            return None
+
+    def _poll_cycle(self):
+        self.log.info("── news poll cycle (dual-provider consensus) ──")
+
+        gemini_candidates = self._safe_scan("gemini", gemini_scan,
+                                            self.gemini_key, self.gemini_model)
+        if gemini_candidates is None:
             return
 
-        if not candidates:
-            self.log.info("[GEMINI] no qualifying candidates this cycle")
+        if not self.openai_key:
+            self.log.info("[OPENAI] not configured -- dual-consensus unavailable, "
+                          "no new entries this cycle (fail-safe)")
             return
 
-        for c in candidates:
+        openai_candidates = self._safe_scan("openai", openai_scan,
+                                            self.openai_key, self.openai_model)
+        if openai_candidates is None:
+            return
+
+        self.log.info(f"[SCAN] gemini={len(gemini_candidates)} candidate(s), "
+                      f"openai={len(openai_candidates)} candidate(s)")
+
+        confirmed = cross_check_consensus(gemini_candidates, openai_candidates)
+        if not confirmed:
+            self.log.info("[CONSENSUS] no symbol confirmed by both providers this cycle")
+            return
+
+        for c in confirmed:
+            self.log.info(f"[CONSENSUS] both providers agree: {c['symbol']} "
+                          f"{c['signal']} conf={c['confidence']:.2f}")
             self._evaluate_candidate(c)
 
     def _evaluate_candidate(self, c: dict):
@@ -575,6 +710,10 @@ def main():
     if not os.environ.get("GEMINI_API_KEY"):
         print("[ERROR] GEMINI_API_KEY not set (add it to .env)")
         sys.exit(1)
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("[WARN] OPENAI_API_KEY not set -- dual-provider consensus is "
+              "unavailable, the bot will run but skip every cycle (no new "
+              "entries) until it's added to .env. Not fatal, continuing.")
 
     cfg = ForexConfig()
     cfg.symbols = ["XAUUSD", "BTCUSDC", "ETHUSDC"]
