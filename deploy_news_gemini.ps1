@@ -33,8 +33,15 @@ Write-Host "  .env has GEMINI_API_KEY: OK" -ForegroundColor Green
 
 Write-Host "=== 2. ensure google-genai is installed ===" -ForegroundColor Cyan
 Set-Location $Desktop
+# $ErrorActionPreference=Stop turns a native command's stderr output into a
+# terminating error, which would abort here even on a normal "module not
+# found" check -- relax it just for this probe, then restore it.
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 python -c "import google.genai" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$hasGenai = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEAP
+if (-not $hasGenai) {
     Write-Host "  installing google-genai..."
     pip install --quiet google-genai
 }
