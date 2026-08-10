@@ -306,6 +306,7 @@ class MT5Connector:
             "stopLoss":   float(p.sl),
             "takeProfit": float(p.tp),
             "volume":     float(p.volume),
+            "profit":     float(p.profit),
         } for p in positions]
 
     # ── deal history (best-effort — สำหรับ commission/fill audit) ─────────────
@@ -356,6 +357,8 @@ class MT5Connector:
                 "entryType":  entry_map.get(d.entry, "UNKNOWN"),
                 "price":      float(d.price),
                 "commission": float(d.commission),
+                "profit":     float(d.profit),
+                "swap":       float(d.swap),
                 "reason":     reason_map.get(d.reason, "UNKNOWN"),
             } for d in deals]
         except Exception as exc:

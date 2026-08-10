@@ -446,13 +446,13 @@ class DailySleevesBot:
             pos = self._own_positions(bsym)
             cur = 0
             if pos:
-                cur = 1 if pos[0]["type"] == "buy" else -1
+                cur = 1 if pos[0]["type"] == "BUY" else -1
 
             if cur != 0 and bias != cur:
                 p = pos[0]
                 side = "long" if cur == 1 else "short"
                 r = self._mt5(self.executor.close_position_market, bsym, side,
-                              float(p["volume"]), str(p["ticket"]),
+                              float(p["volume"]), str(p["id"]),
                               f"{self.variant_tag[:8]}-exit")
                 self.log.info(f"[{binance}] EXIT {side} lot={p['volume']} -> {r}")
                 self._telegram(f"\U0001F7E1 EXIT {side.upper()} {bsym} "
@@ -647,7 +647,7 @@ class DailySleevesBot:
 
         own = self._own_positions(bsym)
         cur_lots = round(sum(float(p["volume"]) for p in own
-                             if p["type"] == "buy"), 2)
+                             if p["type"] == "BUY"), 2)
         delta = round(target_lots - cur_lots, 2)
         self.log.info(f"[combo] equity={eq:.2f} alloc={alloc:.2f} px={px:.2f} "
                       f"target={target_lots} current={cur_lots} delta={delta:+.2f}")
@@ -670,18 +670,18 @@ class DailySleevesBot:
                 self.log.error("[combo] buy failed — will retry next day")
         else:
             need = -delta
-            for p in sorted(own, key=lambda q: q["ticket"]):
+            for p in sorted(own, key=lambda q: q["id"]):
                 if need <= 0:
                     break
                 lot = min(float(p["volume"]), need)
                 r = self._mt5(self.executor.close_position_market, bsym, "long",
-                              lot, str(p["ticket"]), f"{self.variant_tag[:8]}-red")
+                              lot, str(p["id"]), f"{self.variant_tag[:8]}-red")
                 if r:
                     need = round(need - lot, 2)
-                    self.log.info(f"[combo] SELL {lot} (ticket {p['ticket']})")
+                    self.log.info(f"[combo] SELL {lot} (ticket {p['id']})")
                 else:
                     self.log.error(f"[combo] partial close failed on "
-                                   f"{p['ticket']} — retry next day")
+                                   f"{p['id']} — retry next day")
                     break
             self._telegram(f"\U0001F7E1 REBALANCE SELL {-delta:.2f} {bsym} "
                            f"({self.variant_tag}) -> {tf:.2f}x alloc")

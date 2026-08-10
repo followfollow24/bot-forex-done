@@ -1,0 +1,10 @@
+# ForexBot Requirements — MT5 via MetaApi.cloud
+# รองรับ macOS / Linux / Windows
+#
+# pip3 install -r requirements.txt
+
+numpy>=1.24
+pandas>=2.0
+python-dotenv>=1.0
+metaapi-cloud-sdk>=27.0.0
+google-genai>=0.3.0   # news_gemini_bot.py
