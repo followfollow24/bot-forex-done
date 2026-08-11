@@ -28,7 +28,12 @@ Design (all deliberate, not defaults):
     same fail-safe philosophy as everything else here, not a crash.
   - Poll cadence: once per NEWS_POLL_MIN minutes (default 45). News-driven
     setups do not need bar-close timing; a fixed wall-clock cadence keeps
-    LLM spend and API quota bounded and predictable.
+    LLM spend and API quota bounded and predictable. BOOSTED to
+    BOOST_POLL_MIN (default 10) during 19:00-20:00 Thai time (12:00-13:00
+    UTC, user-requested -- catches major US economic data releases). The
+    lookback each scan searches is the ACTUAL elapsed minutes since the
+    last poll (capped at 4x the larger cadence), not a hardcoded constant,
+    so a skipped/delayed cycle still searches the right window.
   - Source gating: each provider must return structured JSON (schema below)
     citing a source name/URL per candidate. The code -- NOT the model --
     checks the source domain against TIER1_DOMAINS. A model that just says
@@ -105,6 +110,17 @@ TIME_STOP_HOURS = 18
 MAX_CONSEC_LOSSES = 3
 DEFAULT_RISK_PCT = 0.15
 SL_ATR_MULT = 2.5
+
+# [2026-08-11] Boosted polling window: 19:00-20:00 Thai time (UTC+7, no DST)
+# = 12:00-13:00 UTC, requested by the user because this hour catches the
+# major US economic data releases (CPI/NFP/etc typically print here).
+# Fixed Thai-time window -> fixed UTC window; does NOT shift with US DST,
+# which is what was actually asked for (a Thai wall-clock hour), not a
+# "always aligned to the US data release" window (those drift by 1h across
+# US DST changes -- if that drift ever matters, revisit this).
+BOOST_START_UTC_HOUR = 12
+BOOST_END_UTC_HOUR = 13
+BOOST_POLL_MIN = 10
 
 
 def _domain(url: str) -> str:
@@ -296,10 +312,16 @@ def cross_check_consensus(gemini_candidates: list, openai_candidates: list) -> l
 
 
 class NewsGeminiBot:
-    def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int):
+    def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int,
+                boost_poll_min: int = BOOST_POLL_MIN,
+                boost_start_hour: int = BOOST_START_UTC_HOUR,
+                boost_end_hour: int = BOOST_END_UTC_HOUR):
         self.cfg = cfg
         self.risk_pct = risk_pct
         self.poll_min = poll_min
+        self.boost_poll_min = boost_poll_min
+        self.boost_start_hour = boost_start_hour
+        self.boost_end_hour = boost_end_hour
 
         self.stop_file = os.path.join(_BASE_DIR, "STOP_NEWS_GEMINI")
         self.breaker_file = os.path.join(_BASE_DIR, "BREAKER_NEWS_GEMINI")
@@ -408,7 +430,9 @@ class NewsGeminiBot:
         self.log.info(f"  NEWS BOT (dual-provider consensus)  magic={MAGIC}  "
                       f"symbols={self.symbols}")
         self.log.info(f"  equity={eq:.2f}  risk/trade={self.risk_pct}%  "
-                      f"poll={self.poll_min}min")
+                      f"poll={self.poll_min}min (boosted to {self.boost_poll_min}min "
+                      f"during {self.boost_start_hour:02d}:00-{self.boost_end_hour:02d}:00 UTC "
+                      f"= 19:00-20:00 Thai time)")
         self.log.info(f"  gemini model={self.gemini_model}")
         openai_status = ("configured" if self.openai_key else
                         "NOT SET -- dual-consensus unavailable, bot will idle "
@@ -423,15 +447,26 @@ class NewsGeminiBot:
                        f"risk={self.risk_pct}%/trade  poll={self.poll_min}min  "
                        f"dual-consensus={'ON' if self.openai_key else 'OFF (Gemini only, no OpenAI key -- idling)'}")
 
+        in_boost_last = False
         while True:
             try:
                 self._heartbeat()
                 self._watch_positions()
                 self._check_time_stops()
                 now = datetime.now(timezone.utc)
+
+                in_boost = self.boost_start_hour <= now.hour < self.boost_end_hour
+                if in_boost != in_boost_last:
+                    self.log.info(f"[BOOST] {'entering' if in_boost else 'leaving'} "
+                                  f"high-frequency window (poll -> "
+                                  f"{self.boost_poll_min if in_boost else self.poll_min}min)")
+                    in_boost_last = in_boost
+                interval_min = self.boost_poll_min if in_boost else self.poll_min
+
                 last = self.state.get("last_poll", "")
-                due = (not last or
-                      (now - datetime.fromisoformat(last)).total_seconds() >= self.poll_min * 60)
+                elapsed_min = (999999.0 if not last else
+                              (now - datetime.fromisoformat(last)).total_seconds() / 60.0)
+                due = elapsed_min >= interval_min
                 if due:
                     if os.path.exists(self.stop_file):
                         self.log.info("[KILL-SWITCH] present -- skipping poll cycle")
@@ -439,7 +474,12 @@ class NewsGeminiBot:
                         self.log.warning("[BREAKER] consecutive-loss breaker active -- "
                                          "skipping poll cycle (clear file to resume)")
                     else:
-                        self._poll_cycle()
+                        # cap the lookback at NEWS_POLL_MIN even if elapsed_min is huge
+                        # (first run, or a long outage) -- searching for "news in the
+                        # last 3 days" is a different, noisier task than the intended
+                        # "news since last check", so bound it to a sane ceiling.
+                        lookback = min(round(elapsed_min), max(self.poll_min, self.boost_poll_min) * 4)
+                        self._poll_cycle(lookback)
                     self.state["last_poll"] = now.isoformat()
                     self._save_state()
             except Exception as e:
@@ -519,11 +559,12 @@ class NewsGeminiBot:
                            f"after review.")
 
     # ── decision cycle ───────────────────────────────────────────────────
-    def _safe_scan(self, name: str, fn, api_key: str, model: str) -> Optional[list]:
+    def _safe_scan(self, name: str, fn, api_key: str, model: str,
+                   lookback_min: int) -> Optional[list]:
         """Returns the candidate list, or None on ANY failure (quota, error,
         malformed JSON) -- None means 'skip this cycle', never partial-trust."""
         try:
-            return fn(api_key, model, self.poll_min)
+            return fn(api_key, model, lookback_min)
         except Exception as e:
             msg = str(e)
             if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
@@ -536,11 +577,13 @@ class NewsGeminiBot:
                                f"this cycle: {msg[:150]}")
             return None
 
-    def _poll_cycle(self):
-        self.log.info("── news poll cycle (dual-provider consensus) ──")
+    def _poll_cycle(self, lookback_min: int):
+        self.log.info(f"── news poll cycle (dual-provider consensus, "
+                      f"lookback={lookback_min}min) ──")
 
         gemini_candidates = self._safe_scan("gemini", gemini_scan,
-                                            self.gemini_key, self.gemini_model)
+                                            self.gemini_key, self.gemini_model,
+                                            lookback_min)
         if gemini_candidates is None:
             return
 
@@ -550,7 +593,8 @@ class NewsGeminiBot:
             return
 
         openai_candidates = self._safe_scan("openai", openai_scan,
-                                            self.openai_key, self.openai_model)
+                                            self.openai_key, self.openai_model,
+                                            lookback_min)
         if openai_candidates is None:
             return
 
@@ -696,7 +740,17 @@ def main():
                          f"deliberately far below every other live bot; there is no "
                          f"historical edge estimate to size against)")
     ap.add_argument("--poll-min", type=int, default=NEWS_POLL_MIN,
-                    help=f"minutes between Gemini news scans (default {NEWS_POLL_MIN})")
+                    help=f"minutes between news scans outside the boost window "
+                         f"(default {NEWS_POLL_MIN})")
+    ap.add_argument("--boost-poll-min", type=int, default=BOOST_POLL_MIN,
+                    help=f"minutes between scans DURING the boost window "
+                         f"(default {BOOST_POLL_MIN})")
+    ap.add_argument("--boost-start-utc-hour", type=int, default=BOOST_START_UTC_HOUR,
+                    help=f"boost window start, UTC hour 0-23 (default "
+                         f"{BOOST_START_UTC_HOUR} = 19:00 Thai time)")
+    ap.add_argument("--boost-end-utc-hour", type=int, default=BOOST_END_UTC_HOUR,
+                    help=f"boost window end, UTC hour 0-23, exclusive (default "
+                         f"{BOOST_END_UTC_HOUR} = 20:00 Thai time)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-real", action="store_true")
     args = ap.parse_args()
@@ -728,7 +782,9 @@ def main():
         print("[ERROR] MT5 unavailable -- use --dry-run off-Windows")
         sys.exit(1)
 
-    NewsGeminiBot(cfg, args.risk, args.poll_min).run()
+    NewsGeminiBot(cfg, args.risk, args.poll_min,
+                 args.boost_poll_min, args.boost_start_utc_hour,
+                 args.boost_end_utc_hour).run()
 
 
 if __name__ == "__main__":
