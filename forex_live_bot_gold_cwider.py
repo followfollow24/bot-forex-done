@@ -482,7 +482,8 @@ class GoldCWiderBot:
                  equity_stop_file: Optional[str] = None,
                  heartbeat_file: Optional[str] = None,
                  block_hours: Optional[str] = None,
-                 xasset_short_gate: Optional[str] = None):
+                 xasset_short_gate: Optional[str] = None,
+                 history_bars: Optional[int] = None):
         self.cfg = cfg
         self.max_positions = max(1, int(max_positions))
 
@@ -531,6 +532,19 @@ class GoldCWiderBot:
         self.lock_file          = LOCK_FILE if lock_file is None else lock_file
         self.equity_stop_file   = EQUITY_STOP_FILE if equity_stop_file is None else equity_stop_file
         self.heartbeat_file     = HEARTBEAT_FILE if heartbeat_file is None else heartbeat_file
+        # [2026-08-11 FIX] HISTORY_BARS was missed when this constructor-args
+        # pattern was applied to every other global above -- for every
+        # --manual-exit bot (the second module-namespace-import problem
+        # explained in the long comment above), self.buf/boot_buffer() read
+        # the bare HISTORY_BARS global, which for that second copy is stuck
+        # at the module default of 900 regardless of what main() intended
+        # per --timeframe. Currently only cosmetic (gold_daily_breakout
+        # wants 500 but gets 900 -- fetches/retains MORE history than
+        # needed, not less, so CandleBuffer.ready still gates correctly on
+        # strategy.MIN_BARS) but the same bug class would be a real
+        # readiness bug the day some future timeframe wants fewer bars than
+        # MIN_BARS. Closed for consistency with every other fixed global.
+        self.history_bars       = HISTORY_BARS if history_bars is None else history_bars
 
         self.log = self._setup_logging()
 
@@ -577,7 +591,7 @@ class GoldCWiderBot:
 
         self._lock_fd: Optional[int] = None  # flock fd ของ single-instance lock (live mode เท่านั้น)
 
-        self.buf = CandleBuffer(HISTORY_BARS, min_bars=self.strategy.MIN_BARS)
+        self.buf = CandleBuffer(self.history_bars, min_bars=self.strategy.MIN_BARS)
         self.positions: list[Position] = []
 
         # ── Day-level state (tracking only, no blocking rules) ──
@@ -823,22 +837,22 @@ class GoldCWiderBot:
     # Warm-up
     # ─────────────────────────────────────────────────────────────────────
     def boot_buffer(self):
-        self.log.info(f"Warm-up: ดึง {HISTORY_BARS} แท่ง M15 ของ {self.bsym} ...")
+        self.log.info(f"Warm-up: ดึง {self.history_bars} แท่ง M15 ของ {self.bsym} ...")
         if self.cfg.dry_run:
             self.log.warning("[DRY-RUN] ไม่มี connection จริง — ไม่สามารถสร้าง buffer จากข้อมูลจริงได้")
             return
         for attempt in range(1, 4):
-            candles = self._fetch_closed_candles(limit=HISTORY_BARS)
+            candles = self._fetch_closed_candles(limit=self.history_bars)
             self.log.info(f"  attempt {attempt}/3: got {len(candles)} bars")
             if candles:
                 self.buf.push(candles)
-            if len(self.buf) >= HISTORY_BARS:
+            if len(self.buf) >= self.history_bars:
                 break
             if attempt < 3:
                 time.sleep(5)
         self.log.info(f"  -> {len(self.buf)} bars  ready={self.buf.ready}")
-        if len(self.buf) < HISTORY_BARS:
-            self.log.warning(f"  -> only {len(self.buf)}/{HISTORY_BARS} bars after retries — will fill naturally")
+        if len(self.buf) < self.history_bars:
+            self.log.warning(f"  -> only {len(self.buf)}/{self.history_bars} bars after retries — will fill naturally")
 
     def _fetch_closed_candles(self, limit: int = 5) -> list:
         """ดึงแท่งที่ปิดแล้วจาก MT5 — ห่อด้วย timeout (defense layer #1)
@@ -972,7 +986,19 @@ class GoldCWiderBot:
             es = data.get("equity_stop_state", {})
             self.peak_equity           = es.get("peak_equity", self.cfg.total_capital_usd)
             self.equity_stop_triggered = es.get("equity_stop_triggered", False)
-            if self.equity_stop_triggered:
+            # [2026-08-11 FIX] reconcile against the FILE, not the persisted
+            # bool blindly -- otherwise an operator who deletes
+            # EQUITY_STOP_FILE to resume (the documented procedure) gets
+            # silently un-resumed by the very next restart, since this used
+            # to restore equity_stop_triggered=True from the JSON regardless
+            # of whether the file still existed.
+            if self.equity_stop_triggered and not os.path.exists(self.equity_stop_file):
+                self.equity_stop_triggered = False
+                self.log.warning(
+                    f"[STATE] equity-stop was triggered before this restart, but "
+                    f"{os.path.basename(self.equity_stop_file)} no longer exists "
+                    f"(operator cleared it) — resuming new entries.")
+            elif self.equity_stop_triggered:
                 self.log.warning(
                     f"[STATE] equity-stop was previously triggered (peak_equity="
                     f"{self.peak_equity:,.2f}) — remains latched until "
@@ -1189,7 +1215,15 @@ class GoldCWiderBot:
     def _check_broker_close(self):
         if not self.positions or self.cfg.dry_run:
             return
-        positions = self.connector.get_open_positions()
+        # [2026-08-11 FIX] this call used to be unwrapped despite running
+        # every ~30s via on_poll() (since the 2026-08-05 fix made on_poll
+        # call this every cycle, not just on bar-close) -- making it, by
+        # frequency, the single most-invoked MT5 call in the live fleet and
+        # exactly the kind of call defense-layer-1 (_call_with_timeout) was
+        # built to catch a hang on. The module docstring already claimed
+        # this layer covered "every MT5 call in the hot path"; it didn't.
+        positions = self._call_with_timeout(
+            self.connector.get_open_positions, self._mt5_call_timeout_sec)
         open_ids = {str(p.get("id", "")) for p in positions}
         for pos in list(self.positions):
             if pos.trade_id not in open_ids:
@@ -1298,7 +1332,29 @@ class GoldCWiderBot:
             self.peak_equity = equity
 
         if self.equity_stop_triggered:
-            return  # already triggered — stay latched until a human clears it
+            # [2026-08-11 FIX] equity_stop_triggered used to be authoritative
+            # on its own -- it's a plain bool, persisted to state.json every
+            # bar and unconditionally restored on every restart, so the
+            # DOCUMENTED recovery step ("delete EQUITY_STOP_FILE to resume")
+            # never actually worked: deleting the file left this bool True,
+            # and a restart re-loaded it True from the JSON regardless. The
+            # file is now the single source of truth; this bool is only a
+            # same-process cache of "was the file last known to exist" so
+            # _check_equity_stop() doesn't re-alert every bar. Reconcile it
+            # against the file here so an operator's delete takes effect
+            # immediately, in the same run, no restart required.
+            if not os.path.exists(self.equity_stop_file):
+                self.equity_stop_triggered = False
+                self.log.warning(
+                    f"[EQUITY-STOP CLEARED] {os.path.basename(self.equity_stop_file)} "
+                    f"no longer exists -- resuming new entries. peak_equity reset "
+                    f"to current equity={equity:,.2f} so a fresh drawdown window starts now.")
+                self._send_telegram_alert(
+                    f"✅ EQUITY-STOP CLEARED — {self.variant_tag} ({self.symbol})\n"
+                    f"New entries resumed. Peak equity reset to {equity:,.2f}.")
+                self.peak_equity = equity
+            else:
+                return  # still triggered — stay latched until the file is gone
 
         floor = self.peak_equity * (1.0 - self.cfg.stop_equity_frac)
         if equity <= floor:
@@ -1403,11 +1459,15 @@ class GoldCWiderBot:
                 self._close_timeout(pos)
 
         # ── 3) kill switch (manual file OR equity-stop circuit breaker) ──
-        kill = os.path.exists(self.stop_file) or os.path.exists(self.equity_stop_file) or self.equity_stop_triggered
+        # [2026-08-11 FIX] the file is the single source of truth (see the
+        # long comment in _check_equity_stop() for why the redundant
+        # `self.equity_stop_triggered` OR'd in here defeated the documented
+        # "delete the file to resume" recovery procedure).
+        kill = os.path.exists(self.stop_file) or os.path.exists(self.equity_stop_file)
         if os.path.exists(self.stop_file):
             self.log.info(f"[KILL-SWITCH] {os.path.basename(self.stop_file)} exists — "
                            f"blocking new entries (existing position still managed)")
-        if os.path.exists(self.equity_stop_file) or self.equity_stop_triggered:
+        if os.path.exists(self.equity_stop_file):
             self.log.warning(f"[EQUITY-STOP] active — blocking new entries "
                               f"(existing position still managed). Delete "
                               f"{os.path.basename(self.equity_stop_file)} to resume.")
@@ -1958,7 +2018,8 @@ def main():
             equity_stop_file=EQUITY_STOP_FILE,
             heartbeat_file=HEARTBEAT_FILE,
             block_hours=args.block_hours,
-            xasset_short_gate=args.xasset_short_gate).run()
+            xasset_short_gate=args.xasset_short_gate,
+            history_bars=HISTORY_BARS).run()
 
 
 if __name__ == "__main__":

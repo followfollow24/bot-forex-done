@@ -700,8 +700,3 @@ def _cfg_has_credentials(cfg: ForexConfig) -> bool:
     """MT5 attach mode ใช้ terminal ที่ login ไว้แล้ว — ไม่ต้องมี credentials ใน cfg.
     เงื่อนไขเดียวสำหรับ live mode คือ MetaTrader5 package ต้องใช้งานได้ (Windows)."""
     return _HAS_MT5
-
-
-# backward-compat alias
-OANDAConnector = MT5Connector
-cfg_has_credentials = _cfg_has_credentials

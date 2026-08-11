@@ -151,6 +151,18 @@ def _domain(url: str) -> str:
         return ""
 
 
+def _normalize_url(url: str) -> str:
+    """Strip query string / fragment / trailing slash so the same story
+    re-cited with different tracking params (utm_*, ?ref=..., #anchor)
+    still dedups against a URL already seen."""
+    try:
+        p = urllib.parse.urlparse(url)
+        path = p.path.rstrip("/")
+        return urllib.parse.urlunparse((p.scheme, p.netloc.lower(), path, "", "", ""))
+    except Exception:
+        return url
+
+
 # Authored Gemini-style (no additionalProperties); _openai_strict_schema()
 # converts it for OpenAI. Note every property ends up "required" on the
 # OpenAI side, so the prompt tells the model to emit "" for a published_utc
@@ -570,12 +582,48 @@ class NewsGeminiBot:
             self.log.warning(f"telegram failed: {e}")
 
     def _load_state(self) -> dict:
+        default = {"seen_urls": {}, "positions": {}, "consec_losses": 0,
+                  "last_poll": ""}
+        if not os.path.exists(self.state_file):
+            return default   # normal on first run -- no alert needed
+        # [2026-08-11 FIX] a CORRUPT state file (bad JSON, encoding, a
+        # permissions blip) used to be indistinguishable from "no file yet"
+        # -- both silently returned a blank default, wiping any tracked
+        # open positions, the loss-streak count, and the dedup URL history
+        # with no log line and no alert. A wiped `positions` dict is
+        # recoverable (the broker is still queried directly before any new
+        # entry), but it happens invisibly, which is the actual problem:
+        # an operator has no way to know it occurred. Now logged and
+        # alerted loudly, distinctly from the normal first-run case.
         try:
             with open(self.state_file) as f:
                 return json.load(f)
-        except Exception:
-            return {"seen_urls": {}, "positions": {}, "consec_losses": 0,
-                    "last_poll": ""}
+        except Exception as e:
+            self.log.error(f"[STATE] {self.state_file} exists but failed to "
+                           f"load ({e}) -- starting from a BLANK state "
+                           f"(tracked positions/loss-streak/dedup history "
+                           f"lost; broker positions will still be found on "
+                           f"next new-entry check via a live query)")
+            self._telegram(f"⚠️ news_gemini: state file corrupted/unreadable "
+                           f"({type(e).__name__}) -- resumed with blank "
+                           f"state, please verify no position was orphaned")
+            return default
+
+    def _prune_seen_urls(self, seen: dict):
+        """seen_urls grows one entry per qualified+traded headline forever
+        with nothing ever removed. Drop anything older than DEDUP_HOURS --
+        it can no longer affect a dedup decision anyway."""
+        now = datetime.now(timezone.utc)
+        stale = []
+        for u, ts in seen.items():
+            try:
+                age_h = (now - datetime.fromisoformat(ts)).total_seconds() / 3600
+                if age_h >= DEDUP_HOURS:
+                    stale.append(u)
+            except Exception:
+                stale.append(u)   # unparsable timestamp -- drop it too
+        for u in stale:
+            del seen[u]
 
     def _save_state(self):
         tmp = self.state_file + ".tmp"
@@ -683,9 +731,19 @@ class NewsGeminiBot:
                 if due:
                     if os.path.exists(self.stop_file):
                         self.log.info("[KILL-SWITCH] present -- skipping poll cycle")
+                        # [2026-08-11 FIX] last_poll used to advance even on
+                        # this skip, so a multi-hour/day kill-switch stop
+                        # left the lookback (elapsed-since-last-poll) window
+                        # covering only ~poll_min once resumed -- news from
+                        # the entire stopped period would never be searched
+                        # for. Leaving last_poll untouched means the NEXT
+                        # cycle after resuming naturally has a large elapsed
+                        # window (capped at 4x the cadence, same as any long
+                        # outage) instead of a blind spot.
                     elif os.path.exists(self.breaker_file):
                         self.log.warning("[BREAKER] consecutive-loss breaker active -- "
                                          "skipping poll cycle (clear file to resume)")
+                        # same reasoning as the kill-switch branch above.
                     else:
                         # cap the lookback at NEWS_POLL_MIN even if elapsed_min is huge
                         # (first run, or a long outage) -- searching for "news in the
@@ -693,8 +751,8 @@ class NewsGeminiBot:
                         # "news since last check", so bound it to a sane ceiling.
                         lookback = min(round(elapsed_min), max(self.poll_min, self.boost_poll_min) * 4)
                         self._poll_cycle(lookback)
-                    self.state["last_poll"] = now.isoformat()
-                    self._save_state()
+                        self.state["last_poll"] = now.isoformat()
+                        self._save_state()
             except Exception as e:
                 self.log.error(f"loop error: {e}")
             time.sleep(60)
@@ -894,20 +952,16 @@ class NewsGeminiBot:
             self._telegram(f"ℹ️ news_gemini SKIP (source '{dom}' not tier-1): "
                            f"{headline[:150]}")
             return
-        if not url:
-            self.log.info(f"[SKIP no-url] {tag}")
-            return
 
+        norm_url = _normalize_url(url)
         seen = self.state.setdefault("seen_urls", {})
-        last_seen = seen.get(url)
+        last_seen = seen.get(norm_url)
         if last_seen:
             age_h = (datetime.now(timezone.utc)
                      - datetime.fromisoformat(last_seen)).total_seconds() / 3600
             if age_h < DEDUP_HOURS:
                 self.log.info(f"[SKIP dedup {age_h:.1f}h ago] {tag}")
                 return
-        seen[url] = datetime.now(timezone.utc).isoformat()
-        self._save_state()
 
         bsym = self.symbols[symbol]
         if self._own_positions(bsym):
@@ -919,7 +973,13 @@ class NewsGeminiBot:
         self.log.info(f"[QUALIFIED] {tag}")
         if not self._chart_allows(symbol, bsym, signal, headline):
             return
-        self._enter(symbol, bsym, signal, headline, src, url, reasoning, conf)
+        # mark dedup only on a CONFIRMED trade -- a fail-safe skip inside
+        # _enter() (bad ATR/price/sizing/order-reject) must not burn the
+        # DEDUP_HOURS window for a story that never actually got traded.
+        if self._enter(symbol, bsym, signal, headline, src, url, reasoning, conf):
+            seen[norm_url] = datetime.now(timezone.utc).isoformat()
+            self._prune_seen_urls(seen)
+            self._save_state()
 
     def _chart_allows(self, symbol: str, bsym: str, signal: str,
                      headline: str) -> bool:
@@ -979,19 +1039,19 @@ class NewsGeminiBot:
         return True
 
     def _enter(self, symbol: str, bsym: str, signal: str, headline: str,
-              src: str, url: str, reasoning: str, conf: float):
+              src: str, url: str, reasoning: str, conf: float) -> bool:
         atr = self._atr14(bsym)
         if not atr or not math.isfinite(atr) or atr <= 0:
             self.log.warning(f"[{symbol}] invalid ATR -- skip entry")
             self._telegram(f"⚠️ news_gemini: {symbol} ATR unavailable — "
                            f"entry skipped (fail-safe)")
-            return
+            return False
 
         eq = self._mt5(self.connector.get_equity)
         bid, ask = self._mt5(self.connector.get_current_price, bsym)
         if bid <= 0 or ask <= 0:
             self.log.warning(f"[{symbol}] invalid price -- skip entry")
-            return
+            return False
         long_ = signal == "long"
         px = ask if long_ else bid
         sd = SL_ATR_MULT * atr
@@ -1004,12 +1064,12 @@ class NewsGeminiBot:
         sd_pips = sd / pip_size
         if sd_pips <= 0 or pip_value <= 0:
             self.log.warning(f"[{symbol}] invalid pip_value -- skip entry")
-            return
+            return False
         risk_cash = eq * self.risk_pct / 100.0
         lot = round(risk_cash / (sd_pips * pip_value), 2)
         if lot < 0.01:
             self.log.warning(f"[{symbol}] lot rounds to 0 -- skip entry")
-            return
+            return False
         actual_risk_pct = (sd_pips * pip_value * lot) / eq * 100.0 if eq > 0 else float("inf")
         if actual_risk_pct > self.risk_pct * 1.5:
             self.log.error(f"[{symbol}] SIZING SANITY CHECK FAILED: lot={lot} implies "
@@ -1017,7 +1077,7 @@ class NewsGeminiBot:
                            f"-- REFUSING to open")
             self._telegram(f"⛔ news_gemini: {symbol} sizing sanity check failed "
                            f"— entry refused")
-            return
+            return False
 
         side = "long" if long_ else "short"
         result = self._mt5(self.executor.open_position, bsym, side, lot,
@@ -1025,7 +1085,7 @@ class NewsGeminiBot:
         if not result:
             self.log.error(f"[{symbol}] open failed")
             self._telegram(f"⚠️ news_gemini: {symbol} order failed to open")
-            return
+            return False
 
         fill = float(result.get("fill_price", px) or px)
         self.state.setdefault("positions", {})[f"{symbol}-{result.get('trade_id')}"] = {
@@ -1045,6 +1105,7 @@ class NewsGeminiBot:
             f"headline: {headline}\n"
             f"source: {src} ({url})\n"
             f"reasoning: {reasoning[:400]}")
+        return True
 
 
 def main():

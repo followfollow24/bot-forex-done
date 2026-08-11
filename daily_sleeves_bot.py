@@ -29,8 +29,8 @@ Why one file for two sleeves: both are "once per UTC day at 00:0x" bots with
 identical infrastructure (heartbeat, kill-switch, state json, Telegram,
 MT5 timeout wrapper). The sleeves differ only in signal engine + execution
 mapping, kept in two small classes. Watchdog runs two separate processes:
-  python daily_sleeves_bot.py --sleeve funding --variant-tag funding_contrarian --risk 1.0 --allow-real
-  python daily_sleeves_bot.py --sleeve combo   --variant-tag btc_combo_lb --alloc 0.35 --allow-real
+  python daily_sleeves_bot.py --sleeve funding --variant-tag funding_contrarian --risk 0.3 --allow-real
+  python daily_sleeves_bot.py --sleeve combo   --variant-tag btc_combo_lb --alloc 0.10 --allow-real
 """
 from __future__ import annotations
 
@@ -343,6 +343,21 @@ class DailySleevesBot:
         wanted = ["BTCUSDC", "ETHUSDC"] if self.sleeve == "funding" else ["BTCUSDC"]
         for s in wanted:
             self.symbols[s] = self.connector.resolve_symbol(s)
+            # [2026-08-11 FIX] cfg.pip_size/pip_value_usd_approx were only
+            # ever populated under the canonical key ("BTCUSDC") in main(),
+            # but every runtime lookup uses the broker-resolved key (e.g.
+            # Exness's actual "BTCUSDc", lowercase c) -- a case-sensitive
+            # dict miss that silently fell back to ForexConfig's generic
+            # non-crypto defaults. LIVE sizing was unaffected (pip_size
+            # cancels out algebraically against get_pip_value_live()'s own
+            # pip_size/trade_tick_size term, as long as it's read
+            # consistently -- it was), but --dry-run sizing (no
+            # get_pip_value_live fallback) would have been ~10,000x off.
+            # Populate both keys so lookups are correct under either.
+            bsym = self.symbols[s]
+            if bsym != s:
+                self.cfg.pip_size[bsym] = self.cfg.pip_size.get(s, 1.0)
+                self.cfg.pip_value_usd_approx[bsym] = self.cfg.pip_value_usd_approx.get(s, 0.01)
         eq = self._mt5(self.connector.get_equity)
         self.log.info("=" * 70)
         self.log.info(f"  ACCOUNT: {acct_tag}  login={info.get('login','?')}  "

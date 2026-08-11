@@ -196,11 +196,14 @@ class ForexConfig:
             "USDCAD": 5, "USDCHF": 5, "EURGBP": 5,
             "USDJPY": 3, "EURJPY": 3, "GBPJPY": 3,
             "XAUUSD": 2,
+            "BTCUSDC": 2, "ETHUSDC": 2,
         }
         if symbol in _dec:
             return _dec[symbol]
         u = symbol.upper()
         if "XAU" in u or "GOLD" in u:
+            return 2
+        if "BTC" in u or "ETH" in u:
             return 2
         if "JPY" in u:
             return 3
