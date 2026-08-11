@@ -136,6 +136,23 @@ BOOST_START_UTC_HOUR = 12
 BOOST_END_UTC_HOUR = 13
 BOOST_POLL_MIN = 5
 
+# [2026-08-11] Observed Gemini 503 "high demand" errors cluster inside the
+# boost window itself (12:51 and 12:56 UTC same day) -- plausibly every
+# other news-scanning bot on earth also hammers the API during major US
+# data releases. A single skipped cycle used to burn the whole cycle; retry
+# a couple of times with a short backoff before giving up, so a transient
+# provider-side blip doesn't cost an entire poll interval during the exact
+# window boosted polling exists for.
+SCAN_MAX_RETRIES = 2
+SCAN_RETRY_DELAY_SEC = 20
+TRANSIENT_ERROR_MARKERS = ("503", "UNAVAILABLE", "overloaded", "high demand",
+                           "timeout", "Timeout", "ConnectionError",
+                           "connection reset", "temporarily unavailable")
+
+
+def _is_transient_error(msg: str) -> bool:
+    return any(m in msg for m in TRANSIENT_ERROR_MARKERS)
+
 # Chart-vision veto stage (see _chart_allows / CHART_PROMPT_TEMPLATE).
 # 120 H1 bars = ~5 days, enough context to see a trend and a recent move
 # without shrinking each candle to an unreadable sliver at 1200px wide.
@@ -875,20 +892,37 @@ class NewsGeminiBot:
     def _safe_scan(self, name: str, fn, api_key: str, model: str,
                    lookback_min: int) -> Optional[list]:
         """Returns the candidate list, or None on ANY failure (quota, error,
-        malformed JSON) -- None means 'skip this cycle', never partial-trust."""
-        try:
-            return fn(api_key, model, lookback_min)
-        except Exception as e:
-            msg = str(e)
-            if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
-                self.log.warning(f"[{name.upper()}] quota exceeded -- skip cycle: {msg[:200]}")
-                self._telegram(f"⚠️ news_gemini: {name} API quota exceeded — "
-                               f"skipped this cycle (fail-safe, no trades)")
-            else:
-                self.log.error(f"[{name.upper()}] scan failed -- skip cycle: {msg[:300]}")
+        malformed JSON) -- None means 'skip this cycle', never partial-trust.
+
+        Transient provider-side errors (503/overloaded/timeout) get a couple
+        of short retries first -- see SCAN_MAX_RETRIES. Quota exhaustion and
+        anything else non-transient (bad schema, auth) skip immediately;
+        retrying those wastes the retry budget on something that can't
+        recover within one poll cycle anyway."""
+        attempt = 0
+        while True:
+            try:
+                return fn(api_key, model, lookback_min)
+            except Exception as e:
+                msg = str(e)
+                if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
+                    self.log.warning(f"[{name.upper()}] quota exceeded -- skip cycle: {msg[:200]}")
+                    self._telegram(f"⚠️ news_gemini: {name} API quota exceeded — "
+                                   f"skipped this cycle (fail-safe, no trades)")
+                    return None
+                if _is_transient_error(msg) and attempt < SCAN_MAX_RETRIES:
+                    attempt += 1
+                    self.log.warning(f"[{name.upper()}] transient error, retry "
+                                     f"{attempt}/{SCAN_MAX_RETRIES} in "
+                                     f"{SCAN_RETRY_DELAY_SEC}s: {msg[:200]}")
+                    time.sleep(SCAN_RETRY_DELAY_SEC)
+                    continue
+                suffix = (f" (after {attempt} retr{'y' if attempt == 1 else 'ies'})"
+                         if attempt else "")
+                self.log.error(f"[{name.upper()}] scan failed -- skip cycle{suffix}: {msg[:300]}")
                 self._telegram(f"⚠️ news_gemini: {name} scan failed — skipped "
-                               f"this cycle: {msg[:150]}")
-            return None
+                               f"this cycle{suffix}: {msg[:150]}")
+                return None
 
     def _poll_cycle(self, lookback_min: int):
         self.log.info(f"── news poll cycle (dual-provider consensus, "
