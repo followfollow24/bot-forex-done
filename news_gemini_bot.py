@@ -613,12 +613,35 @@ class NewsGeminiBot:
         if not self._mt5(self.connector.connect):
             self.log.error("MT5 connect failed")
             sys.exit(1)
+
+        # [2026-08-11 FIX] every other bot in this repo refuses to place real
+        # orders on a non-demo account unless --allow-real was explicitly
+        # passed (see daily_sleeves_bot.py's identical gate, itself copied
+        # from forex_live_bot_gold_cwider.py's _print_banner_and_verify_demo).
+        # This file set cfg.allow_real from the CLI flag but never actually
+        # READ it anywhere -- the flag was pure decoration and this bot would
+        # trade real money on ANY connected account regardless of the flag
+        # or the account's actual demo/real status. If MT5 credentials ever
+        # pointed at the wrong account during a redeploy, every other bot
+        # would loudly refuse to start; this one would not have.
+        info = self.connector.get_account_info()
+        is_demo = self.connector.is_demo()
+        if not self.cfg.dry_run and not is_demo and not self.cfg.allow_real:
+            self.log.error(
+                "REFUSING TO START: account is NOT confirmed DEMO "
+                f"(type={info.get('type', 'UNKNOWN')}) and --allow-real was "
+                "not passed. Use --dry-run to test, or --allow-real to "
+                "confirm you intend to trade this real account.")
+            sys.exit(1)
+        acct_tag = ("DEMO" if is_demo else
+                   ("LIVE (--allow-real)" if self.cfg.allow_real else "UNKNOWN"))
+
         for canon in SYMBOLS:
             self.symbols[canon] = self.connector.resolve_symbol(canon)
         eq = self._mt5(self.connector.get_equity)
         self.log.info("=" * 70)
         self.log.info(f"  NEWS BOT (dual-provider consensus)  magic={MAGIC}  "
-                      f"symbols={self.symbols}")
+                      f"account={acct_tag}  symbols={self.symbols}")
         self.log.info(f"  equity={eq:.2f}  risk/trade={self.risk_pct}%  "
                       f"poll={self.poll_min}min (boosted to {self.boost_poll_min}min "
                       f"during {self.boost_start_hour:02d}:00-{self.boost_end_hour:02d}:00 UTC "
@@ -688,23 +711,49 @@ class NewsGeminiBot:
                 # from deal history so the loss-streak breaker actually sees
                 # SL hits, not just time-stops.
                 net = self._closed_position_net_pnl(info["ticket"])
-                self._update_loss_streak(net)
-                self.log.info(f"[BROKER-CLOSE] {k} position closed, pnl={net:+.2f} "
-                              f"-- {info}")
-                self._telegram(f"\U0001F534 CLOSED (broker) news_gemini: {k} "
-                               f"entry={info.get('entry')} pnl={net:+.2f}")
+                # [2026-08-11 FIX] net used to be a plain float that defaulted
+                # to 0.0 whenever the deal-history lookup failed. 0.0 is not
+                # neutral to _update_loss_streak() -- it's >= 0, which RESETS
+                # consec_losses to 0. So a deal-history hiccup (same 90s MT5
+                # timeout class as everything else) didn't just fail to count
+                # a loss, it actively ERASED the breaker's memory, for
+                # exactly the scenario (a broker-side SL hit) the breaker
+                # most needs to catch. Now None means "couldn't determine" --
+                # the streak is left untouched and this is loudly alerted
+                # instead of silently treated as a win.
+                if net is None:
+                    self.log.error(f"[BROKER-CLOSE] {k} closed but outcome "
+                                   f"UNKNOWN (deal history unavailable) -- "
+                                   f"loss-streak left UNCHANGED, not reset")
+                    self._telegram(f"⚠️ news_gemini: {k} closed at broker but "
+                                   f"P&L could not be determined — breaker "
+                                   f"streak NOT updated, please check MT5 "
+                                   f"history manually")
+                else:
+                    self._update_loss_streak(net)
+                    self.log.info(f"[BROKER-CLOSE] {k} position closed, "
+                                  f"pnl={net:+.2f} -- {info}")
+                    self._telegram(f"\U0001F534 CLOSED (broker) news_gemini: {k} "
+                                   f"entry={info.get('entry')} pnl={net:+.2f}")
                 known.pop(k, None)
         self._save_state()
 
-    def _closed_position_net_pnl(self, position_id: str) -> float:
+    def _closed_position_net_pnl(self, position_id: str) -> Optional[float]:
         """Sum profit+swap+commission across a closed position's deals.
-        Returns 0.0 (treated as non-loss) if history is unavailable -- a
-        missing lookup must never itself trigger the breaker."""
+        Returns None -- NOT 0.0 -- if the outcome can't be determined (deal
+        history unavailable or empty). Callers must treat None as 'unknown',
+        never as a win/breakeven; see the 2026-08-11 fix note at the call
+        site in _watch_positions for why this distinction is safety-critical
+        (0.0 was silently resetting the consecutive-loss breaker)."""
         try:
             deals = self._mt5(self.connector.get_position_deals, position_id, 1440)
         except Exception as e:
             self.log.warning(f"deal history lookup failed for {position_id}: {e}")
-            return 0.0
+            return None
+        if not deals:
+            self.log.warning(f"deal history EMPTY for {position_id} -- "
+                             f"cannot determine outcome")
+            return None
         return sum(d.get("profit", 0.0) + d.get("swap", 0.0) + d.get("commission", 0.0)
                   for d in deals)
 
@@ -724,6 +773,22 @@ class NewsGeminiBot:
             side = "long" if p["type"] == "BUY" else "short"
             r = self._mt5(self.executor.close_position_market, info["bsym"], side,
                           float(p["volume"]), str(p["id"]), "news-timestop")
+            # [2026-08-11 FIX] close_position_market() returns {} (falsy) on a
+            # rejected/failed order specifically so the caller can detect it
+            # (forex_executor.py's own comment; forex_live_bot_gold_cwider.py
+            # _close_timeout() does check it, this function used to not).
+            # Without this check, a requote/IPC hiccup would leave the
+            # position live at the broker while the bot marked it closed,
+            # updated the loss streak from a stale pre-close snapshot, told
+            # Telegram it closed, and stopped watching it entirely -- no
+            # further time-stop enforcement, ever, for that position.
+            if not r:
+                self.log.error(f"[TIME-STOP] close FAILED for {k} -- position "
+                               f"still open at broker, NOT untracking. Will "
+                               f"retry next loop (~60s).")
+                self._telegram(f"⚠️ news_gemini: {k} time-stop close order "
+                               f"FAILED — position still open, retrying")
+                continue
             net = float(p.get("profit", 0.0))
             self._update_loss_streak(net)
             self.log.info(f"[TIME-STOP] closed {k} after {TIME_STOP_HOURS}h, pnl={net:+.2f}")

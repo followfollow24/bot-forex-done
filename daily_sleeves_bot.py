@@ -370,10 +370,28 @@ class DailySleevesBot:
                     if os.path.exists(self.stop_file):
                         self.log.info("[KILL-SWITCH] present — skipping decision "
                                       "(existing positions still watched)")
+                        # kill-switch is a deliberate operator stop, not a
+                        # transient glitch -- do NOT mark last_decision_day,
+                        # but also don't spin: the minute-window naturally
+                        # caps retries to once/min for at most 50 min/day.
                     else:
-                        self._decide(today)
-                    self.state["last_decision_day"] = today
-                    self._save_state()
+                        # [2026-08-11 FIX] this used to set last_decision_day
+                        # unconditionally, so a single Binance/MT5 blip inside
+                        # _decide() (fetch failure, unmeasured broker offset,
+                        # invalid pip_value, etc -- all previously logged as
+                        # "fail-safe skip" but silently treated as "day done")
+                        # cost the WHOLE day with no retry, even though the
+                        # 1-50 minute window was clearly designed to allow
+                        # one. Now only a genuinely completed decision (trade
+                        # or deliberate no-trade) consumes the day.
+                        completed = self._decide(today)
+                        if completed:
+                            self.state["last_decision_day"] = today
+                        else:
+                            self.log.warning("[RETRY] decision cycle incomplete "
+                                            "(fail-safe skip) -- will retry "
+                                            "within today's window")
+                        self._save_state()
             except Exception as e:
                 self.log.error(f"loop error: {e}")
             time.sleep(60)
@@ -413,15 +431,20 @@ class DailySleevesBot:
         self._save_state()
 
     # ── decision dispatch ────────────────────────────────────────────────
-    def _decide(self, today: str):
+    def _decide(self, today: str) -> bool:
+        """Returns True iff the day's decision genuinely completed (data was
+        available, the logic ran to a real conclusion -- trade or no-trade).
+        False means a fail-safe/transient skip that should be RETRIED within
+        the same day's decision window, not treated as done."""
         self.log.info(f"── decision cycle {today} ──")
         if self.sleeve == "funding":
-            self._decide_funding()
+            return self._decide_funding()
         else:
-            self._decide_combo()
+            return self._decide_combo()
 
     # ── funding sleeve ───────────────────────────────────────────────────
-    def _decide_funding(self):
+    def _decide_funding(self) -> bool:
+        all_ok = True
         for canon, binance in (("BTCUSDC", "BTCUSDT"), ("ETHUSDC", "ETHUSDT")):
             bsym = self.symbols[canon]
             try:
@@ -433,6 +456,7 @@ class DailySleevesBot:
                                f"NO new entries; existing position kept (has stop)")
                 self._telegram(f"⚠️ {self.variant_tag}: {binance} data "
                                f"fetch failed — decision skipped (fail-safe)")
+                all_ok = False
                 continue
             row = frame.iloc[-1]
             day = row["date"]
@@ -454,6 +478,31 @@ class DailySleevesBot:
                 r = self._mt5(self.executor.close_position_market, bsym, side,
                               float(p["volume"]), str(p["id"]),
                               f"{self.variant_tag[:8]}-exit")
+                # [2026-08-11 FIX] close_position_market() returns {} (falsy)
+                # on a rejected/failed order specifically so the caller can
+                # detect it (see forex_executor.py's own comment on this).
+                # This call site used to ignore that and unconditionally
+                # treat the exit as successful -- a requote/IPC hiccup would
+                # leave the OLD position live at the broker while the bot
+                # believed itself flat, then fall straight into the entry
+                # block below and open a NEW, possibly opposite-direction
+                # position on the same symbol: two live positions, only one
+                # tracked, Telegram falsely reporting a clean exit. Same risk
+                # class as the 2026-08-10 sizing incident, different
+                # mechanism. Fix: only untrack/flip on a confirmed close;
+                # otherwise skip this symbol's entry decision entirely this
+                # cycle and retry next poll (the combo sleeve's own close
+                # loop already did this correctly -- see the `if r:` pattern
+                # a few dozen lines below).
+                if not r:
+                    self.log.error(f"[{binance}] EXIT FAILED {side} lot={p['volume']} "
+                                   f"-- position still open at broker, NOT untracking. "
+                                   f"Will retry within today's decision window.")
+                    self._telegram(f"⚠️ {self.variant_tag}: {binance} exit order "
+                                   f"FAILED — position still open, will retry "
+                                   f"(fail-safe, no new entry this cycle)")
+                    all_ok = False
+                    continue
                 self.log.info(f"[{binance}] EXIT {side} lot={p['volume']} -> {r}")
                 self._telegram(f"\U0001F7E1 EXIT {side.upper()} {bsym} "
                                f"({self.variant_tag}) lot={p['volume']}")
@@ -464,6 +513,7 @@ class DailySleevesBot:
                 atr = float(row["atr14"])
                 if not np.isfinite(atr) or atr <= 0:
                     self.log.warning(f"[{binance}] invalid ATR — skip entry")
+                    all_ok = False   # data glitch, retry-worthy
                     continue
                 # incomplete-funding entries already excluded via bias=0
                 eq = self._mt5(self.connector.get_equity)
@@ -471,6 +521,7 @@ class DailySleevesBot:
                 px = ask if bias == 1 else bid
                 if px <= 0:
                     self.log.warning(f"[{binance}] no price — skip entry")
+                    all_ok = False   # MT5/connectivity glitch, retry-worthy
                     continue
                 sd = 2.5 * atr
                 # [2026-08-10 SIZING BUG FIX] the previous formula
@@ -492,6 +543,7 @@ class DailySleevesBot:
                 sd_pips = sd / pip_size
                 if sd_pips <= 0 or pip_value <= 0:
                     self.log.warning(f"[{binance}] invalid pip_value — skip entry")
+                    all_ok = False   # MT5/connectivity glitch, retry-worthy
                     continue
                 risk_cash = eq * self.risk_pct / 100.0
                 lot = round(risk_cash / (sd_pips * pip_value), 2)
@@ -518,6 +570,7 @@ class DailySleevesBot:
                               sl, 0.0, f"{self.variant_tag[:8]}-{side}")
                 if not r:
                     self.log.error(f"[{binance}] open failed")
+                    all_ok = False   # order-send glitch, retry-worthy
                     continue
                 fill = float(r.get("fill_price", px) or px)
                 # re-anchor the stop to the ACTUAL fill (spec: divergence moves
@@ -540,6 +593,7 @@ class DailySleevesBot:
                                f"({self.variant_tag})\nlot={lot} fill={fill:.2f} "
                                f"stop={sl2:.2f} (2.5xATR14={sd:.2f})")
         self._save_state()
+        return all_ok
 
     # ── combo sleeve ─────────────────────────────────────────────────────
     def _fetch_h1_utc_daily_closes(self, bsym: str) -> Optional[pd.Series]:
@@ -585,13 +639,13 @@ class DailySleevesBot:
             return None
         return daily
 
-    def _decide_combo(self):
+    def _decide_combo(self) -> bool:
         bsym = self.symbols["BTCUSDC"]
         daily = self._fetch_h1_utc_daily_closes(bsym)
         if daily is None or len(daily) < 200:
             self._telegram(f"⚠️ {self.variant_tag}: no usable daily "
                            f"series — rebalance skipped (fail-safe)")
-            return
+            return False   # data glitch, retry-worthy within today's window
         frame = combo_daily_frame(daily)
         row = frame.iloc[-1]
         tf = float(row["target_frac"])
@@ -617,7 +671,7 @@ class DailySleevesBot:
         if pip_value <= 0:
             self.log.error("[combo] invalid pip_value — REFUSING to trade")
             self._telegram(f"⛔ {self.variant_tag}: invalid pip_value — not trading")
-            return
+            return False   # MT5/connectivity glitch, retry-worthy
         lot_notional = (px / pip_size) * pip_value        # account-currency value of 1.0 lot
 
         # min-lot guard (spec): refuse if a 1/3 step can't be represented
@@ -627,7 +681,8 @@ class DailySleevesBot:
                            f"REFUSING to trade")
             self._telegram(f"⛔ {self.variant_tag}: alloc too small for 1/3 "
                            f"position steps — not trading")
-            return
+            return True   # persistent config state, not transient -- retrying
+                          # within the hour won't change today's equity/alloc
 
         target_lots = round(tf * alloc / lot_notional, 2)
         # hard circuit-breaker: independently verify the notional this lot
@@ -643,7 +698,8 @@ class DailySleevesBot:
             self._telegram(f"⛔ {self.variant_tag}: sizing sanity check failed "
                            f"(notional {actual_notional:.2f} vs alloc {alloc:.2f}) "
                            f"— rebalance refused")
-            return
+            return True   # a real bug, not a transient glitch -- retrying the
+                          # identical computation within the hour won't help
 
         own = self._own_positions(bsym)
         cur_lots = round(sum(float(p["volume"]) for p in own
@@ -653,7 +709,7 @@ class DailySleevesBot:
                       f"target={target_lots} current={cur_lots} delta={delta:+.2f}")
         if abs(delta) < 0.01:
             self.log.info("[combo] delta below volume step — hold")
-            return
+            return True
 
         if delta > 0:
             sl = px * (1 - self.protective_stop_pct / 100.0)   # catastrophe stop
@@ -685,15 +741,25 @@ class DailySleevesBot:
                     break
             self._telegram(f"\U0001F7E1 REBALANCE SELL {-delta:.2f} {bsym} "
                            f"({self.variant_tag}) -> {tf:.2f}x alloc")
-        # track aggregate for the broker-close watcher
-        if target_lots > 0:
+        # [2026-08-11 FIX] track REALITY, not intent. This used to key off
+        # target_lots (what we WANTED), not what actually got filled -- a
+        # partial-fill or a failed buy/sell leg (both logged above, "retry
+        # next day") left state silently claiming the intended end-state
+        # while the broker held something else. _watch_positions() returns
+        # early when state["positions"] is empty, so a stray post-failure
+        # position would never be alerted on. Re-query the broker so state
+        # always reflects what's actually there.
+        actual_lots = round(sum(float(p["volume"])
+                                for p in self._own_positions(bsym)
+                                if p["type"] == "BUY"), 2)
+        if actual_lots > 0:
             self.state["positions"]["BTCUSDC"] = {
-                "entry": px, "lot": target_lots, "side": "long",
+                "entry": px, "lot": actual_lots, "side": "long",
                 "target_frac": tf}
         else:
             self.state["positions"].pop("BTCUSDC", None)
         self._save_state()
-
+        return True
 
 # ═════════════════════════════════════════════════════════════════════════════
 

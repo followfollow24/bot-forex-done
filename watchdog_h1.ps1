@@ -170,6 +170,60 @@ $bots = @(
         Variant      = "btc_combo_lb"
         StaleMinutes = 5
         Args         = "daily_sleeves_bot.py --sleeve combo --variant-tag btc_combo_lb --alloc 0.10 --allow-real"
+    },
+    # [2026-08-11] The remaining 7 live bots were found completely UNCOVERED
+    # by this watchdog during a full-fleet bug/dead-code audit -- if any of
+    # them hung or crashed, nothing would auto-restart it; the operator would
+    # only find out by manually checking. Args captured verbatim from each
+    # bot's REAL running command line via Get-CimInstance (same method every
+    # deploy_*.ps1 script in this repo uses -- never retype args by hand).
+    @{
+        Symbol       = "xauusdc"
+        Variant      = "gold_daily_breakout"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_daily_breakout --timeframe 1d --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_h1_breakout"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_breakout --timeframe 1h --strategy donchian --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 1.00 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_amd"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_amd --timeframe 1h --strategy tool_amd --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_lqsweep"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_lqsweep --timeframe 1h --strategy tool_lqsweep --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
+    },
+    @{
+        Symbol       = "btcusdc"
+        Variant      = "btc_tpo"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_tpo --timeframe 1h --strategy tool_tpo --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
+    },
+    @{
+        Symbol       = "xauusdc"
+        Variant      = "gold_momentum_rsi"
+        StaleMinutes = 5
+        Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_momentum_rsi --timeframe 1h --strategy gold_mom_rsi --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
+    },
+    @{
+        # news_gemini_bot.py has no per-symbol split (one process, 3 symbols)
+        # so it needs the explicit Stop/HeartbeatFile override, not the
+        # computed Symbol_Variant name.
+        Symbol        = "news"
+        Variant       = "news_gemini"
+        StaleMinutes  = 5
+        StopFile      = "STOP_NEWS_GEMINI"
+        HeartbeatFile = "HEARTBEAT_NEWS_GEMINI"
+        ProcessMatch  = "*news_gemini_bot.py*"
+        Args          = "news_gemini_bot.py --allow-real"
     }
 )
 
@@ -180,13 +234,26 @@ foreach ($bot in $bots) {
     # it would override that decision, so skip it entirely -- the STOP_ file only
     # blocks NEW entries inside the bot, it does not stop the process, so without
     # this check the watchdog and the operator would fight each other.
-    $stopFile = "$DESKTOP\STOP_$($bot.Symbol.ToUpper())_$($variant.ToUpper())"
+    # [2026-08-11] Optional StopFile/HeartbeatFile overrides: most bots derive
+    # both names from Symbol+Variant (the forex_live_bot_gold_cwider.py /
+    # daily_sleeves_bot.py convention), but news_gemini_bot.py uses fixed
+    # names with no per-symbol split (it trades 3 symbols from one process),
+    # so it needs an explicit override instead of a computed one.
+    if ($bot.StopFile) {
+        $stopFile = "$DESKTOP\$($bot.StopFile)"
+    } else {
+        $stopFile = "$DESKTOP\STOP_$($bot.Symbol.ToUpper())_$($variant.ToUpper())"
+    }
     if (Test-Path $stopFile) {
         WLog "[$variant] kill-switch present ($stopFile) -- NOT restarting"
         continue
     }
 
-    $heartbeatFile = "$DESKTOP\HEARTBEAT_$($bot.Symbol.ToUpper())_$($variant.ToUpper())"
+    if ($bot.HeartbeatFile) {
+        $heartbeatFile = "$DESKTOP\$($bot.HeartbeatFile)"
+    } else {
+        $heartbeatFile = "$DESKTOP\HEARTBEAT_$($bot.Symbol.ToUpper())_$($variant.ToUpper())"
+    }
     $needRestart = $false
 
     if (-not (Test-Path $heartbeatFile)) {
@@ -204,8 +271,20 @@ foreach ($bot in $bots) {
     }
 
     if ($needRestart) {
+        # [2026-08-11] news_gemini_bot.py takes no --variant-tag (one process
+        # covers 3 symbols, unlike every other bot here) -- the default
+        # "--variant-tag $variant" match would never find it, so a restart
+        # would launch a SECOND process on top of a still-alive-but-stale
+        # one instead of killing it first: two processes on the same magic
+        # number, potential duplicate live orders. ProcessMatch overrides
+        # the match pattern for exactly this case.
+        if ($bot.ProcessMatch) {
+            $matchPattern = $bot.ProcessMatch
+        } else {
+            $matchPattern = "*--variant-tag $variant*"
+        }
         $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-                 Where-Object { $_.CommandLine -like "*--variant-tag $variant*" }
+                 Where-Object { $_.CommandLine -like $matchPattern }
         if ($procs) {
             foreach ($p in $procs) {
                 WLog "[$variant] killing stuck PID $($p.ProcessId)"
