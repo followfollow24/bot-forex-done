@@ -243,6 +243,22 @@ $bots = @(
         HeartbeatFile = "HEARTBEAT_PORTFOLIO_ALLOCATOR"
         ProcessMatch  = "*portfolio_allocator.py*"
         Args          = "portfolio_allocator.py --daemon"
+    },
+    @{
+        # [2026-08-12] log_anomaly_scanner.py --daemon: read-only, dual-
+        # provider (Gemini+OpenAI, UNION not consensus -- see its module
+        # docstring) periodic review of the fleet's log files for anomalies
+        # a plain regex sweep would miss. Same heartbeat-decoupled-from-
+        # recompute-cycle pattern as portfolio_allocator (24h cycle, ~30s
+        # heartbeat ticks) and the same StopFile/HeartbeatFile/ProcessMatch
+        # override (no --variant-tag).
+        Symbol        = "log"
+        Variant       = "anomaly_scanner"
+        StaleMinutes  = 5
+        StopFile      = "STOP_LOG_ANOMALY_SCANNER"
+        HeartbeatFile = "HEARTBEAT_LOG_ANOMALY_SCANNER"
+        ProcessMatch  = "*log_anomaly_scanner.py*"
+        Args          = "log_anomaly_scanner.py --daemon"
     }
 )
 
