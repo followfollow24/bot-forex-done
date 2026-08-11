@@ -26,10 +26,24 @@ Design (all deliberate, not defaults):
     runs (heartbeat, position watching, time-stops) but every cycle is
     logged as "dual-consensus unavailable" and no new entries are taken --
     same fail-safe philosophy as everything else here, not a crash.
+  - CHART-VISION VETO (2026-08-11, user-requested "ดูกราฟร่วมด้วย"): after a
+    candidate clears news consensus, an H1 candlestick chart is RENDERED
+    from real MT5 bars and shown to BOTH models, which independently answer
+    whether price action CONTRADICTS the news direction. EITHER model
+    vetoing (conf >= CHART_VETO_CONF_MIN) cancels the trade. Note the
+    asymmetry vs the news stage: news needs BOTH to agree to trade, the
+    chart lets EITHER block -- the chart stage can only ever REDUCE
+    trading, never create a trade, because there is no backtest for "LLM
+    reads a chart image" and an unvalidated signal should not be given
+    authority to open positions. Fails OPEN (render error / API error =>
+    trade proceeds on news alone), so a broken veto stage cannot silently
+    become a kill-switch. Verified live both ways: a synthetic downtrend
+    vs a LONG idea is vetoed by both (conf 0.90-0.95), a matching uptrend
+    is passed by both.
   - Poll cadence: once per NEWS_POLL_MIN minutes (default 45). News-driven
     setups do not need bar-close timing; a fixed wall-clock cadence keeps
     LLM spend and API quota bounded and predictable. BOOSTED to
-    BOOST_POLL_MIN (default 10) during 19:00-20:00 Thai time (12:00-13:00
+    BOOST_POLL_MIN (default 5) during 19:00-20:00 Thai time (12:00-13:00
     UTC, user-requested -- catches major US economic data releases). The
     lookback each scan searches is the ACTUAL elapsed minutes since the
     last poll (capped at 4x the larger cadence), not a hardcoded constant,
@@ -120,7 +134,13 @@ SL_ATR_MULT = 2.5
 # US DST changes -- if that drift ever matters, revisit this).
 BOOST_START_UTC_HOUR = 12
 BOOST_END_UTC_HOUR = 13
-BOOST_POLL_MIN = 10
+BOOST_POLL_MIN = 5
+
+# Chart-vision veto stage (see _chart_allows / CHART_PROMPT_TEMPLATE).
+# 120 H1 bars = ~5 days, enough context to see a trend and a recent move
+# without shrinking each candle to an unreadable sliver at 1200px wide.
+CHART_BARS = 120
+CHART_VETO_CONF_MIN = 0.70
 
 
 def _domain(url: str) -> str:
@@ -131,6 +151,10 @@ def _domain(url: str) -> str:
         return ""
 
 
+# Authored Gemini-style (no additionalProperties); _openai_strict_schema()
+# converts it for OpenAI. Note every property ends up "required" on the
+# OpenAI side, so the prompt tells the model to emit "" for a published_utc
+# it doesn't know rather than omitting the key.
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -175,9 +199,175 @@ For each candidate, give a directional call: "long" (price should rise), "short"
 (price should fall), or "none" if the news is notable but not clearly directional. \
 confidence is 0.0-1.0, your genuine calibrated confidence this specific news moves \
 this specific symbol in this direction within the next {time_stop_h} hours -- do \
-not inflate it, most real news should score well under 0.7.
+not inflate it, most real news should score well under 0.7. Set published_utc to \
+the article's publish time if you know it, or an empty string if you do not.
 
 Respond ONLY via the provided JSON schema."""
+
+
+# ── chart-confirmation stage (2026-08-11) ────────────────────────────────
+# Runs ONLY on candidates that already passed news consensus. Both models
+# are shown the SAME rendered H1 chart image and asked, independently,
+# whether price action CONTRADICTS the news direction. Deliberately framed
+# as a VETO, not a second opinion: a chart can cancel a news trade, but a
+# bullish-looking chart alone can never create one. Rationale -- there is
+# no backtest for "LLM reads a chart image", so it only gets authority to
+# REDUCE trading, never to increase it.
+# The two providers need DIFFERENT schema dialects (verified live, both
+# directions):
+#   OpenAI strict json_schema: REQUIRES additionalProperties:false on every
+#     object level, and every property must be listed in "required".
+#   Gemini response_schema: REJECTS additionalProperties outright
+#     ("Unknown name additional_properties ... Cannot find field").
+# So schemas are authored Gemini-style and converted for OpenAI by
+# _openai_strict_schema() below. Do not "simplify" these into one dict.
+CHART_VETO_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "contradicts": {"type": "boolean"},
+        "confidence": {"type": "number"},
+        "observation": {"type": "string"},
+    },
+    "required": ["contradicts", "confidence", "observation"],
+}
+
+
+def _openai_strict_schema(schema: dict) -> dict:
+    """Deep-copy a Gemini-style schema into OpenAI strict-mode form:
+    additionalProperties:false on every object, and every property forced
+    into "required" (strict mode forbids optional properties)."""
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: v for k, v in schema.items()}
+    if out.get("type") == "object":
+        props = out.get("properties", {})
+        out["properties"] = {k: _openai_strict_schema(v) for k, v in props.items()}
+        out["required"] = list(props.keys())
+        out["additionalProperties"] = False
+    elif out.get("type") == "array" and "items" in out:
+        out["items"] = _openai_strict_schema(out["items"])
+    return out
+
+CHART_PROMPT_TEMPLATE = """You are shown an H1 (1-hour) candlestick chart of \
+{symbol} covering roughly the last {bars} hours. Current price: {price}.
+
+A news-driven trading system wants to open a {signal_upper} position based on \
+this headline: "{headline}"
+
+Question: does the PRICE ACTION on this chart CONTRADICT that {signal_upper} \
+idea badly enough that the trade should be skipped?
+
+Answer contradicts=true ONLY for a clear, strong conflict -- for example a \
+{opposite_upper} trade idea would be obvious from this chart, price just made \
+a decisive move the other way, or the move implied by the news appears to have \
+already fully played out (so entering now is chasing an exhausted move).
+
+Answer contradicts=false if the chart is merely neutral, choppy, unclear, or \
+mildly unsupportive. Being undecided means false. Do NOT try to be clever or \
+find reasons to veto -- the default is false, and a veto needs a strong, \
+specific, visible reason you can name.
+
+confidence is 0.0-1.0 in your contradicts answer. observation: one sentence on \
+what you actually see in the price action.
+
+Respond ONLY via the provided JSON schema."""
+
+
+def render_chart_png(candles: list, symbol: str, signal: str) -> bytes:
+    """Render H1 candles to a PNG for the vision models.
+
+    candles: MT5 fetch_ohlcv format [[ts_ms, o, h, l, c, v], ...] ascending.
+    Deliberately plain: candles + EMA20/50 + a "now" marker, no annotations
+    hinting at the desired answer (an arrow saying "we want to go LONG"
+    would bias the very judgement being asked for).
+    """
+    import matplotlib
+    matplotlib.use("Agg")            # headless: no display on the VPS
+    import matplotlib.pyplot as plt
+    import io
+
+    o = [float(c[1]) for c in candles]
+    h = [float(c[2]) for c in candles]
+    l = [float(c[3]) for c in candles]
+    cl = [float(c[4]) for c in candles]
+    n = len(cl)
+    x = list(range(n))
+
+    def ema(vals, span):
+        k = 2.0 / (span + 1.0)
+        out, prev = [], vals[0]
+        for v in vals:
+            prev = v * k + prev * (1 - k)
+            out.append(prev)
+        return out
+
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=100)
+    for i in range(n):
+        up = cl[i] >= o[i]
+        color = "#26a69a" if up else "#ef5350"
+        ax.plot([i, i], [l[i], h[i]], color=color, linewidth=0.8, zorder=2)
+        ax.plot([i, i], [o[i], cl[i]], color=color, linewidth=3.0,
+                solid_capstyle="butt", zorder=3)
+    if n >= 50:
+        ax.plot(x, ema(cl, 20), color="#2196f3", linewidth=1.2, label="EMA20", zorder=4)
+        ax.plot(x, ema(cl, 50), color="#ff9800", linewidth=1.2, label="EMA50", zorder=4)
+        ax.legend(loc="upper left", fontsize=9)
+    ax.set_title(f"{symbol}  H1  (most recent {n} bars, newest at right)", fontsize=11)
+    ax.grid(alpha=0.25, zorder=1)
+    ax.set_xlim(-1, n)
+    ax.margins(y=0.06)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def gemini_chart_veto(api_key: str, model: str, png: bytes, symbol: str,
+                      signal: str, headline: str, price: float, bars: int) -> dict:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    prompt = CHART_PROMPT_TEMPLATE.format(
+        symbol=symbol, bars=bars, price=f"{price:.2f}", signal_upper=signal.upper(),
+        opposite_upper=("SHORT" if signal == "long" else "LONG"), headline=headline)
+    resp = client.models.generate_content(
+        model=model,
+        contents=[types.Part.from_bytes(data=png, mime_type="image/png"), prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=CHART_VETO_SCHEMA,
+        ),
+    )
+    return json.loads(resp.text)
+
+
+def openai_chart_veto(api_key: str, model: str, png: bytes, symbol: str,
+                      signal: str, headline: str, price: float, bars: int) -> dict:
+    import base64
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    prompt = CHART_PROMPT_TEMPLATE.format(
+        symbol=symbol, bars=bars, price=f"{price:.2f}", signal_upper=signal.upper(),
+        opposite_upper=("SHORT" if signal == "long" else "LONG"), headline=headline)
+    b64 = base64.b64encode(png).decode()
+    resp = client.responses.create(
+        model=model,
+        input=[{"role": "user", "content": [
+            {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
+            {"type": "input_text", "text": prompt},
+        ]}],
+        text={"format": {
+            "type": "json_schema",
+            "name": "chart_veto",
+            "schema": _openai_strict_schema(CHART_VETO_SCHEMA),
+            "strict": True,
+        }},
+    )
+    return json.loads(resp.output_text)
 
 
 def gemini_scan(api_key: str, model: str, lookback_min: int) -> list:
@@ -261,7 +451,7 @@ def openai_scan(api_key: str, model: str, lookback_min: int) -> list:
         text={"format": {
             "type": "json_schema",
             "name": "news_candidates",
-            "schema": RESPONSE_SCHEMA,
+            "schema": _openai_strict_schema(RESPONSE_SCHEMA),
             "strict": True,
         }},
     )
@@ -662,7 +852,66 @@ class NewsGeminiBot:
             return
 
         self.log.info(f"[QUALIFIED] {tag}")
+        if not self._chart_allows(symbol, bsym, signal, headline):
+            return
         self._enter(symbol, bsym, signal, headline, src, url, reasoning, conf)
+
+    def _chart_allows(self, symbol: str, bsym: str, signal: str,
+                     headline: str) -> bool:
+        """Chart-vision VETO gate. Returns False to cancel an otherwise
+        news-qualified entry.
+
+        Both providers see the SAME chart image and answer independently;
+        EITHER one vetoing (with confidence >= CHART_VETO_CONF_MIN) cancels
+        the trade. That asymmetry is deliberate: unlike the news stage
+        (where both must AGREE to trade), here either can BLOCK -- the
+        chart's only job is to reduce trades, never to create them.
+
+        Fail-OPEN on any error: if charts can't be rendered or the models
+        can't be reached, the trade proceeds on news consensus alone (which
+        is what it did before this stage existed). A broken veto stage must
+        not become a silent kill-switch."""
+        try:
+            candles = self._mt5(self.connector.fetch_ohlcv, bsym, "1h", CHART_BARS)
+            if not candles or len(candles) < 30:
+                self.log.warning(f"[CHART] {symbol}: only "
+                                 f"{len(candles) if candles else 0} bars -- "
+                                 f"skipping veto stage (fail-open)")
+                return True
+            png = render_chart_png(candles, symbol, signal)
+            price = float(candles[-1][4])
+        except Exception as e:
+            self.log.warning(f"[CHART] {symbol}: render failed ({e}) -- fail-open")
+            return True
+
+        verdicts = {}
+        for name, fn, key, model in (
+                ("gemini", gemini_chart_veto, self.gemini_key, self.gemini_model),
+                ("openai", openai_chart_veto, self.openai_key, self.openai_model)):
+            if not key:
+                continue
+            try:
+                v = fn(key, model, png, symbol, signal, headline, price, len(candles))
+                verdicts[name] = v
+                self.log.info(f"[CHART/{name}] {symbol} contradicts="
+                              f"{v.get('contradicts')} conf={v.get('confidence')} "
+                              f":: {str(v.get('observation'))[:150]}")
+            except Exception as e:
+                self.log.warning(f"[CHART/{name}] {symbol} failed ({e}) -- "
+                                 f"ignoring this provider's vote (fail-open)")
+
+        for name, v in verdicts.items():
+            if (v.get("contradicts") is True
+                    and float(v.get("confidence", 0) or 0) >= CHART_VETO_CONF_MIN):
+                obs = str(v.get("observation", ""))[:300]
+                self.log.info(f"[CHART VETO] {symbol} {signal} cancelled by {name}: {obs}")
+                self._telegram(
+                    f"🚫 CHART VETO {symbol} {signal.upper()}\n"
+                    f"News passed both models, but {name} sees the chart "
+                    f"contradicting it (conf {v.get('confidence')}):\n{obs}\n\n"
+                    f"headline: {headline[:200]}")
+                return False
+        return True
 
     def _enter(self, symbol: str, bsym: str, signal: str, headline: str,
               src: str, url: str, reasoning: str, conf: float):

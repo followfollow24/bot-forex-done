@@ -43,7 +43,7 @@ if ($envContent -notmatch "OPENAI_API_KEY\s*=\s*\S+") {
     Write-Host "  .env has OPENAI_API_KEY: OK" -ForegroundColor Green
 }
 
-Write-Host "=== 2. ensure google-genai + openai are installed ===" -ForegroundColor Cyan
+Write-Host "=== 2. ensure google-genai + openai + matplotlib are installed ===" -ForegroundColor Cyan
 Set-Location $Desktop
 # $ErrorActionPreference=Stop turns a native command's stderr output into a
 # terminating error, which would abort here even on a normal "module not
@@ -54,6 +54,8 @@ python -c "import google.genai" 2>$null
 $hasGenai = ($LASTEXITCODE -eq 0)
 python -c "import openai" 2>$null
 $hasOpenai = ($LASTEXITCODE -eq 0)
+python -c "import matplotlib" 2>$null
+$hasMpl = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = $prevEAP
 if (-not $hasGenai) {
     Write-Host "  installing google-genai..."
@@ -62,6 +64,10 @@ if (-not $hasGenai) {
 if (-not $hasOpenai) {
     Write-Host "  installing openai..."
     pip install --quiet openai
+}
+if (-not $hasMpl) {
+    Write-Host "  installing matplotlib (chart-vision veto rendering)..."
+    pip install --quiet matplotlib
 }
 
 Write-Host "=== 3. stop any existing instance (avoid duplicate magic 669001) ===" -ForegroundColor Cyan
