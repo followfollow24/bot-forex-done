@@ -224,6 +224,25 @@ $bots = @(
         HeartbeatFile = "HEARTBEAT_NEWS_GEMINI"
         ProcessMatch  = "*news_gemini_bot.py*"
         Args          = "news_gemini_bot.py --allow-real"
+    },
+    @{
+        # [2026-08-11] portfolio_allocator.py --daemon: recommendation-only
+        # process (see its module docstring -- it never restarts a live
+        # trading bot itself, just computes+logs+telegrams a suggested risk
+        # multiplier per bot on a 24h cycle). No --variant-tag either, same
+        # override pattern as news_gemini. Its heartbeat ticks every ~30s
+        # independent of the 24h recompute cycle specifically so this 5min
+        # StaleMinutes threshold works the same as every other bot's --
+        # without that, a naive heartbeat-once-per-recompute would look
+        # "stuck" almost immediately and the watchdog would restart it in
+        # an endless loop.
+        Symbol        = "portfolio"
+        Variant       = "allocator"
+        StaleMinutes  = 5
+        StopFile      = "STOP_PORTFOLIO_ALLOCATOR"
+        HeartbeatFile = "HEARTBEAT_PORTFOLIO_ALLOCATOR"
+        ProcessMatch  = "*portfolio_allocator.py*"
+        Args          = "portfolio_allocator.py --daemon"
     }
 )
 

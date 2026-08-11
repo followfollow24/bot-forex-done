@@ -72,6 +72,16 @@ try:
 except ImportError:
     pass
 
+DESKTOP_DIR = os.path.dirname(os.path.abspath(__file__))
+HEARTBEAT_FILE = os.path.join(DESKTOP_DIR, "HEARTBEAT_PORTFOLIO_ALLOCATOR")
+STOP_FILE = os.path.join(DESKTOP_DIR, "STOP_PORTFOLIO_ALLOCATOR")
+HEARTBEAT_TICK_SEC = 30   # matches every other bot's ~30s heartbeat cadence
+                         # (see watchdog_h1.ps1) even though this daemon's
+                         # actual RECOMPUTE cadence is --interval-hours (24h
+                         # default) -- same pattern daily_sleeves_bot.py
+                         # already uses: heartbeat says "process alive",
+                         # not "just made a new decision".
+
 # ---- fleet definition (magic -> variant_tag), taken verbatim from
 # trade_summary.py's MAGIC_LABEL (already the source of truth for magic
 # resolution across the fleet) plus news_gemini which uses a distinct
@@ -324,6 +334,31 @@ def run_once(since: datetime, prev: dict = None) -> dict:
     return est
 
 
+def _write_heartbeat():
+    tmp = HEARTBEAT_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(datetime.now().isoformat())
+    os.replace(tmp, HEARTBEAT_FILE)
+
+
+def _wait_with_heartbeat(total_seconds: float):
+    """Sleeps in HEARTBEAT_TICK_SEC steps, writing a heartbeat each tick, so
+    a 24h recompute interval doesn't look like a dead/stuck process to
+    watchdog_h1.ps1's 5-minute staleness check -- same pattern every other
+    bot in the fleet already uses (heartbeat cadence != decision cadence).
+    Also re-checks STOP_FILE each tick so the kill-switch takes effect
+    within one tick instead of waiting out the full interval."""
+    elapsed = 0.0
+    while elapsed < total_seconds:
+        if os.path.exists(STOP_FILE):
+            return False
+        _write_heartbeat()
+        step = min(HEARTBEAT_TICK_SEC, total_seconds - elapsed)
+        time.sleep(step)
+        elapsed += step
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default="2026-07-29",
@@ -343,11 +378,18 @@ def main():
         return
 
     print(f"[DAEMON] portfolio_allocator running, recompute every "
-         f"{args.interval_hours}h (recommendation-only, never restarts a bot)")
+         f"{args.interval_hours}h (recommendation-only, never restarts a bot). "
+         f"kill-switch: {STOP_FILE}")
     prev = None
     while True:
+        if os.path.exists(STOP_FILE):
+            print(f"[DAEMON] kill-switch present ({STOP_FILE}) -- exiting")
+            return
+        _write_heartbeat()
         prev = run_once(since, prev=prev)
-        time.sleep(args.interval_hours * 3600)
+        if not _wait_with_heartbeat(args.interval_hours * 3600):
+            print(f"[DAEMON] kill-switch present ({STOP_FILE}) -- exiting")
+            return
 
 
 if __name__ == "__main__":
