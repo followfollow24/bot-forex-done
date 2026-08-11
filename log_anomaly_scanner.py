@@ -190,7 +190,7 @@ def _load_state() -> dict:
     if not os.path.exists(STATE_FILE):
         return {}
     try:
-        with open(STATE_FILE) as f:
+        with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}   # corrupt state -- restart offsets from a safe tail,
@@ -199,7 +199,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict):
     tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f)
     os.replace(tmp, STATE_FILE)
 
@@ -296,7 +296,7 @@ def run_once(log_dir: str = DESKTOP_DIR, log_files: dict = None,
     _save_state(state)
 
     ts = datetime.now().isoformat()
-    with open(REPORT_LOG, "a") as f:
+    with open(REPORT_LOG, "a", encoding="utf-8") as f:
         f.write(f"\n=== scan {ts} -- providers={used} bots_with_new_content="
                f"{len(sections)} findings={len(findings)} ===\n")
         for finding in findings:
@@ -321,7 +321,7 @@ def run_once(log_dir: str = DESKTOP_DIR, log_files: dict = None,
 
 def _write_heartbeat():
     tmp = HEARTBEAT_FILE + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(datetime.now().isoformat())
     os.replace(tmp, HEARTBEAT_FILE)
 

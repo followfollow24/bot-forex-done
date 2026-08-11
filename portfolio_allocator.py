@@ -336,7 +336,7 @@ def run_once(since: datetime, prev: dict = None) -> dict:
 
 def _write_heartbeat():
     tmp = HEARTBEAT_FILE + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(datetime.now().isoformat())
     os.replace(tmp, HEARTBEAT_FILE)
 
