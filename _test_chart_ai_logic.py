@@ -129,4 +129,52 @@ for mult in (0.5, 2.0, 6.0):
           % (mult, lot, realized, risk_pct))
 print("PASS -- wider AI stop just means smaller lot, not a bigger loss\n")
 
+print("=== Case 17: CALL-PATH ARITY -- the wiring, not just the pure logic ===")
+# Regression test for a real bug that reached production: when the `atr`
+# argument was added, both call sites in _evaluate_symbol were updated but
+# _safe_signal's own signature was not, so EVERY cycle raised
+# "_safe_signal() takes 9 positional arguments but 10 were given".
+# py_compile can't catch this (Python checks arity at call time) and the
+# tests above couldn't either -- they only exercised cross_check_signal(),
+# a pure function that sits AFTER the broken call. The bot failed safe
+# (per-symbol try/except -> no trades) but was silently inert for hours.
+# These checks exercise the actual call chain instead of just its tail.
+import inspect
+
+captured = {}
+def fake_provider(api_key, model, png, symbol, price, bars, atr):
+    captured.update(dict(api_key=api_key, model=model, png=png, symbol=symbol,
+                         price=price, bars=bars, atr=atr))
+    return {"signal": "long", "confidence": 0.9, "sl_atr_mult": 2.0,
+            "tp_atr_mult": 6.0, "reasoning": "ok"}
+
+class _StubLog:
+    def warning(self, m): pass
+    def info(self, m): pass
+class _StubSelf:
+    log = _StubLog()
+
+out = cat.ChartAITraderBot._safe_signal(
+    _StubSelf(), "gemini", fake_provider, "KEY", "MODEL",
+    b"PNGBYTES", "XAUUSD", 4390.5, 160, 5.25)
+assert out is not None, "_safe_signal must forward the call, not swallow an arity error"
+assert captured["atr"] == 5.25, "atr must actually reach the provider function"
+assert captured["symbol"] == "XAUUSD" and captured["bars"] == 160
+assert captured["price"] == 4390.5 and captured["png"] == b"PNGBYTES"
+print("PASS -- _safe_signal forwards all 7 args including atr")
+
+# and the two REAL provider functions must accept exactly what it forwards
+fwd = ["api_key", "model", "png", "symbol", "price", "bars", "atr"]
+for fn in (cat.gemini_chart_signal, cat.openai_chart_signal):
+    params = list(inspect.signature(fn).parameters)
+    assert params == fwd, "%s signature %s != forwarded %s" % (fn.__name__, params, fwd)
+    print("  %s(%s) OK" % (fn.__name__, ", ".join(params)))
+
+# _safe_signal must accept exactly what _evaluate_symbol passes it
+sig = list(inspect.signature(cat.ChartAITraderBot._safe_signal).parameters)
+assert sig == ["self", "name", "fn", "api_key", "model", "png", "symbol",
+               "price", "bars", "atr"], sig
+print("  _safe_signal(%s) OK" % ", ".join(sig[1:]))
+print("PASS\n")
+
 print("ALL TESTS PASSED")

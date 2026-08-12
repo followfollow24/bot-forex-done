@@ -452,9 +452,10 @@ class ChartAITraderBot:
                            f"after review.")
 
     def _safe_signal(self, name: str, fn, api_key: str, model: str,
-                     png: bytes, symbol: str, price: float, bars: int) -> Optional[dict]:
+                     png: bytes, symbol: str, price: float, bars: int,
+                     atr: float) -> Optional[dict]:
         try:
-            return fn(api_key, model, png, symbol, price, bars)
+            return fn(api_key, model, png, symbol, price, bars, atr)
         except Exception as e:
             self.log.warning(f"[{name.upper()}] chart-signal call failed -- "
                              f"skip this symbol this cycle: {str(e)[:200]}")
