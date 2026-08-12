@@ -259,6 +259,25 @@ $bots = @(
         HeartbeatFile = "HEARTBEAT_LOG_ANOMALY_SCANNER"
         ProcessMatch  = "*log_anomaly_scanner.py*"
         Args          = "log_anomaly_scanner.py --daemon"
+    },
+    @{
+        # [2026-08-12] chart_ai_trader.py: a REAL-MONEY trading bot whose
+        # entire entry signal is Gemini+OpenAI both reading the same H1
+        # chart image and agreeing on a direction. UNVALIDATED strategy
+        # (no backtest exists for "AI reads a chart") -- live by explicit
+        # user decision, same risk class as news_gemini at launch, but
+        # sized at the normal technical-bot tier (0.30%) per the user's
+        # explicit choice rather than news_gemini's 0.15%.
+        # Own magic (671001), own SL/TP (2.5/15 xATR, broker-side), own
+        # kill-switch + consecutive-loss breaker. No --variant-tag, so
+        # same override pattern as the other non-cwider bots.
+        Symbol        = "chart"
+        Variant       = "ai_trader"
+        StaleMinutes  = 5
+        StopFile      = "STOP_CHART_AI_TRADER"
+        HeartbeatFile = "HEARTBEAT_CHART_AI_TRADER"
+        ProcessMatch  = "*chart_ai_trader.py*"
+        Args          = "chart_ai_trader.py --risk 0.30 --allow-real"
     }
 )
 
