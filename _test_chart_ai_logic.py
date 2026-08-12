@@ -216,4 +216,34 @@ assert worst_gap_sec < watchdog_threshold_sec, \
 print("PASS -- worst gap %ss < watchdog %ss (%.1fx margin)\n"
       % (worst_gap_sec, watchdog_threshold_sec, watchdog_threshold_sec / worst_gap_sec))
 
+print("=== Case 20: the live config must carry THIS bot's magic ===")
+# Regression test for the worst bug of the three: cfg.magic_number was
+# never set, so orders went out under ForexConfig's shared default
+# (20240101) while _own_positions() filtered on MAGIC (671001). The bot
+# could not see its own trades -- it declared a still-open live position
+# "CLOSED pnl=+0.00" 2 minutes after opening it, and its
+# already-positioned guard would have let it stack unbounded duplicate
+# positions on the same symbol.
+from forex_config import ForexConfig
+
+cfg = cat.build_cfg(dry_run=True, allow_real=False)
+assert cfg.magic_number == cat.MAGIC, \
+    "config magic %r must equal the bot's MAGIC %r" % (cfg.magic_number, cat.MAGIC)
+assert cfg.magic_number != ForexConfig().magic_number, \
+    "magic must not be left at ForexConfig's shared default (%r) -- that is " \
+    "exactly the bug: orders tagged with a magic the bot does not filter on" \
+    % ForexConfig().magic_number
+assert cfg.dry_run is True and cfg.allow_real is False, "flags must pass through"
+assert cat.build_cfg(False, True).allow_real is True
+print("PASS -- cfg.magic_number=%d (MAGIC), distinct from default %d\n"
+      % (cfg.magic_number, ForexConfig().magic_number))
+
+print("=== Case 21: MAGIC must not collide with any other bot in the fleet ===")
+# 555xxx/666xxx/667xxx = forex_live_bot_gold_cwider families,
+# 668xxx = daily_sleeves, 669001 = news_gemini, 20240101 = shared default.
+taken = {555143, 555153, 555073, 666120, 666020, 666040, 666050, 666060,
+         667130, 668001, 668002, 669001, 20240101}
+assert cat.MAGIC not in taken, "MAGIC %d collides with an existing bot" % cat.MAGIC
+print("PASS -- %d is unique across the fleet\n" % cat.MAGIC)
+
 print("ALL TESTS PASSED")

@@ -701,6 +701,36 @@ class ChartAITraderBot:
             time.sleep(60)
 
 
+def build_cfg(dry_run: bool, allow_real: bool) -> ForexConfig:
+    """Build the live config. Factored out of main() purely so a test can
+    assert on it -- see the magic-number note below.
+
+    [2026-08-12 FIX] cfg.magic_number was NEVER SET here. ForexConfig
+    defaults it to 20240101, so every order this bot placed went out under
+    that shared default instead of MAGIC=671001, while _own_positions()
+    filtered incoming positions on `magic == MAGIC`. The bot therefore
+    could not see its own trades. Two consequences, both observed live on
+    the very first real trade (XAUUSDc long 0.04 @ 4413.988, ticket
+    4132289820):
+      - _watch_positions() found the ticket missing from its own
+        (magic-filtered, hence empty) view and declared it CLOSED with
+        pnl=+0.00 less than two minutes after opening, then stopped
+        tracking it -- while the position was in fact still open at the
+        broker, with only an entry deal in history.
+      - far worse, the "already-positioned" guard in _evaluate_symbol()
+        also reads _own_positions(), so it would have kept returning
+        empty: the bot could have opened an unbounded stack of duplicate
+        positions on the same symbol, each sized as if it were the first.
+    Every other bot in this fleet wires this (forex_live_bot_gold_cwider.py,
+    news_gemini_bot.py, daily_sleeves_bot.py); this one simply never did.
+    """
+    cfg = ForexConfig()
+    cfg.dry_run = dry_run
+    cfg.allow_real = allow_real
+    cfg.magic_number = MAGIC
+    return cfg
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--risk", type=float, default=DEFAULT_RISK_PCT,
@@ -718,9 +748,7 @@ def main():
         print("[WARN] OPENAI_API_KEY not set -- dual-consensus unavailable, "
              "bot will idle (no new entries) until it's added")
 
-    cfg = ForexConfig()
-    cfg.dry_run = args.dry_run
-    cfg.allow_real = args.allow_real
+    cfg = build_cfg(args.dry_run, args.allow_real)
     if not cfg.dry_run and not _cfg_has_credentials(cfg):
         print("[ERROR] live mode needs MT5 (Windows) -- use --dry-run to test elsewhere")
         sys.exit(1)
