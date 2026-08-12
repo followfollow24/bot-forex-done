@@ -153,6 +153,9 @@ class _StubLog:
     def info(self, m): pass
 class _StubSelf:
     log = _StubLog()
+    # use the REAL timeout wrapper so these tests exercise the actual
+    # call path (including the thread-pool hop), not a simplified stand-in
+    _call_with_timeout = cat.ChartAITraderBot._call_with_timeout
 
 out = cat.ChartAITraderBot._safe_signal(
     _StubSelf(), "gemini", fake_provider, "KEY", "MODEL",
@@ -176,5 +179,41 @@ assert sig == ["self", "name", "fn", "api_key", "model", "png", "symbol",
                "price", "bars", "atr"], sig
 print("  _safe_signal(%s) OK" % ", ".join(sig[1:]))
 print("PASS\n")
+
+print("=== Case 18: a HUNG AI call must time out, not block forever ===")
+# Regression test for the second production bug: the provider calls had no
+# timeout at all. Observed live -- the bot sat inside one call for 7+
+# minutes, log silent, heartbeat frozen, which pushed it past
+# watchdog_h1.ps1's 5-minute staleness threshold and would have had the
+# watchdog restart a healthy-but-busy bot in a loop. Every MT5 call in this
+# fleet has had this guard for months; the AI calls never did.
+import time as _time
+
+def hanging_provider(api_key, model, png, symbol, price, bars, atr):
+    _time.sleep(30)          # far longer than the timeout we pass below
+    return {"signal": "long", "confidence": 0.9}
+
+_orig_timeout = cat.AI_CALL_TIMEOUT_SEC
+cat.AI_CALL_TIMEOUT_SEC = 1.0   # keep the test fast; behaviour is identical
+t0 = _time.time()
+out = cat.ChartAITraderBot._safe_signal(
+    _StubSelf(), "gemini", hanging_provider, "K", "M", b"P", "XAUUSD",
+    100.0, 160, 5.0)
+elapsed = _time.time() - t0
+cat.AI_CALL_TIMEOUT_SEC = _orig_timeout
+assert out is None, "a hung call must return None (skip symbol), not a result"
+assert elapsed < 5, "must return in ~timeout, not wait out the hang (took %.1fs)" % elapsed
+print("PASS -- hung call returned None after %.1fs instead of blocking 30s\n" % elapsed)
+
+print("=== Case 19: cycle worst case stays under the watchdog threshold ===")
+# heartbeat is refreshed between symbols, so the largest gap between two
+# heartbeats is ONE symbol's two provider calls.
+worst_gap_sec = 2 * cat.AI_CALL_TIMEOUT_SEC
+watchdog_threshold_sec = 5 * 60
+assert worst_gap_sec < watchdog_threshold_sec, \
+    "worst-case heartbeat gap %ss must stay under the watchdog's %ss" % (
+        worst_gap_sec, watchdog_threshold_sec)
+print("PASS -- worst gap %ss < watchdog %ss (%.1fx margin)\n"
+      % (worst_gap_sec, watchdog_threshold_sec, watchdog_threshold_sec / worst_gap_sec))
 
 print("ALL TESTS PASSED")

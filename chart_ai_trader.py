@@ -114,6 +114,13 @@ MIN_RR = 1.2
 DEFAULT_RISK_PCT = 0.30
 MAX_CONSEC_LOSSES = 3
 
+# Wall-clock cap on a single AI call. Sized so a full cycle (3 symbols x 2
+# providers) still cannot exceed the watchdog's 5-minute staleness window
+# once the per-symbol heartbeat below is taken into account: the heartbeat
+# is refreshed between symbols, so the longest gap between two heartbeats
+# is one symbol's two calls = 2 x AI_CALL_TIMEOUT_SEC = 120s < 300s.
+AI_CALL_TIMEOUT_SEC = 60
+
 
 CHART_SIGNAL_SCHEMA = {
     "type": "object",
@@ -451,11 +458,36 @@ class ChartAITraderBot:
                            f"Delete {os.path.basename(self.breaker_file)} to resume "
                            f"after review.")
 
+    def _call_with_timeout(self, fn, timeout: float, *a, **kw):
+        """Bound an external call's wall-clock time, same defence the rest of
+        this fleet applies to MT5 calls (_call_with_timeout in
+        forex_live_bot_gold_cwider.py). A hung thread cannot be killed in
+        Python, so it leaks -- but control returns to the caller, which is
+        the point: the loop keeps running, the heartbeat keeps ticking, and
+        the watchdog does not restart a bot that is merely waiting."""
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            return ex.submit(fn, *a, **kw).result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)
+
     def _safe_signal(self, name: str, fn, api_key: str, model: str,
                      png: bytes, symbol: str, price: float, bars: int,
                      atr: float) -> Optional[dict]:
+        # [2026-08-12 FIX] These were bare calls with NO timeout. Observed
+        # live: the bot sat inside one for 7+ minutes with zero log output,
+        # its heartbeat frozen the whole time. The google-genai / openai
+        # clients set no default socket timeout, so a stalled connection
+        # blocks the ONLY loop thread indefinitely. Two consequences, both
+        # seen: the bot looks alive (process up) while doing nothing, and
+        # the heartbeat goes past watchdog_h1.ps1's 5-minute staleness
+        # threshold -- so the watchdog restarts it mid-cycle, forever.
+        # Every MT5 call in this fleet has had this guard for months; the
+        # AI calls were simply never given one.
         try:
-            return fn(api_key, model, png, symbol, price, bars, atr)
+            return self._call_with_timeout(
+                fn, AI_CALL_TIMEOUT_SEC, api_key, model, png, symbol,
+                price, bars, atr)
         except Exception as e:
             self.log.warning(f"[{name.upper()}] chart-signal call failed -- "
                              f"skip this symbol this cycle: {str(e)[:200]}")
@@ -651,6 +683,13 @@ class ChartAITraderBot:
                                          "-- skipping poll cycle (clear file to resume)")
                     else:
                         for canon, bsym in self.symbols.items():
+                            # [2026-08-12] refresh the heartbeat BETWEEN
+                            # symbols, not just once per loop iteration: a
+                            # poll cycle makes 6 network calls and can run
+                            # for minutes, which previously let the
+                            # heartbeat go stale enough for the watchdog to
+                            # restart a perfectly healthy, merely-busy bot.
+                            self._heartbeat()
                             try:
                                 self._evaluate_symbol(canon, bsym)
                             except Exception as e:
