@@ -1238,6 +1238,21 @@ class GoldCWiderBot:
         fill_px    = None
         commission = 0.0
         reason     = "SL/TP (broker)"
+        # [2026-08-12 FIX] Track whether MT5 actually CONFIRMED an SL or TP
+        # hit, instead of assuming every broker-side close was one.
+        # Found by log_anomaly_scanner.py on real gold_h1_manual data:
+        #   [CLOSE-SL/TP (broker)] LONG XAUUSDc fill=4398.83 net_pnl=+52.11
+        #   slippage=+93.6737
+        # That position had SL=4305.16 and TP=4599.42 -- the fill matched
+        # NEITHER. It was a manual close by the operator (these are
+        # --manual-exit bots; closing by hand is the normal exit path).
+        # The old code below picked whichever of SL/TP was *nearer* to the
+        # fill and called it the "requested" price, so slippage came out as
+        # the full distance from the SL (4398.83-4305.16 = +93.67) -- a
+        # meaningless number that silently poisoned the slippage column of
+        # fills_log for every hand-closed trade. Slippage only has meaning
+        # when there WAS a requested level; a manual close has none.
+        confirmed_sl_tp = False
         if close_deals:
             last = close_deals[-1]
             try:
@@ -1248,8 +1263,14 @@ class GoldCWiderBot:
             r = str(last.get("reason", "")).upper()
             if "SL" in r:
                 reason = "SL (broker)"
+                confirmed_sl_tp = True
             elif "TP" in r:
                 reason = "TP (broker)"
+                confirmed_sl_tp = True
+            elif r:
+                # DEAL_REASON_CLIENT / MOBILE / WEB / EXPERT etc -- a real
+                # reason string that is simply not an SL/TP hit.
+                reason = "MANUAL/OTHER (broker)"
 
         if fill_px is None:
             # fallback: ใช้ bid/ask ปัจจุบัน + เดา reason จากระยะห่าง SL/TP
@@ -1260,8 +1281,17 @@ class GoldCWiderBot:
                 reason = "SL (broker, est.)"
             else:
                 reason = "TP (broker, est.)"
+            # deliberately does NOT set confirmed_sl_tp: this branch is a
+            # guess from price proximity, not a broker-reported reason, so
+            # it must not produce a slippage number either.
 
-        requested = pos.tp if abs(fill_px - pos.tp) < abs(fill_px - pos.sl) else pos.sl
+        # slippage is fill-vs-requested; with no confirmed requested level
+        # there is nothing to measure against, so report 0.0 rather than a
+        # fabricated distance. Only a broker-confirmed SL/TP hit has one.
+        if confirmed_sl_tp:
+            requested = pos.tp if reason.startswith("TP") else pos.sl
+        else:
+            requested = fill_px
         bid2, ask2 = (bid, ask) if (bid > 0 and ask > 0) else (fill_px, fill_px)
 
         net = self._net_pnl(pos, fill_px, commission)
