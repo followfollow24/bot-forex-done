@@ -114,6 +114,18 @@ MIN_RR = 1.2
 DEFAULT_RISK_PCT = 0.30
 MAX_CONSEC_LOSSES = 3
 
+# [2026-08-12] Position stacking. The user asked for the bot to be able to
+# keep opening as the AI sees setups, rather than one-position-per-symbol.
+# These are the bound on that: NOT a limit on the idea, a limit on the
+# blast radius if the AI (or a bug) answers "long" every single cycle.
+# Worst-case simultaneous risk = MAX_TOTAL_POSITIONS * risk_pct, since
+# every position carries its own stop sized to risk_pct. At the defaults
+# that is 6 x 0.30% = 1.8% of equity if every stop hits at once.
+# Raise with --max-per-symbol / --max-total, but do the multiplication
+# first: at --max-total 30 the same arithmetic gives 9%.
+MAX_POSITIONS_PER_SYMBOL = 3
+MAX_TOTAL_POSITIONS = 6
+
 # Wall-clock cap on a single AI call. Sized so a full cycle (3 symbols x 2
 # providers) still cannot exceed the watchdog's 5-minute staleness window
 # once the per-symbol heartbeat below is taken into account: the heartbeat
@@ -291,10 +303,14 @@ def cross_check_signal(gemini_result: dict, openai_result: dict) -> Optional[dic
 
 
 class ChartAITraderBot:
-    def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int):
+    def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int,
+                 max_per_symbol: int = MAX_POSITIONS_PER_SYMBOL,
+                 max_total: int = MAX_TOTAL_POSITIONS):
         self.cfg = cfg
         self.risk_pct = risk_pct
         self.poll_min = poll_min
+        self.max_per_symbol = max_per_symbol
+        self.max_total = max_total
 
         self.stop_file = os.path.join(_BASE_DIR, "STOP_CHART_AI_TRADER")
         self.breaker_file = os.path.join(_BASE_DIR, "BREAKER_CHART_AI_TRADER")
@@ -494,8 +510,25 @@ class ChartAITraderBot:
             return None
 
     def _evaluate_symbol(self, canon: str, bsym: str):
-        if self._own_positions(bsym):
-            self.log.info(f"[{canon}] SKIP already-positioned")
+        # [2026-08-12] Stacking allowed at the user's explicit request ("ถ้า
+        # ai เห็นว่าควรเปิดก็เปิดหลายๆไม้ได้เรื่อยๆ"): this used to be a hard
+        # "any open position -> skip". It is now a COUNT check instead,
+        # because unbounded is not the same as unlimited -- at a 15-minute
+        # cadence an AI that keeps answering "long" would open ~96
+        # positions per symbol per day, and since each one risks
+        # self.risk_pct at its own stop, a correlated move against a stack
+        # that size is an account-ending event rather than a drawdown.
+        # The caps below bound worst-case simultaneous risk to
+        # max_total * risk_pct (see the startup banner, which prints it).
+        held = self._own_positions(bsym)
+        total = len(self._own_positions())
+        if len(held) >= self.max_per_symbol:
+            self.log.info(f"[{canon}] SKIP -- already holding {len(held)} "
+                          f"position(s), per-symbol cap is {self.max_per_symbol}")
+            return
+        if total >= self.max_total:
+            self.log.info(f"[{canon}] SKIP -- {total} open position(s) across "
+                          f"all symbols, total cap is {self.max_total}")
             return
 
         candles = self._mt5(self.connector.fetch_ohlcv, bsym, TIMEFRAME, CHART_BARS)
@@ -651,6 +684,10 @@ class ChartAITraderBot:
         self.log.info(f"  SL/TP: chosen per-setup by the AI, clamped to "
                       f"SL {SL_ATR_MIN}-{SL_ATR_MAX}xATR / TP {TP_ATR_MIN}-"
                       f"{TP_ATR_MAX}xATR, minimum R:R {MIN_RR}")
+        self.log.info(f"  stacking: up to {self.max_per_symbol}/symbol, "
+                      f"{self.max_total} total -> worst-case simultaneous "
+                      f"risk {self.max_total * self.risk_pct:.2f}% of equity "
+                      f"if every stop hits at once")
         self.log.info(f"  gemini model={self.gemini_model}")
         openai_status = ("configured" if self.openai_key else
                         "NOT SET -- dual-consensus unavailable, bot will idle "
@@ -737,6 +774,14 @@ def main():
                     help=f"%% equity risked per trade (default {DEFAULT_RISK_PCT})")
     ap.add_argument("--poll-min", type=int, default=POLL_MIN,
                     help=f"minutes between chart re-checks (default {POLL_MIN})")
+    ap.add_argument("--max-per-symbol", type=int, default=MAX_POSITIONS_PER_SYMBOL,
+                    help=f"max simultaneous positions on ONE symbol "
+                         f"(default {MAX_POSITIONS_PER_SYMBOL})")
+    ap.add_argument("--max-total", type=int, default=MAX_TOTAL_POSITIONS,
+                    help=f"max simultaneous positions across ALL symbols "
+                         f"(default {MAX_TOTAL_POSITIONS}). Worst-case "
+                         f"simultaneous risk is this x --risk, since every "
+                         f"position carries its own stop sized to --risk.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-real", action="store_true")
     args = ap.parse_args()
@@ -753,7 +798,9 @@ def main():
         print("[ERROR] live mode needs MT5 (Windows) -- use --dry-run to test elsewhere")
         sys.exit(1)
 
-    bot = ChartAITraderBot(cfg, risk_pct=args.risk, poll_min=args.poll_min)
+    bot = ChartAITraderBot(cfg, risk_pct=args.risk, poll_min=args.poll_min,
+                          max_per_symbol=args.max_per_symbol,
+                          max_total=args.max_total)
     bot.run()
 
 

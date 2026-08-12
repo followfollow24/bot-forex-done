@@ -246,4 +246,69 @@ taken = {555143, 555153, 555073, 666120, 666020, 666040, 666050, 666060,
 assert cat.MAGIC not in taken, "MAGIC %d collides with an existing bot" % cat.MAGIC
 print("PASS -- %d is unique across the fleet\n" % cat.MAGIC)
 
+print("=== Case 22: position STACKING caps (user asked to allow multiple) ===")
+# Stacking is allowed on purpose, but must be bounded: at a 15-min cadence
+# an AI that keeps saying "long" would open ~96 positions/symbol/day, and
+# each carries its own risk_pct stop. These tests drive the REAL
+# _evaluate_symbol guard, with _own_positions stubbed to simulate what the
+# broker reports, and assert it stops at the caps.
+class _CapStub:
+    """Minimal stand-in exercising the real _evaluate_symbol cap logic."""
+    def __init__(self, positions, max_per_symbol=3, max_total=6):
+        self._positions = positions      # list of dicts, as _own_positions returns
+        self.max_per_symbol = max_per_symbol
+        self.max_total = max_total
+        self.log = _StubLog()
+        self.reached_fetch = False
+        self.connector = type("C", (), {"fetch_ohlcv": staticmethod(lambda *a, **k: [])})()
+    def _own_positions(self, bsym=None):
+        if bsym:
+            return [p for p in self._positions if p["symbol"] == bsym]
+        return list(self._positions)
+    def _mt5(self, fn, *a, **kw):
+        self.reached_fetch = True        # got past the caps into real work
+        return []                        # empty candles -> harmless early return
+
+def _ran(stub):
+    cat.ChartAITraderBot._evaluate_symbol(stub, "XAUUSD", "XAUUSDc")
+    return stub.reached_fetch
+
+P = lambda s: {"symbol": s}
+
+# flat -> proceeds
+assert _ran(_CapStub([])) is True, "with no positions the bot must evaluate"
+# 1 and 2 held on the symbol -> still proceeds (stacking genuinely allowed)
+assert _ran(_CapStub([P("XAUUSDc")])) is True, "1 held must NOT block (stacking allowed)"
+assert _ran(_CapStub([P("XAUUSDc")] * 2)) is True, "2 held must NOT block"
+# at the per-symbol cap -> blocked
+assert _ran(_CapStub([P("XAUUSDc")] * 3)) is False, "3 held must hit the per-symbol cap"
+assert _ran(_CapStub([P("XAUUSDc")] * 9)) is False, "over-cap must stay blocked"
+print("  per-symbol cap: 0,1,2 -> open;  3+ -> blocked   OK")
+
+# total cap binds even when the symbol itself is under its own cap
+under_symbol_over_total = [P("XAUUSDc")] * 2 + [P("BTCUSDc")] * 2 + [P("ETHUSDc")] * 2
+assert _ran(_CapStub(under_symbol_over_total)) is False, \
+    "total cap must block even though XAUUSD holds only 2 of its 3"
+assert _ran(_CapStub([P("BTCUSDc")] * 5)) is True, \
+    "other symbols' positions must not block XAUUSD while under the total cap"
+print("  total cap: binds across symbols, and does not over-block   OK")
+
+# caps are configurable, and 1/1 reproduces the old one-at-a-time behaviour
+assert _ran(_CapStub([P("XAUUSDc")], max_per_symbol=1, max_total=1)) is False
+assert _ran(_CapStub([], max_per_symbol=1, max_total=1)) is True
+assert _ran(_CapStub([P("XAUUSDc")] * 4, max_per_symbol=5, max_total=10)) is True
+print("  configurable: --max-per-symbol 1 restores old behaviour; raising works   OK")
+print("PASS\n")
+
+print("=== Case 23: worst-case stacked risk is bounded and stated ===")
+for total, risk in ((6, 0.30), (10, 0.30), (30, 0.30)):
+    print("  --max-total %-3d x --risk %.2f%%  -> worst case %.1f%% of equity"
+          % (total, risk, total * risk))
+assert cat.MAX_TOTAL_POSITIONS * cat.DEFAULT_RISK_PCT <= 2.0, \
+    "shipped defaults must keep worst-case simultaneous risk small (<=2%)"
+assert cat.MAX_POSITIONS_PER_SYMBOL <= cat.MAX_TOTAL_POSITIONS, \
+    "a per-symbol cap above the total cap would be unreachable/misleading"
+print("PASS -- defaults bound it to %.1f%%\n"
+      % (cat.MAX_TOTAL_POSITIONS * cat.DEFAULT_RISK_PCT))
+
 print("ALL TESTS PASSED")
