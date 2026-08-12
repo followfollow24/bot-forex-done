@@ -145,6 +145,21 @@ BOOST_POLL_MIN = 5
 # window boosted polling exists for.
 SCAN_MAX_RETRIES = 2
 SCAN_RETRY_DELAY_SEC = 20
+
+# [2026-08-12] Wall-clock caps on the AI calls. Added after the identical
+# gap was found the hard way on chart_ai_trader.py: neither the
+# google-genai nor the openai client sets a default socket timeout, so a
+# stalled connection blocks the bot's ONLY loop thread indefinitely -- the
+# process stays up, the log goes silent, and the heartbeat freezes until
+# watchdog_h1.ps1's 5-minute staleness check restarts a bot that was never
+# actually broken. Every MT5 call here has had this guard for months; the
+# AI calls never did. This bot had not yet shown the symptom (it polls
+# every 45min and makes far fewer calls than chart_ai_trader), but the
+# exposure was the same.
+# A scan is TWO chained API round-trips (grounded search, then schema
+# pass), so it gets the larger budget; a chart veto is a single call.
+SCAN_CALL_TIMEOUT_SEC = 120
+CHART_CALL_TIMEOUT_SEC = 60
 TRANSIENT_ERROR_MARKERS = ("503", "UNAVAILABLE", "overloaded", "high demand",
                            "timeout", "Timeout", "ConnectionError",
                            "connection reset", "temporarily unavailable")
@@ -579,6 +594,20 @@ class NewsGeminiBot:
         fut = self._io.submit(func, *args, **kw)
         return fut.result(timeout=self._mt5_timeout)
 
+    def _call_with_timeout(self, fn, timeout: float, *a, **kw):
+        """Bound an AI call's wall-clock time. Uses its own short-lived
+        executor rather than self._io so a stalled AI request can never
+        starve the MT5 pool (which has only 2 workers and is on the
+        position-management path). A hung thread still leaks -- Python
+        cannot kill one -- but control returns to the loop, which is the
+        whole point: the heartbeat keeps ticking and the watchdog does not
+        restart a bot that is merely waiting on a slow provider."""
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            return ex.submit(fn, *a, **kw).result(timeout=timeout)
+        finally:
+            ex.shutdown(wait=False)
+
     def _heartbeat(self):
         try:
             with open(self.heartbeat_file, "w") as f:
@@ -902,15 +931,25 @@ class NewsGeminiBot:
         attempt = 0
         while True:
             try:
-                return fn(api_key, model, lookback_min)
+                return self._call_with_timeout(
+                    fn, SCAN_CALL_TIMEOUT_SEC, api_key, model, lookback_min)
             except Exception as e:
-                msg = str(e)
+                # str(TimeoutError()) is '' -- fall back to the class name so
+                # the log/Telegram line says something instead of nothing.
+                msg = str(e) or f"{type(e).__name__} (no message)"
                 if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
                     self.log.warning(f"[{name.upper()}] quota exceeded -- skip cycle: {msg[:200]}")
                     self._telegram(f"⚠️ news_gemini: {name} API quota exceeded — "
                                    f"skipped this cycle (fail-safe, no trades)")
                     return None
-                if _is_transient_error(msg) and attempt < SCAN_MAX_RETRIES:
+                # A timeout from _call_with_timeout is transient by
+                # definition, but must be matched by TYPE, not message:
+                # str(TimeoutError()) is the empty string, so the marker
+                # check below would silently classify a timed-out scan as
+                # permanent and skip the retry it most deserves.
+                timed_out = isinstance(e, (TimeoutError,
+                                          concurrent.futures.TimeoutError))
+                if (timed_out or _is_transient_error(msg)) and attempt < SCAN_MAX_RETRIES:
                     attempt += 1
                     self.log.warning(f"[{name.upper()}] transient error, retry "
                                      f"{attempt}/{SCAN_MAX_RETRIES} in "
@@ -928,9 +967,17 @@ class NewsGeminiBot:
         self.log.info(f"── news poll cycle (dual-provider consensus, "
                       f"lookback={lookback_min}min) ──")
 
+        # [2026-08-12] Heartbeat between each long-running stage, not just
+        # once per loop iteration in run(). A cycle can span two scans
+        # (each up to SCAN_CALL_TIMEOUT_SEC, and each possibly retried)
+        # plus per-candidate chart vetoes; refreshing only at the top let a
+        # legitimately slow-but-healthy cycle drift past watchdog_h1.ps1's
+        # 5-minute staleness threshold and get restarted mid-decision.
+        self._heartbeat()
         gemini_candidates = self._safe_scan("gemini", gemini_scan,
                                             self.gemini_key, self.gemini_model,
                                             lookback_min)
+        self._heartbeat()
         if gemini_candidates is None:
             return
 
@@ -942,6 +989,7 @@ class NewsGeminiBot:
         openai_candidates = self._safe_scan("openai", openai_scan,
                                             self.openai_key, self.openai_model,
                                             lookback_min)
+        self._heartbeat()
         if openai_candidates is None:
             return
 
@@ -954,6 +1002,7 @@ class NewsGeminiBot:
             return
 
         for c in confirmed:
+            self._heartbeat()   # each candidate runs 2 more chart-veto calls
             self.log.info(f"[CONSENSUS] both providers agree: {c['symbol']} "
                           f"{c['signal']} conf={c['confidence']:.2f}")
             self._evaluate_candidate(c)
@@ -1050,7 +1099,9 @@ class NewsGeminiBot:
             if not key:
                 continue
             try:
-                v = fn(key, model, png, symbol, signal, headline, price, len(candles))
+                v = self._call_with_timeout(
+                    fn, CHART_CALL_TIMEOUT_SEC, key, model, png, symbol,
+                    signal, headline, price, len(candles))
                 verdicts[name] = v
                 self.log.info(f"[CHART/{name}] {symbol} contradicts="
                               f"{v.get('contradicts')} conf={v.get('confidence')} "
