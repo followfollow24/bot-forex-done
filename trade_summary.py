@@ -39,6 +39,12 @@ MAGIC_LABEL = {
     667130: "eth_h1_manual",
     668001: "funding_contrarian",
     668002: "btc_combo_lb",
+    # [2026-08-13] the two AI bots were missing here, so their trades were
+    # reported as bare "magic=..." rows and excluded from the per-bot
+    # summary -- which made them invisible in exactly the tool meant to
+    # analyse them.
+    669001: "news_gemini",
+    671001: "chart_ai_trader",
 }
 
 # Per-bot actual start date (when it started running its CURRENT config) --
@@ -46,6 +52,8 @@ MAGIC_LABEL = {
 BOT_START = {
     668001: "2026-08-08",
     668002: "2026-08-08",
+    669001: "2026-08-11",
+    671001: "2026-08-12",
 }
 
 start_arg = sys.argv[1] if len(sys.argv) > 1 else "2026-07-29"

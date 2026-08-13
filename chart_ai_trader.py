@@ -121,7 +121,17 @@ MIN_RR = 1.5          # spec: TP must be at least 1:1.5 reward:risk
 MAX_ENTRY_DRIFT_ATR = 1.5
 
 DEFAULT_RISK_PCT = 0.30
-MAX_CONSEC_LOSSES = 3
+# [2026-08-13] Consecutive-loss breaker DISABLED by default at the user's
+# request: the goal is now to accumulate an unbiased sample for analysis,
+# and a breaker that halts after 3 losses truncates exactly the tail you
+# need to measure -- you can never observe a 5- or 8-loss streak, so the
+# streak distribution is censored and any WR estimate is biased upward.
+# 0 = never auto-stop. Set --max-consec-losses 3 to restore the old guard.
+#
+# Note the split: this disables the ACTION, not the MEASUREMENT. The
+# streak is still counted, still persisted, and now logged on every close,
+# because that count is itself one of the statistics being collected.
+MAX_CONSEC_LOSSES = 0
 
 # [2026-08-12] Position stacking. The user asked for the bot to be able to
 # keep opening as the AI sees setups, rather than one-position-per-symbol.
@@ -560,12 +570,14 @@ def entry_filters_allow(decision: dict, payload: dict, atr: float):
 class ChartAITraderBot:
     def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int,
                  max_per_symbol: int = MAX_POSITIONS_PER_SYMBOL,
-                 max_total: int = MAX_TOTAL_POSITIONS):
+                 max_total: int = MAX_TOTAL_POSITIONS,
+                 max_consec_losses: int = MAX_CONSEC_LOSSES):
         self.cfg = cfg
         self.risk_pct = risk_pct
         self.poll_min = poll_min
         self.max_per_symbol = max_per_symbol
         self.max_total = max_total
+        self.max_consec_losses = max_consec_losses
 
         self.stop_file = os.path.join(_BASE_DIR, "STOP_CHART_AI_TRADER")
         self.breaker_file = os.path.join(_BASE_DIR, "BREAKER_CHART_AI_TRADER")
@@ -724,7 +736,16 @@ class ChartAITraderBot:
             self.state["consec_losses"] = self.state.get("consec_losses", 0) + 1
         else:
             self.state["consec_losses"] = 0
-        if self.state["consec_losses"] >= MAX_CONSEC_LOSSES:
+        # measurement continues regardless of whether the breaker acts --
+        # the streak length is one of the statistics being collected, and
+        # it is only meaningful if it is allowed to run past 3.
+        streak = self.state["consec_losses"]
+        best = max(streak, int(self.state.get("worst_streak", 0)))
+        self.state["worst_streak"] = best
+        self.log.info(f"[STREAK] consecutive losses now {streak} "
+                      f"(worst seen {best}); breaker "
+                      f"{'OFF' if self.max_consec_losses <= 0 else 'at ' + str(self.max_consec_losses)}")
+        if self.max_consec_losses > 0 and streak >= self.max_consec_losses:
             with open(self.breaker_file, "w", encoding="utf-8") as f:
                 f.write(f"{self.state['consec_losses']} consecutive losses as of "
                        f"{datetime.now(timezone.utc).isoformat()}")
@@ -1094,6 +1115,14 @@ class ChartAITraderBot:
                         "NOT SET -- dual-consensus unavailable, bot will idle "
                         "(no new entries) until OPENAI_API_KEY is added to .env")
         self.log.info(f"  openai model={self.openai_model}  {openai_status}")
+        if self.max_consec_losses <= 0:
+            self.log.warning("  consecutive-loss breaker: OFF -- the bot will NOT "
+                             "auto-stop after losing streaks (data-collection "
+                             "mode, by explicit user decision). Remaining "
+                             "protection: per-trade SL, position caps, kill-switch.")
+        else:
+            self.log.info(f"  consecutive-loss breaker: stop after "
+                          f"{self.max_consec_losses} losses")
         self.log.info(f"  kill-switch: {os.path.basename(self.stop_file)}  "
                       f"breaker: {os.path.basename(self.breaker_file)}")
         self.log.info("  ** UNVALIDATED STRATEGY -- no historical backtest exists "
@@ -1188,6 +1217,10 @@ def main():
                          f"(default {MAX_TOTAL_POSITIONS}). Worst-case "
                          f"simultaneous risk is this x --risk, since every "
                          f"position carries its own stop sized to --risk.")
+    ap.add_argument("--max-consec-losses", type=int, default=MAX_CONSEC_LOSSES,
+                    help=f"auto-stop after this many consecutive losses "
+                         f"(default {MAX_CONSEC_LOSSES}; 0 = never stop, which "
+                         f"is the setting for collecting an uncensored sample)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-real", action="store_true")
     args = ap.parse_args()
@@ -1206,7 +1239,8 @@ def main():
 
     bot = ChartAITraderBot(cfg, risk_pct=args.risk, poll_min=args.poll_min,
                           max_per_symbol=args.max_per_symbol,
-                          max_total=args.max_total)
+                          max_total=args.max_total,
+                          max_consec_losses=args.max_consec_losses)
     bot.run()
 
 

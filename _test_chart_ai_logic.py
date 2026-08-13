@@ -154,6 +154,7 @@ def fake_provider(api_key, model, png, symbol, price, bars, atr, payload_text):
 class _StubLog:
     def warning(self, m): pass
     def info(self, m): pass
+    def error(self, m): pass
 class _StubSelf:
     log = _StubLog()
     # use the REAL timeout wrapper so these tests exercise the actual
@@ -507,5 +508,44 @@ good = D("long", 4400.0)
 assert F(good, PL("BEARISH"), 6.0)[0] is False, \
     "a fully-validated LONG must still be blocked by a bearish H4"
 print("PASS -- prompt asks, code enforces\n")
+
+print("=== Case 31: breaker OFF collects data; measurement still runs ===")
+class _StreakStub:
+    def __init__(self, max_consec):
+        self.max_consec_losses = max_consec
+        self.state = {"consec_losses": 0}
+        self.log = _StubLog()
+        self.breaker_file = os.path.join(
+            __import__("tempfile").mkdtemp(), "BREAKER")
+        self.tg = []
+    def _telegram(self, m): self.tg.append(m)
+    def upd(self, pnl):
+        cat.ChartAITraderBot._update_loss_streak(self, pnl)
+
+# breaker OFF (0): streak keeps counting past 3, no stop file, no alert
+off = _StreakStub(0)
+for _ in range(8):
+    off.upd(-10.0)
+assert off.state["consec_losses"] == 8, off.state
+assert off.state["worst_streak"] == 8, "worst streak must be recorded for analysis"
+assert not os.path.exists(off.breaker_file), "breaker OFF must not write a stop file"
+assert off.tg == [], "breaker OFF must not alert"
+print("  8 straight losses, breaker OFF -> streak=8 worst=8, no stop, no alert   OK")
+
+# a win resets the running streak but NOT the worst-ever record
+off.upd(+5.0)
+assert off.state["consec_losses"] == 0
+assert off.state["worst_streak"] == 8, "worst-ever must survive a reset"
+print("  win resets running streak to 0, worst-ever stays 8 (kept for stats)   OK")
+
+# breaker ON (3): still stops, unchanged behaviour when asked for
+on = _StreakStub(3)
+on.upd(-1.0); on.upd(-1.0)
+assert not os.path.exists(on.breaker_file), "must not trip early"
+on.upd(-1.0)
+assert os.path.exists(on.breaker_file), "must trip at the threshold"
+assert len(on.tg) == 1 and "AUTO-STOPPED" in on.tg[0]
+print("  --max-consec-losses 3 -> still trips exactly at 3   OK")
+print("PASS -- action disabled, measurement intact\n")
 
 print("ALL TESTS PASSED")
