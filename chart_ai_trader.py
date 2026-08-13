@@ -142,6 +142,35 @@ MAX_TOTAL_POSITIONS = 6
 # is one symbol's two calls = 2 x AI_CALL_TIMEOUT_SEC = 120s < 300s.
 AI_CALL_TIMEOUT_SEC = 60
 
+# [2026-08-13] NEWS VETO. News can only BLOCK a chart setup, never create
+# one -- the 2-of-3 chart rule stays the sole source of entries, exactly
+# as the user asked ("รักษากลยุทธ์หลักให้คมเหมือนเดิม"). A clean chart
+# fighting a high-impact release (CPI, NFP, a rate decision) is the case
+# this exists for: price often spikes through the stop before going the
+# "right" way, so sitting out is worth more than being right eventually.
+#
+# Implementation note -- this deliberately REUSES news_gemini_bot's
+# already-live, already-tested gemini_scan()/openai_scan() rather than
+# writing a fresh "is there contradicting news?" prompt. Two reasons:
+#   * those functions already solve the hard part (grounded search in two
+#     passes, because neither provider reliably combines a search tool
+#     with a forced JSON schema in one call)
+#   * the contradiction test then becomes ORDINARY CODE -- "does any
+#     surfaced candidate for this symbol point the opposite way, at
+#     >= NEWS_VETO_CONF_MIN?" -- instead of a second LLM judgement.
+#     Deterministic, unit-testable, and it cannot hallucinate a veto.
+#
+# Cost is kept near zero by fetching LAZILY: the scan only runs once a
+# chart consensus actually wants to trade, and is cached for the rest of
+# the cycle. Cycles with no signal (the vast majority) make no extra
+# calls at all.
+#
+# Either provider surfacing contradicting news is enough to block --
+# asymmetric on purpose, same as news_gemini's chart veto: a filter whose
+# only power is to reduce trading does not need consensus to act.
+NEWS_VETO_CONF_MIN = 0.70
+NEWS_LOOKBACK_MIN = 180
+
 
 CHART_SIGNAL_SCHEMA = {
     "type": "object",
@@ -422,6 +451,7 @@ class ChartAITraderBot:
 
         self.state = self._load_state()
         self.symbols: dict = {}
+        self._news_cache: Optional[list] = None
 
     def _setup_logging(self) -> logging.Logger:
         fmt = "%(asctime)s [%(levelname)s] %(message)s"
@@ -564,6 +594,67 @@ class ChartAITraderBot:
                            f"Delete {os.path.basename(self.breaker_file)} to resume "
                            f"after review.")
 
+    def _news_candidates(self) -> list:
+        """Union of both providers' recent news candidates, fetched at most
+        once per poll cycle and only when something actually wants to
+        trade. Returns [] if both providers fail -- see _news_allows for
+        why that means "no veto" rather than "no trade"."""
+        if self._news_cache is not None:
+            return self._news_cache
+        sys.path.insert(0, _BASE_DIR)
+        from news_gemini_bot import gemini_scan, openai_scan
+        out = []
+        for name, fn, key, model in (
+                ("gemini", gemini_scan, self.gemini_key, self.gemini_model),
+                ("openai", openai_scan, self.openai_key, self.openai_model)):
+            if not key:
+                continue
+            try:
+                cands = self._call_with_timeout(
+                    fn, AI_CALL_TIMEOUT_SEC, key, model, NEWS_LOOKBACK_MIN) or []
+                for c in cands:
+                    c["_provider"] = name
+                out.extend(cands)
+            except Exception as e:
+                self.log.warning(f"[NEWS/{name}] scan failed ({str(e)[:150]}) "
+                                 f"-- this provider contributes no veto")
+        self._news_cache = out
+        self.log.info(f"[NEWS] {len(out)} candidate(s) across providers")
+        return out
+
+    def _news_allows(self, canon: str, signal: str) -> bool:
+        """False = a high-impact story points the OTHER way, skip the trade.
+
+        FAILS OPEN. If both scans error (503s from these providers are a
+        near-daily event in this fleet's logs), there are no candidates, so
+        nothing contradicts, so the trade proceeds on the chart consensus
+        that already passed every gate. That is the deliberate choice: a
+        veto stage that cannot be reached must not silently become a
+        kill-switch on the whole strategy. The failure is logged per
+        provider above so a persistently blind veto is visible."""
+        opposite = "short" if signal == "long" else "long"
+        for c in self._news_candidates():
+            if c.get("symbol") != canon:
+                continue
+            if str(c.get("signal", "")).lower() != opposite:
+                continue
+            try:
+                conf = float(c.get("confidence", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if conf < NEWS_VETO_CONF_MIN:
+                continue
+            head = str(c.get("headline", ""))[:200]
+            self.log.info(f"[NEWS VETO] {canon} {signal} cancelled by "
+                          f"{c.get('_provider')}: {opposite} news conf={conf:.2f} "
+                          f":: {head}")
+            self._telegram(
+                f"\U0001F6AB NEWS VETO {canon} {signal.upper()}\n"
+                f"Chart said {signal.upper()}, but {c.get('_provider')} found "
+                f"{opposite.upper()} news (conf {conf:.2f}):\n{head}")
+            return False
+        return True
+
     def _call_with_timeout(self, fn, timeout: float, *a, **kw):
         """Bound an external call's wall-clock time, same defence the rest of
         this fleet applies to MT5 calls (_call_with_timeout in
@@ -681,6 +772,12 @@ class ChartAITraderBot:
                       f"entry={decision['entry']:.2f} sl={decision['sl']:.2f} "
                       f"tp={decision['tp']:.2f} "
                       f"(sl={decision['sl_atr_mult']:.2f}xATR, R:R {decision['rr']:.2f})")
+        # heartbeat before the news stage: it can add up to two more timed
+        # calls, and refreshing here keeps the largest gap between two
+        # heartbeats at 2 x AI_CALL_TIMEOUT_SEC rather than 4 (see case 19).
+        self._heartbeat()
+        if not self._news_allows(canon, decision["signal"]):
+            return
         self._enter(canon, bsym, decision)
 
     def _enter(self, canon: str, bsym: str, decision: dict) -> bool:
@@ -784,6 +881,10 @@ class ChartAITraderBot:
                       f"prices; stop must land in {SL_ATR_MIN}-{SL_ATR_MAX}"
                       f"xATR and R:R >= {MIN_RR}, else the setup is REJECTED "
                       f"(entry drift limit {MAX_ENTRY_DRIFT_ATR}xATR)")
+        self.log.info(f"  news veto: ON -- a chart setup is cancelled if either "
+                      f"provider surfaces opposite-direction news at conf >= "
+                      f"{NEWS_VETO_CONF_MIN} (lookback {NEWS_LOOKBACK_MIN}min, "
+                      f"fetched lazily, fails OPEN)")
         self.log.info(f"  stacking: up to {self.max_per_symbol}/symbol, "
                       f"{self.max_total} total -> worst-case simultaneous "
                       f"risk {self.max_total * self.risk_pct:.2f}% of equity "
@@ -819,6 +920,7 @@ class ChartAITraderBot:
                         self.log.warning("[BREAKER] consecutive-loss breaker active "
                                          "-- skipping poll cycle (clear file to resume)")
                     else:
+                        self._news_cache = None   # refetch at most once per cycle
                         for canon, bsym in self.symbols.items():
                             # [2026-08-12] refresh the heartbeat BETWEEN
                             # symbols, not just once per loop iteration: a

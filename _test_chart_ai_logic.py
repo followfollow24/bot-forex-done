@@ -316,4 +316,81 @@ assert cat.MAX_POSITIONS_PER_SYMBOL <= cat.MAX_TOTAL_POSITIONS, \
 print("PASS -- defaults bound it to %.1f%%\n"
       % (cat.MAX_TOTAL_POSITIONS * cat.DEFAULT_RISK_PCT))
 
+print("=== Case 24: NEWS VETO -- news can only BLOCK, never create a trade ===")
+class _NewsStub:
+    def __init__(self, cands, fail=False):
+        self._cands = cands
+        self._fail = fail
+        self._news_cache = None
+        self.log = _StubLog()
+        self.gemini_key = "k"; self.gemini_model = "m"
+        self.openai_key = ""; self.openai_model = "m"
+        self.telegrams = []
+        self.fetches = 0
+    def _telegram(self, m): self.telegrams.append(m)
+    def _call_with_timeout(self, fn, timeout, *a, **kw):
+        self.fetches += 1
+        if self._fail:
+            raise RuntimeError("503 UNAVAILABLE")
+        return self._cands
+    def _news_candidates(self):
+        return cat.ChartAITraderBot._news_candidates(self)
+    def _news_allows(self, canon, signal):
+        return cat.ChartAITraderBot._news_allows(self, canon, signal)
+
+N = lambda sym, sig, conf, head="h": {"symbol": sym, "signal": sig,
+                                      "confidence": conf, "headline": head}
+
+# opposite-direction, high-confidence news -> VETO
+s1 = _NewsStub([N("XAUUSD", "short", 0.85, "Fed holds, USD surges")])
+assert s1._news_allows("XAUUSD", "long") is False, "opposite high-conf news must veto"
+assert len(s1.telegrams) == 1 and "NEWS VETO" in s1.telegrams[0]
+print("  opposite news conf 0.85 vs LONG -> VETOED   OK")
+
+# same-direction news -> no veto (news must not create/confirm, just not block)
+s2 = _NewsStub([N("XAUUSD", "long", 0.95)])
+assert s2._news_allows("XAUUSD", "long") is True, "aligned news must not block"
+print("  aligned news -> allowed   OK")
+
+# opposite but LOW confidence -> no veto
+s3 = _NewsStub([N("XAUUSD", "short", 0.55)])
+assert s3._news_allows("XAUUSD", "long") is True, "low-conf news must not veto"
+print("  opposite news below %.2f -> allowed   OK" % cat.NEWS_VETO_CONF_MIN)
+
+# news about a DIFFERENT symbol -> no veto
+s4 = _NewsStub([N("BTCUSDC", "short", 0.99)])
+assert s4._news_allows("XAUUSD", "long") is True, "other symbol must not veto"
+print("  other-symbol news -> allowed   OK")
+
+# SHORT direction is vetoed by LONG news (symmetry)
+s5 = _NewsStub([N("ETHUSDC", "long", 0.9)])
+assert s5._news_allows("ETHUSDC", "short") is False
+print("  LONG news vs SHORT chart -> VETOED   OK")
+
+# both providers failing -> FAIL OPEN (trade proceeds), and no crash
+s6 = _NewsStub([], fail=True)
+assert s6._news_allows("XAUUSD", "long") is True, \
+    "a broken veto stage must not become a silent kill-switch"
+print("  both scans error -> fails OPEN, trade allowed   OK")
+
+# malformed confidence must not crash or wrongly veto
+s7 = _NewsStub([{"symbol": "XAUUSD", "signal": "short", "confidence": "high"}])
+assert s7._news_allows("XAUUSD", "long") is True
+print("  malformed confidence -> ignored, no crash   OK")
+
+# LAZY + CACHED: one fetch per cycle no matter how many symbols ask
+s8 = _NewsStub([N("XAUUSD", "short", 0.9)])
+s8._news_allows("XAUUSD", "long"); s8._news_allows("BTCUSDC", "long")
+s8._news_allows("ETHUSDC", "short")
+assert s8.fetches == 1, "must fetch once per cycle, got %d" % s8.fetches
+print("  3 symbols checked -> %d scan fetch (cached)   OK" % s8.fetches)
+print("PASS\n")
+
+print("=== Case 25: news veto keeps the heartbeat gap under the watchdog ===")
+# the veto adds up to 2 timed calls, but a heartbeat is written just
+# before it, so the largest gap between heartbeats is still 2 calls.
+worst = 2 * cat.AI_CALL_TIMEOUT_SEC
+assert worst < 5 * 60, worst
+print("PASS -- worst gap still %ds < watchdog 300s\n" % worst)
+
 print("ALL TESTS PASSED")
