@@ -318,10 +318,12 @@ print("PASS -- defaults bound it to %.1f%%\n"
 
 print("=== Case 24: NEWS VETO -- news can only BLOCK, never create a trade ===")
 class _NewsStub:
-    def __init__(self, cands, fail=False):
+    def __init__(self, cands, fail=False, fail_which=None):
         self._cands = cands
         self._fail = fail
+        self._fail_which = fail_which or []
         self._news_cache = None
+        self._news_ok = []; self._news_failed = []
         self.log = _StubLog()
         self.gemini_key = "k"; self.gemini_model = "m"
         self.openai_key = ""; self.openai_model = "m"
@@ -332,7 +334,11 @@ class _NewsStub:
         self.fetches += 1
         if self._fail:
             raise RuntimeError("503 UNAVAILABLE")
+        if getattr(fn, "_name", None) in self._fail_which:
+            raise RuntimeError("503 UNAVAILABLE")
         return self._cands
+    def _news_veto_state(self):
+        return cat.ChartAITraderBot._news_veto_state(self)
     def _news_candidates(self):
         return cat.ChartAITraderBot._news_candidates(self)
     def _news_allows(self, canon, signal):
@@ -392,5 +398,42 @@ print("=== Case 25: news veto keeps the heartbeat gap under the watchdog ===")
 worst = 2 * cat.AI_CALL_TIMEOUT_SEC
 assert worst < 5 * 60, worst
 print("PASS -- worst gap still %ds < watchdog 300s\n" % worst)
+
+print("=== Case 26: fail-OPEN must be AUDITABLE -- veto health is recorded ===")
+# The fail-open design is only defensible if a trade taken with a blind
+# veto can be identified afterwards. Without this you would have to
+# correlate separate log lines by timestamp across a whole forward test.
+s_ok = _NewsStub([N("XAUUSD", "long", 0.9)])
+s_ok.openai_key = "k2"                      # two providers configured
+assert s_ok._news_allows("XAUUSD", "long") is True
+assert s_ok._news_veto_state() == "ok", s_ok._news_veto_state()
+print("  both providers answered            -> %-22s OK" % s_ok._news_veto_state())
+
+s_blind = _NewsStub([], fail=True)
+s_blind.openai_key = "k2"
+assert s_blind._news_allows("XAUUSD", "long") is True, "still fails open"
+assert s_blind._news_veto_state() == "blind", s_blind._news_veto_state()
+print("  both providers failed              -> %-22s OK  (trade allowed, but flagged)"
+      % s_blind._news_veto_state())
+
+# one provider up, one down -> degraded, and it names WHICH one
+class _HalfStub(_NewsStub):
+    def _call_with_timeout(self, fn, timeout, *a, **kw):
+        self.fetches += 1
+        if self.fetches == 2:               # second provider (openai) fails
+            raise RuntimeError("503")
+        return self._cands
+s_deg = _HalfStub([N("XAUUSD", "long", 0.9)])
+s_deg.openai_key = "k2"
+assert s_deg._news_allows("XAUUSD", "long") is True
+st = s_deg._news_veto_state()
+assert st.startswith("degraded") and "openai" in st, st
+print("  gemini ok / openai down            -> %-22s OK  (names the failure)" % st)
+
+# state before any scan ran
+s_new = _NewsStub([])
+assert s_new._news_veto_state() == "not-run"
+print("  before any scan                    -> %-22s OK" % s_new._news_veto_state())
+print("PASS -- every trade can be attributed to a working, partial or blind veto\n")
 
 print("ALL TESTS PASSED")

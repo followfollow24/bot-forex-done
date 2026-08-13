@@ -452,6 +452,11 @@ class ChartAITraderBot:
         self.state = self._load_state()
         self.symbols: dict = {}
         self._news_cache: Optional[list] = None
+        # per-cycle record of which providers actually answered, so a trade
+        # entered while the veto was blind is identifiable AFTERWARDS -- see
+        # _news_veto_state().
+        self._news_ok: list = []
+        self._news_failed: list = []
 
     def _setup_logging(self) -> logging.Logger:
         fmt = "%(asctime)s [%(levelname)s] %(message)s"
@@ -604,6 +609,7 @@ class ChartAITraderBot:
         sys.path.insert(0, _BASE_DIR)
         from news_gemini_bot import gemini_scan, openai_scan
         out = []
+        self._news_ok, self._news_failed = [], []
         for name, fn, key, model in (
                 ("gemini", gemini_scan, self.gemini_key, self.gemini_model),
                 ("openai", openai_scan, self.openai_key, self.openai_model)):
@@ -615,12 +621,37 @@ class ChartAITraderBot:
                 for c in cands:
                     c["_provider"] = name
                 out.extend(cands)
+                self._news_ok.append(name)
             except Exception as e:
+                self._news_failed.append(name)
                 self.log.warning(f"[NEWS/{name}] scan failed ({str(e)[:150]}) "
                                  f"-- this provider contributes no veto")
         self._news_cache = out
-        self.log.info(f"[NEWS] {len(out)} candidate(s) across providers")
+        self.log.info(f"[NEWS] {len(out)} candidate(s); veto={self._news_veto_state()} "
+                      f"(ok={self._news_ok or '-'} failed={self._news_failed or '-'})")
         return out
+
+    def _news_veto_state(self) -> str:
+        """How much of the news veto was actually working for this cycle.
+
+        [2026-08-13] Added because the fail-OPEN design is only defensible
+        if a trade taken with a blind veto is IDENTIFIABLE later. Without
+        this, reconstructing "was the veto up when this position opened?"
+        means correlating separate log lines by timestamp across hundreds
+        of forward-test trades. The state is stamped onto the [OPEN] line,
+        the Telegram alert and the saved position record instead.
+          ok        every configured provider answered
+          degraded  at least one answered, at least one did not
+          blind     none answered -- the trade passed BECAUSE the veto
+                    could not run, not because news agreed with it
+        """
+        if not self._news_ok and not self._news_failed:
+            return "not-run"
+        if not self._news_ok:
+            return "blind"
+        if self._news_failed:
+            return "degraded(-" + ",".join(self._news_failed) + ")"
+        return "ok"
 
     def _news_allows(self, canon: str, signal: str) -> bool:
         """False = a high-impact story points the OTHER way, skip the trade.
@@ -837,16 +868,23 @@ class ChartAITraderBot:
             "bsym": bsym, "ticket": str(result.get("trade_id", "") or ""),
             "side": side, "entry": fill, "sl": sl, "tp": tp, "lot": lot,
             "opened_utc": datetime.now(timezone.utc).isoformat(),
+            "news_veto": self._news_veto_state(),
         }
         self._save_state()
 
+        veto_state = self._news_veto_state()
         self.log.info(f"[OPEN] {side.upper()} {bsym} lot={lot} fill={fill:.2f} "
-                      f"sl={sl:.2f} tp={tp:.2f} (risk={actual_risk_pct:.2f}%)")
+                      f"sl={sl:.2f} tp={tp:.2f} (risk={actual_risk_pct:.2f}%) "
+                      f"news_veto={veto_state}")
+        if veto_state in ("blind", "not-run"):
+            self.log.warning(f"[OPEN] {bsym} entered with news veto {veto_state.upper()} "
+                             f"-- no news check protected this trade (fail-open)")
         self._telegram(
             f"\U0001F7E2 CHART-AI ENTRY {side.upper()} {bsym}\n"
             f"lot={lot}  fill={fill:.2f}  SL={sl:.2f} TP={tp:.2f}\n"
             f"AI-chosen: SL {decision['sl_atr_mult']:.2f}xATR  "
             f"R:R {decision['rr']:.2f}\n"
+            f"news veto: {veto_state}\n"
             f"gemini: {decision['gemini_reasoning'][:250]}\n"
             f"openai: {decision['openai_reasoning'][:250]}")
         return True
@@ -920,7 +958,11 @@ class ChartAITraderBot:
                         self.log.warning("[BREAKER] consecutive-loss breaker active "
                                          "-- skipping poll cycle (clear file to resume)")
                     else:
-                        self._news_cache = None   # refetch at most once per cycle
+                        # refetch at most once per cycle; clear the health
+                        # record too so a stale "ok" can't leak into a later
+                        # cycle whose scan actually failed.
+                        self._news_cache = None
+                        self._news_ok, self._news_failed = [], []
                         for canon, bsym in self.symbols.items():
                             # [2026-08-12] refresh the heartbeat BETWEEN
                             # symbols, not just once per loop iteration: a
