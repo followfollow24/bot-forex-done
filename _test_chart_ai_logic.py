@@ -436,4 +436,76 @@ assert s_new._news_veto_state() == "not-run"
 print("  before any scan                    -> %-22s OK" % s_new._news_veto_state())
 print("PASS -- every trade can be attributed to a working, partial or blind veto\n")
 
+print("=== Case 27: HTF alignment gate (technique 1) ===")
+F = cat.entry_filters_allow
+def PL(htf_trend, near_price=4400.0, mtf="BULLISH"):
+    return {"atr": 6.0,
+            "htf": {"htf": ({"trend": htf_trend, "price": 1, "ema20": 1, "ema50": 1}
+                            if htf_trend else None),
+                    "mtf": {"trend": mtf, "price": 1, "ema20": 1, "ema50": 1}},
+            "keylevels": {"nearest": "pivot", "nearest_price": near_price,
+                          "distance": 0.0, "levels": {}}}
+D = lambda sig, entry=4400.0: {"signal": sig, "entry": entry}
+
+assert F(D("long"),  PL("BULLISH"), 6.0)[0] is True,  "LONG with bullish H4 -> allowed"
+assert F(D("short"), PL("BEARISH"), 6.0)[0] is True,  "SHORT with bearish H4 -> allowed"
+assert F(D("long"),  PL("BEARISH"), 6.0)[0] is False, "LONG against bearish H4 -> blocked"
+assert F(D("short"), PL("BULLISH"), 6.0)[0] is False, "SHORT against bullish H4 -> blocked"
+assert F(D("long"),  PL("NEUTRAL"), 6.0)[0] is False, "NEUTRAL H4 -> blocked (no edge)"
+ok, why = F(D("long"), PL(None), 6.0)
+assert ok is False and "fail-closed" in why, why
+print("  bullish/bearish/neutral/missing all handled; missing FAILS CLOSED   OK")
+print("PASS\n")
+
+print("=== Case 28: key-level proximity gate (technique 2) ===")
+ATR = 6.0
+# entry exactly ON a level -> fine
+assert F(D("long", 4400.0), PL("BULLISH", near_price=4400.0), ATR)[0] is True
+# 1.0 ATR away (6.0 pts) -> within the 1.5 limit
+assert F(D("long", 4406.0), PL("BULLISH", near_price=4400.0), ATR)[0] is True
+# exactly at the 1.5 ATR boundary (9.0 pts) -> allowed (<=)
+assert F(D("long", 4409.0), PL("BULLISH", near_price=4400.0), ATR)[0] is True
+# 2.0 ATR away (12 pts) -> blocked, floating in open space
+ok, why = F(D("long", 4412.0), PL("BULLISH", near_price=4400.0), ATR)
+assert ok is False and "from nearest level" in why, why
+print("  0.0 / 1.0 / 1.5 ATR -> allowed;  2.0 ATR -> blocked (%s)" % why)
+# missing key-level data fails closed
+ok, why = F(D("long"), {"atr": ATR, "htf": PL("BULLISH")["htf"], "keylevels": {}}, ATR)
+assert ok is False and "fail-closed" in why
+# the 0.5 ATR the user first proposed would have blocked even 1.0 ATR away --
+# showing why it was widened
+assert abs(4406.0 - 4400.0) / ATR == 1.0
+print("  missing data FAILS CLOSED; 1.0 ATR would have been blocked at the")
+print("  originally-proposed 0.5 limit, which is why it was widened   OK")
+print("PASS\n")
+
+print("=== Case 29: build_key_levels / build_htf_context arithmetic ===")
+# prev day H=110 L=90 C=100 -> pivot=100, r1=110, s1=90, r2=120, s2=80
+daily = [[0, 95, 110, 90, 100, 1], [0, 100, 108, 98, 105, 1]]
+kl = cat.build_key_levels(daily, price=101.0)
+lv = kl["levels"]
+assert lv["prev_high"] == 110 and lv["prev_low"] == 90 and lv["prev_close"] == 100
+assert abs(lv["pivot"] - 100.0) < 1e-9
+assert abs(lv["r1"] - 110.0) < 1e-9 and abs(lv["s1"] - 90.0) < 1e-9
+assert abs(lv["r2"] - 120.0) < 1e-9 and abs(lv["s2"] - 80.0) < 1e-9
+assert kl["nearest"] in ("pivot", "prev_close"), kl["nearest"]
+assert abs(kl["distance"] - 1.0) < 1e-9, kl["distance"]
+print("  pivots: PP=%.1f R1=%.1f S1=%.1f, nearest=%s at %.1f away   OK"
+      % (lv["pivot"], lv["r1"], lv["s1"], kl["nearest"], kl["distance"]))
+
+up = [[0, 100+i, 101+i, 99+i, 100.5+i, 1] for i in range(60)]
+dn = [[0, 200-i, 201-i, 199-i, 200.5-i, 1] for i in range(60)]
+assert cat.build_htf_context(up, up)["htf"]["trend"] == "BULLISH"
+assert cat.build_htf_context(dn, dn)["htf"]["trend"] == "BEARISH"
+assert cat.build_htf_context([], [])["htf"] is None, "too few bars -> None (gate fails closed)"
+print("  HTF trend labels: uptrend->BULLISH, downtrend->BEARISH, empty->None   OK")
+print("PASS\n")
+
+print("=== Case 30: filters are ENFORCED IN CODE, not just asked of the AI ===")
+# a decision that passed chart consensus AND news can still be dropped here
+good = D("long", 4400.0)
+assert F(good, PL("BEARISH"), 6.0)[0] is False, \
+    "a fully-validated LONG must still be blocked by a bearish H4"
+print("PASS -- prompt asks, code enforces\n")
+
 print("ALL TESTS PASSED")

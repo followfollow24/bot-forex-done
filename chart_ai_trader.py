@@ -171,6 +171,37 @@ AI_CALL_TIMEOUT_SEC = 60
 NEWS_VETO_CONF_MIN = 0.70
 NEWS_LOOKBACK_MIN = 180
 
+# [2026-08-13] Two ENTRY filters, added on the user's plan to lift trade
+# quality. Both are enforced in PYTHON as hard gates and ALSO described to
+# the models in the payload -- the prompt makes the models cooperate, the
+# code makes them obey. A prompt-only rule is a suggestion; these are not.
+#
+# EXPECTATION SET HONESTLY: these are expected to cut trade FREQUENCY and
+# shallow out drawdown, not to raise %/day. The arithmetic: going from
+# 3 trades/day at 45% WR to 1 trade/day at 55% WR is 0.1125%/day either
+# way -- identical. They are worth doing for survivability; the daily
+# return still comes from having more uncorrelated edges.
+#
+# 1) HIGHER-TIMEFRAME ALIGNMENT. M15 entries that fight the H4 trend are
+#    the classic way a lower-timeframe system bleeds. The rest of this
+#    fleet already works this way (H1 entry gated by H4 trend); chart_ai
+#    was the only bot with no higher-timeframe context at all.
+HTF_TIMEFRAME = "4h"
+HTF_BARS = 120
+MTF_TIMEFRAME = "1h"       # shown to the model as extra context, not gated
+MTF_BARS = 120
+REQUIRE_HTF_ALIGNMENT = True
+
+# 2) KEY LEVELS. An entry floating in open space has no structure to lean
+#    on; one near a level real participants watch does. Levels are computed
+#    in PYTHON from daily bars (previous day H/L/C plus standard pivots) --
+#    facts, not something the model is asked to recall or estimate.
+#    1.5 ATR, not the 0.5 originally proposed: on gold M15 an ATR is ~6, so
+#    0.5 ATR would demand price sit within ~3 points of a level, which
+#    almost never happens and would silently stop the bot trading.
+KEY_LEVEL_MAX_ATR = 1.5
+REQUIRE_KEY_LEVEL = True
+
 
 CHART_SIGNAL_SCHEMA = {
     "type": "object",
@@ -281,7 +312,76 @@ def format_payload(symbol: str, p: dict) -> str:
     for b in p["tail"]:
         lines.append(f"    {b['o']:.2f} / {b['h']:.2f} / {b['l']:.2f} / "
                      f"{b['c']:.2f} / {b['v']:.0f}")
+
+    htf = (p.get("htf") or {}).get("htf")
+    mtf = (p.get("htf") or {}).get("mtf")
+    if htf:
+        lines.append(f"  HTF_Trend (H4): {htf['trend']} "
+                     f"(close {htf['price']:.2f}, EMA20 {htf['ema20']:.2f}, "
+                     f"EMA50 {htf['ema50']:.2f})")
+        lines.append(f"    -> you may only go LONG if this is BULLISH, "
+                     f"or SHORT if this is BEARISH. If it is NEUTRAL, or "
+                     f"points the other way, the answer is WAIT.")
+    if mtf:
+        lines.append(f"  MTF_Trend (H1, context only): {mtf['trend']}")
+
+    kl = p.get("keylevels") or {}
+    if kl.get("nearest"):
+        d_atr = kl["distance"] / p["atr"] if p["atr"] else 0.0
+        lv = kl["levels"]
+        lines.append(f"  Key levels (from daily bars): prev_high "
+                     f"{lv['prev_high']:.2f}  prev_low {lv['prev_low']:.2f}  "
+                     f"pivot {lv['pivot']:.2f}  R1 {lv['r1']:.2f}  S1 {lv['s1']:.2f}")
+        lines.append(f"    nearest = {kl['nearest']} @ {kl['nearest_price']:.2f}, "
+                     f"{kl['distance']:.2f} away ({d_atr:.2f} ATR)")
+        lines.append(f"    -> entries must be within {KEY_LEVEL_MAX_ATR} ATR of a "
+                     f"key level. Do not enter in open space away from structure.")
     return "\n".join(lines)
+
+
+def build_htf_context(htf_candles: list, mtf_candles: list) -> dict:
+    """Higher-timeframe trend labels. Pure function of candle lists."""
+    def label(cands):
+        if not cands or len(cands) < 50:
+            return None
+        closes = [float(c[4]) for c in cands]
+        e20, e50 = _ema(closes, 20), _ema(closes, 50)
+        px = closes[-1]
+        if px > e20 and e20 > e50:
+            trend = "BULLISH"
+        elif px < e20 and e20 < e50:
+            trend = "BEARISH"
+        else:
+            trend = "NEUTRAL"
+        return {"trend": trend, "price": px, "ema20": e20, "ema50": e50}
+    return {"htf": label(htf_candles), "mtf": label(mtf_candles)}
+
+
+def build_key_levels(daily_candles: list, price: float) -> dict:
+    """Previous-day H/L/C plus standard floor-trader pivots, and the
+    distance from `price` to whichever is nearest. Computed here rather
+    than asked of the model: these are arithmetic, not judgement."""
+    if not daily_candles or len(daily_candles) < 2:
+        return {}
+    prev = daily_candles[-2]           # last CLOSED day
+    ph, pl, pc = float(prev[2]), float(prev[3]), float(prev[4])
+    pp = (ph + pl + pc) / 3.0
+    levels = {
+        "prev_high": ph, "prev_low": pl, "prev_close": pc,
+        "pivot": pp,
+        "r1": 2 * pp - pl, "s1": 2 * pp - ph,
+        "r2": pp + (ph - pl), "s2": pp - (ph - pl),
+    }
+    today = daily_candles[-1]
+    levels["today_high"] = float(today[2])
+    levels["today_low"] = float(today[3])
+    nearest_name, nearest_dist = None, None
+    for name, lv in levels.items():
+        d = abs(price - lv)
+        if nearest_dist is None or d < nearest_dist:
+            nearest_name, nearest_dist = name, d
+    return {"levels": levels, "nearest": nearest_name,
+            "nearest_price": levels[nearest_name], "distance": nearest_dist}
 
 
 def _fmt_prompt(symbol: str, bars: int, price: float, atr: float,
@@ -419,6 +519,42 @@ def cross_check_signal(gemini_result: dict, openai_result: dict,
         "gemini_reasoning": str(gemini_result.get("reason", "")),
         "openai_reasoning": str(openai_result.get("reason", "")),
     }
+
+
+def entry_filters_allow(decision: dict, payload: dict, atr: float):
+    """Hard entry gates: higher-timeframe alignment + proximity to a key
+    level. Returns (allowed, reason). Pure function -- the whole point is
+    that these are enforced by CODE, not left to the model's goodwill.
+
+    FAILS CLOSED, unlike the news veto. The difference is deliberate: the
+    news veto depends on a remote API that is down somewhere most days, so
+    blocking on its absence would halt trading for reasons unrelated to
+    the market. These two depend only on local MT5 candle reads, so
+    missing data means something is genuinely wrong with our view of the
+    market -- exactly when NOT to take a trade."""
+    signal = decision.get("signal")
+    entry = float(decision.get("entry", 0) or 0)
+
+    if REQUIRE_HTF_ALIGNMENT:
+        htf = (payload.get("htf") or {}).get("htf")
+        if not htf:
+            return False, "no HTF data (fail-closed)"
+        trend = htf.get("trend")
+        want = "BULLISH" if signal == "long" else "BEARISH"
+        if trend != want:
+            return False, f"HTF {trend} does not support {signal.upper()}"
+
+    if REQUIRE_KEY_LEVEL:
+        kl = payload.get("keylevels") or {}
+        if not kl.get("nearest"):
+            return False, "no key-level data (fail-closed)"
+        if not (atr > 0 and math.isfinite(atr)):
+            return False, "invalid ATR for key-level check"
+        d_atr = abs(entry - kl["nearest_price"]) / atr
+        if d_atr > KEY_LEVEL_MAX_ATR:
+            return False, (f"entry {d_atr:.2f} ATR from nearest level "
+                          f"{kl['nearest']} (max {KEY_LEVEL_MAX_ATR})")
+    return True, "ok"
 
 
 class ChartAITraderBot:
@@ -760,6 +896,23 @@ class ChartAITraderBot:
             return
 
         payload = build_market_payload(candles, atr)
+        # extra context: higher timeframes and daily-derived key levels.
+        # Local MT5 reads, so they cost no API tokens -- but a failure here
+        # must not silently disable the gates that depend on them, hence
+        # the explicit None handling in the gate block further down.
+        try:
+            htf_c = self._mt5(self.connector.fetch_ohlcv, bsym, HTF_TIMEFRAME, HTF_BARS)
+            mtf_c = self._mt5(self.connector.fetch_ohlcv, bsym, MTF_TIMEFRAME, MTF_BARS)
+            payload["htf"] = build_htf_context(htf_c, mtf_c)
+        except Exception as e:
+            self.log.warning(f"[{canon}] HTF fetch failed: {e}")
+            payload["htf"] = {"htf": None, "mtf": None}
+        try:
+            daily_c = self._mt5(self.connector.fetch_ohlcv, bsym, "1d", 30)
+            payload["keylevels"] = build_key_levels(daily_c, price)
+        except Exception as e:
+            self.log.warning(f"[{canon}] daily fetch failed: {e}")
+            payload["keylevels"] = {}
         payload_text = format_payload(canon, payload)
 
         sys.path.insert(0, _BASE_DIR)
@@ -803,6 +956,11 @@ class ChartAITraderBot:
                       f"entry={decision['entry']:.2f} sl={decision['sl']:.2f} "
                       f"tp={decision['tp']:.2f} "
                       f"(sl={decision['sl_atr_mult']:.2f}xATR, R:R {decision['rr']:.2f})")
+        ok, why = entry_filters_allow(decision, payload, atr)
+        if not ok:
+            self.log.info(f"[{canon}] SKIP entry-filter: {why}")
+            return
+
         # heartbeat before the news stage: it can add up to two more timed
         # calls, and refreshing here keeps the largest gap between two
         # heartbeats at 2 x AI_CALL_TIMEOUT_SEC rather than 4 (see case 19).
@@ -919,6 +1077,10 @@ class ChartAITraderBot:
                       f"prices; stop must land in {SL_ATR_MIN}-{SL_ATR_MAX}"
                       f"xATR and R:R >= {MIN_RR}, else the setup is REJECTED "
                       f"(entry drift limit {MAX_ENTRY_DRIFT_ATR}xATR)")
+        self.log.info(f"  entry filters: HTF alignment ({HTF_TIMEFRAME}) "
+                      f"{'ON' if REQUIRE_HTF_ALIGNMENT else 'off'}, key-level "
+                      f"proximity <= {KEY_LEVEL_MAX_ATR}xATR "
+                      f"{'ON' if REQUIRE_KEY_LEVEL else 'off'} -- both fail CLOSED")
         self.log.info(f"  news veto: ON -- a chart setup is cancelled if either "
                       f"provider surfaces opposite-direction news at conf >= "
                       f"{NEWS_VETO_CONF_MIN} (lookback {NEWS_LOOKBACK_MIN}min, "
