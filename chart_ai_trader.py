@@ -9,10 +9,12 @@ failure modes can't touch the news/chart-veto system already live and
 trading, and vice versa.
 
 DUAL-CONSENSUS, LIKE news_gemini_bot.py'S NEWS STAGE (not like its chart
-VETO stage): Gemini and OpenAI each independently look at the SAME chart
-image and each independently answer long/short/none + confidence. A trade
-only opens if BOTH agree on the same non-none direction with confidence
->= CONF_MIN. This is a full trading-decision gate (unlike
+VETO stage): Gemini and OpenAI each independently receive the SAME chart
+image PLUS the same numeric market payload (close, EMA20/50, ATR, recent
+swing high/low, last 5 bars), and each independently returns
+LONG/SHORT/WAIT with absolute entry/sl/tp. A trade opens only if BOTH
+return the same LONG or SHORT, after which their levels are averaged and
+validated. This is a full trading-decision gate (unlike
 log_anomaly_scanner.py's union-of-findings design) because a wrong entry
 here costs real money, same reasoning as news_gemini's own news stage.
 
@@ -26,12 +28,15 @@ bots' walk-forward-validated track record. Adjust via --risk.
 EXIT MANAGEMENT: pure broker-side SL/TP -- placed once at entry, then left
 alone (no code-driven time-stop, no trailing, no discretionary
 re-evaluation of open positions). [2026-08-12] The DISTANCES are no longer
-fixed: both models choose sl_atr_mult/tp_atr_mult per setup, the two are
-averaged, clamped to a sane band, and rejected unless the resulting
-reward:risk clears MIN_RR. Because lot sizing divides by the actual stop
-distance, a wider AI-chosen stop produces a smaller lot -- the $-risk per
-trade stays pinned to --risk no matter what the models pick, which is what
-makes delegating the stop safe.
+fixed: both models place entry/sl/tp per setup, the two are averaged and
+validated (correct sides, stop inside the 1.5-2.0xATR band the prompt
+asks for, R:R >= 1.5, entry close to the live price). The DISTANCES are
+then applied to the actual fill rather than the AI's stated prices, so
+price moving between decision and fill cannot distort the intended risk
+or reward. Because lot sizing divides by the actual stop distance, a
+wider AI-chosen stop produces a smaller lot -- the $-risk per trade stays
+pinned to --risk no matter what the models pick, which is what makes
+delegating the stop safe.
 
 ** UNVALIDATED STRATEGY -- no historical backtest exists for "AI reads a
 chart and decides long/short/none". Live by explicit user decision,
@@ -77,14 +82,6 @@ SYMBOLS = {
     "ETHUSDC": "ETH",
 }
 
-# [2026-08-12] Lowered 0.70 -> 0.60 at the user's request. Observed live:
-# both models called XAUUSD "long" at 0.62/0.60 on the first real cycle and
-# no trade fired, i.e. 0.70 was binding hard enough that this bot might
-# almost never trade. 0.60 is deliberately paired with the R:R floor below
-# so the loosened confidence gate isn't the ONLY thing standing between a
-# mediocre setup and a live order.
-CONF_MIN = 0.60
-
 TIMEFRAME = "15m"    # [2026-08-12] was 1h, changed at the user's request.
 CHART_BARS = 160     # 160 M15 bars = ~40h of context. On H1 this was 120
                      # bars (~5 days); M15 needs more bars to still show a
@@ -92,24 +89,36 @@ CHART_BARS = 160     # 160 M15 bars = ~40h of context. On H1 this was 120
 POLL_MIN = 15        # one M15 bar -- matches the entry timeframe, same way
                      # the H1 version polled hourly.
 
-# [2026-08-12] SL/TP are now chosen by the AI per-setup rather than fixed
-# at 2.5/15 xATR, at the user's request ("ให้ ai อิสระไม่ตายตัว").
-# Expressed as ATR MULTIPLES, not absolute prices: scale-free, so the same
-# numbers mean the same thing on gold, BTC and ETH, and the model cannot
-# accidentally return a price on the wrong side of the market.
+# [2026-08-12 v2] Reworked to the user's supplied spec. Three changes that
+# matter, beyond the prompt rewrite:
 #
-# Guardrails, because "free" must not mean "unbounded" with real money:
-#   - every multiple is CLAMPED into a sane band (a model returning 0.01 or
-#     500 must not become a live order)
-#   - a minimum reward:risk is enforced; a setup the models themselves
-#     score as worse than MIN_RR is not worth taking
-#   - $-risk per trade is UNAFFECTED by any of this: lot sizing divides by
-#     the actual SL distance, so a wider AI-chosen stop just means a
-#     smaller lot, never a bigger loss. That property is what makes
-#     handing SL choice to the model safe at all.
-SL_ATR_MIN, SL_ATR_MAX = 0.5, 6.0
-TP_ATR_MIN, TP_ATR_MAX = 1.0, 40.0
-MIN_RR = 1.2
+#  1. The models are now given the NUMBERS (close, EMA20, EMA50, ATR,
+#     recent swing high/low, last bars) alongside the chart image, instead
+#     of having to read values off pixels. This is the single biggest
+#     expected quality win: "price is above EMA20" becomes a comparison of
+#     two floats it was handed rather than an eyeball judgement, and the
+#     2-of-3 rule below is checkable rather than impressionistic.
+#  2. They now return ABSOLUTE PRICES (entry/sl/tp), per the spec, rather
+#     than ATR multiples. That is friendlier to state but needs more
+#     validation -- a price is not scale-free, so a hallucinated or stale
+#     number can be nonsense in a way a multiple cannot. See
+#     cross_check_signal() for the side/sanity checks that result.
+#  3. The confidence gate is GONE. The spec replaces it with the explicit
+#     2-of-3 rule plus dual consensus, which is what stops a weak setup
+#     now. Deliberate: the old CONF_MIN was the thing making the bot
+#     almost never trade, and the user asked for it to not be so hard to
+#     enter ("ไม่ออกไม้ยากเกินไป").
+#
+# SL band per the spec (1.5-2.0 x ATR), with a small tolerance either side
+# so a model that lands at 1.45 or 2.1 is accepted rather than throwing the
+# whole setup away; anything outside REJECTS the trade (it is not clamped
+# silently -- an out-of-band stop means the model ignored the brief, and
+# guessing what it meant with real money is worse than skipping).
+SL_ATR_MIN, SL_ATR_MAX = 1.2, 2.5
+MIN_RR = 1.5          # spec: TP must be at least 1:1.5 reward:risk
+# The AI's stated entry must sit within this many ATR of the real current
+# price, or the quote is stale/hallucinated and the setup is rejected.
+MAX_ENTRY_DRIFT_ATR = 1.5
 
 DEFAULT_RISK_PCT = 0.30
 MAX_CONSEC_LOSSES = 3
@@ -137,75 +146,132 @@ AI_CALL_TIMEOUT_SEC = 60
 CHART_SIGNAL_SCHEMA = {
     "type": "object",
     "properties": {
-        "signal": {"type": "string"},   # "long" | "short" | "none"
-        "confidence": {"type": "number"},
-        "sl_atr_mult": {"type": "number"},
-        "tp_atr_mult": {"type": "number"},
-        "reasoning": {"type": "string"},
+        "decision": {"type": "string"},   # "LONG" | "SHORT" | "WAIT"
+        "entry": {"type": "number"},
+        "sl": {"type": "number"},
+        "tp": {"type": "number"},
+        "reason": {"type": "string"},
     },
-    "required": ["signal", "confidence", "sl_atr_mult", "tp_atr_mult", "reasoning"],
+    "required": ["decision", "entry", "sl", "tp", "reason"],
 }
 
-ENTRY_PROMPT_TEMPLATE = """You are a discretionary technical trader looking \
-at an M15 (15-minute) candlestick chart of {symbol}, covering roughly the \
-last {bars} bars. Current price: {price}. The current ATR(14) on this \
-timeframe is {atr} -- use it as your unit of "normal move size". EMA20 \
-(blue) and EMA50 (orange) are shown when there is enough history.
+ENTRY_PROMPT_TEMPLATE = """You are an AI trading-chart analysis system. \
+Below is the latest market data for {symbol} on the M15 (15-minute) \
+timeframe, plus a candlestick chart of the same data.
 
-Decide: is there a clear, high-quality LONG or SHORT setup visible RIGHT \
-NOW on this chart -- or is there nothing worth trading?
+{payload}
 
-Most cycles should be "none". Only call a direction when the setup is \
-genuinely clean: a well-defined trend with a good entry point (e.g. a \
-pullback to a moving average in an established trend, a clear breakout \
-with follow-through, a clean reversal pattern at an obvious level) -- not \
-just any price movement. Do not force a call because you were asked a \
-question; a real discretionary trader passes on most setups. Being \
-undecided means "none".
+ANALYSIS RULES -- score the setup against these three:
+  1. CLEAR TREND: price is above BOTH EMAs (bullish) or below BOTH \
+(bearish).
+  2. PRICE ACTION: price has pulled back into the EMA zone, or is \
+breaking out of the recent range.
+  3. MOMENTUM: a reversal/continuation candle or volume supports the \
+direction.
 
-If (and only if) you do call a direction, also choose where the stop-loss \
-and take-profit belong FOR THIS SPECIFIC SETUP, expressed as multiples of \
-ATR:
+DECISION:
+  * If AT LEAST 2 of the 3 rules are met, decide "LONG" or "SHORT".
+  * If the market is too choppy, the signals conflict, or fewer than 2 \
+rules are met, decide "WAIT".
 
-sl_atr_mult: distance from current price to your stop, in ATRs. Put it \
-where the setup would be genuinely invalidated -- beyond the swing \
-high/low or structure level that would prove you wrong -- not at an \
-arbitrary round number. Typical range {sl_min}-{sl_max}.
-tp_atr_mult: distance from current price to your target, in ATRs. Put it \
-at the next real structure/resistance/support the move can realistically \
-reach. Typical range {tp_min}-{tp_max}.
+LEVELS (only meaningful when the decision is LONG or SHORT):
+  * entry: the current price, {price}.
+  * sl: stop loss placed 1.5 to 2.0 x ATR away from entry. ATR is {atr}, \
+so the stop distance must be between {sl_lo} and {sl_hi}. For LONG the \
+stop goes BELOW entry; for SHORT it goes ABOVE.
+  * tp: take profit giving a reward:risk of AT LEAST 1:{min_rr} -- i.e. \
+the distance from entry to tp must be at least {min_rr} times the \
+distance from entry to sl. For LONG the target is ABOVE entry; for \
+SHORT it is BELOW.
+  * reason: one or two sentences naming WHICH of the three rules were \
+met and where you put the stop and target.
 
-Your target must be worth the risk: tp_atr_mult should be at least \
-{min_rr}x sl_atr_mult. If the only sensible stop for this setup is so wide \
-that the realistic target is not worth it, the honest answer is "none".
-
-If signal is "none", still return numbers for sl_atr_mult and tp_atr_mult \
-(they will be ignored) -- for example 1 and 2.
-
-signal: "long", "short", or "none".
-confidence: 0.0-1.0, your genuine calibrated confidence in this specific \
-setup -- most real setups should score well under 0.8; reserve high \
-confidence for a genuinely clean, textbook setup.
-reasoning: one to two sentences on what you see, and where you placed the \
-stop and target and why.
+If the decision is "WAIT", still return numeric entry/sl/tp (they are \
+ignored) -- for example entry {price} and any two nearby values.
 
 Respond ONLY via the provided JSON schema."""
 
 
-def _fmt_prompt(symbol: str, bars: int, price: float, atr: float) -> str:
+def _ema(values: list, span: int) -> float:
+    k = 2.0 / (span + 1.0)
+    prev = values[0]
+    for v in values:
+        prev = v * k + prev * (1 - k)
+    return prev
+
+
+def build_market_payload(candles: list, atr: float) -> dict:
+    """The numeric context the models get alongside the chart image.
+
+    This is the spec's key idea: hand the model the actual figures rather
+    than making it read them off pixels, so "price is above EMA20" is a
+    float comparison instead of an eyeball judgement. Pure function of the
+    candle list -- unit-testable, no MT5 needed.
+
+    candles: MT5 fetch_ohlcv format [[ts_ms, o, h, l, c, v], ...] ascending.
+    """
+    closes = [float(c[4]) for c in candles]
+    highs = [float(c[2]) for c in candles]
+    lows = [float(c[3]) for c in candles]
+    price = closes[-1]
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    look = min(20, len(candles))          # recent swing window
+    recent_high = max(highs[-look:])
+    recent_low = min(lows[-look:])
+    # last few bars verbatim, so the momentum rule has something concrete
+    tail = []
+    for c in candles[-5:]:
+        o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+        v = float(c[5]) if len(c) > 5 else 0.0
+        tail.append({"o": o, "h": h, "l": l, "c": cl, "v": v})
+    return {
+        "price": price, "ema20": ema20, "ema50": ema50, "atr": atr,
+        "recent_high": recent_high, "recent_low": recent_low,
+        "bars": len(candles), "tail": tail,
+    }
+
+
+def format_payload(symbol: str, p: dict) -> str:
+    """Render the payload as the compact text block the spec describes."""
+    price, ema20, ema50 = p["price"], p["ema20"], p["ema50"]
+    trend = ("above BOTH EMAs (bullish structure)" if price > ema20 and price > ema50
+             else "below BOTH EMAs (bearish structure)" if price < ema20 and price < ema50
+             else "BETWEEN the EMAs (no clear trend)")
+    lines = [
+        f"Current Data ({symbol}, M15, {p['bars']} bars):",
+        f"  Close={price:.2f}  EMA20={ema20:.2f}  EMA50={ema50:.2f}  ATR={p['atr']:.2f}",
+        f"  Recent High={p['recent_high']:.2f}  Recent Low={p['recent_low']:.2f}",
+        f"  Position vs EMAs: price is {trend}.",
+        f"  Distance to EMA20 = {price - ema20:+.2f} "
+        f"({(price - ema20) / p['atr']:+.2f} ATR), "
+        f"to EMA50 = {price - ema50:+.2f} "
+        f"({(price - ema50) / p['atr']:+.2f} ATR)",
+        "  Last 5 bars (oldest first) O/H/L/C/V:",
+    ]
+    for b in p["tail"]:
+        lines.append(f"    {b['o']:.2f} / {b['h']:.2f} / {b['l']:.2f} / "
+                     f"{b['c']:.2f} / {b['v']:.0f}")
+    return "\n".join(lines)
+
+
+def _fmt_prompt(symbol: str, bars: int, price: float, atr: float,
+                payload_text: str) -> str:
     return ENTRY_PROMPT_TEMPLATE.format(
         symbol=symbol, bars=bars, price=f"{price:.2f}", atr=f"{atr:.2f}",
-        sl_min=SL_ATR_MIN, sl_max=SL_ATR_MAX,
-        tp_min=TP_ATR_MIN, tp_max=TP_ATR_MAX, min_rr=MIN_RR)
+        payload=payload_text,
+        sl_lo=f"{SL_ATR_MIN * atr:.2f}", sl_hi=f"{SL_ATR_MAX * atr:.2f}",
+        min_rr=MIN_RR)
 
 
 def gemini_chart_signal(api_key: str, model: str, png: bytes, symbol: str,
-                        price: float, bars: int, atr: float) -> dict:
+                        price: float, bars: int, atr: float,
+                        payload_text: str = "") -> dict:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
-    prompt = _fmt_prompt(symbol, bars, price, atr)
+    prompt = _fmt_prompt(symbol, bars, price, atr, payload_text)
     resp = client.models.generate_content(
         model=model,
         contents=[types.Part.from_bytes(data=png, mime_type="image/png"), prompt],
@@ -218,7 +284,8 @@ def gemini_chart_signal(api_key: str, model: str, png: bytes, symbol: str,
 
 
 def openai_chart_signal(api_key: str, model: str, png: bytes, symbol: str,
-                        price: float, bars: int, atr: float) -> dict:
+                        price: float, bars: int, atr: float,
+                        payload_text: str = "") -> dict:
     import base64
     from openai import OpenAI
     # reuse the strict-schema converter already built and tested for
@@ -227,7 +294,7 @@ def openai_chart_signal(api_key: str, model: str, png: bytes, symbol: str,
     from news_gemini_bot import _openai_strict_schema
 
     client = OpenAI(api_key=api_key)
-    prompt = _fmt_prompt(symbol, bars, price, atr)
+    prompt = _fmt_prompt(symbol, bars, price, atr, payload_text)
     b64 = base64.b64encode(png).decode()
     resp = client.responses.create(
         model=model,
@@ -245,60 +312,83 @@ def openai_chart_signal(api_key: str, model: str, png: bytes, symbol: str,
     return json.loads(resp.output_text)
 
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, v))
+def cross_check_signal(gemini_result: dict, openai_result: dict,
+                       price: float, atr: float) -> Optional[dict]:
+    """Consensus + validation. Pure function -- no API, no MT5 -- so every
+    path between an AI opinion and a live order is cheaply testable.
 
+    Per the user's spec: trade only when BOTH models return the same
+    LONG/SHORT decision, then average their entry/sl/tp. Returns None on
+    any disagreement, any WAIT, or any validation failure.
 
-def cross_check_signal(gemini_result: dict, openai_result: dict) -> Optional[dict]:
-    """Returns a merged decision dict only if both providers independently
-    agree on the same non-none direction, each individually clearing
-    CONF_MIN -- pure function, testable without any API calls. Returns
-    None on any disagreement, any "none", or either confidence too low.
+    Absolute prices need more checking than the ATR multiples they
+    replaced, because a price is not scale-free -- a stale or hallucinated
+    number can be plausible-looking nonsense. Validated, in order:
+      - both decisions are LONG or SHORT and identical
+      - all three levels are finite and positive
+      - sl/tp are on the CORRECT SIDES of entry for the direction (a
+        LONG whose stop sits above entry is not a typo to fix, it is a
+        model that lost the plot)
+      - the averaged entry is within MAX_ENTRY_DRIFT_ATR of the real
+        current price (catches a stale quote or a fabricated level)
+      - the stop distance falls in the SL_ATR_MIN..MAX band the prompt
+        asked for -- rejected, not clamped: silently "fixing" an
+        out-of-band stop would trade a setup the model never proposed
+      - reward:risk clears MIN_RR
 
-    [2026-08-12] Also merges the two models' AI-chosen SL/TP multiples:
-    each is averaged (both models agreed on direction, so averaging their
-    structure read is the natural consensus), then CLAMPED into the
-    configured band, then the resulting reward:risk is checked against
-    MIN_RR. A non-finite or non-positive multiple from either model is
-    treated as a malformed response and rejects the trade rather than
-    being silently coerced -- a bad stop distance is the one input that
-    directly scales a live loss."""
-    g_sig = gemini_result.get("signal", "none")
-    o_sig = openai_result.get("signal", "none")
-    g_conf = float(gemini_result.get("confidence", 0) or 0)
-    o_conf = float(openai_result.get("confidence", 0) or 0)
-    if g_sig not in ("long", "short") or o_sig not in ("long", "short"):
+    Returns distances as well as prices. The caller applies the DISTANCES
+    to the real fill, which is what keeps the intended risk/reward intact
+    if price moves between the decision and the fill.
+    """
+    g_dec = str(gemini_result.get("decision", "")).strip().upper()
+    o_dec = str(openai_result.get("decision", "")).strip().upper()
+    if g_dec not in ("LONG", "SHORT") or o_dec not in ("LONG", "SHORT"):
         return None
-    if g_sig != o_sig:
-        return None
-    if g_conf < CONF_MIN or o_conf < CONF_MIN:
+    if g_dec != o_dec:
         return None
 
     try:
-        g_sl = float(gemini_result.get("sl_atr_mult"))
-        o_sl = float(openai_result.get("sl_atr_mult"))
-        g_tp = float(gemini_result.get("tp_atr_mult"))
-        o_tp = float(openai_result.get("tp_atr_mult"))
-    except (TypeError, ValueError):
+        vals = [float(r[k]) for r in (gemini_result, openai_result)
+                for k in ("entry", "sl", "tp")]
+    except (TypeError, ValueError, KeyError):
         return None
-    vals = (g_sl, o_sl, g_tp, o_tp)
     if any((not math.isfinite(v)) or v <= 0 for v in vals):
         return None
+    if not math.isfinite(atr) or atr <= 0:
+        return None
 
-    sl_mult = _clamp((g_sl + o_sl) / 2.0, SL_ATR_MIN, SL_ATR_MAX)
-    tp_mult = _clamp((g_tp + o_tp) / 2.0, TP_ATR_MIN, TP_ATR_MAX)
-    rr = tp_mult / sl_mult
+    entry = (float(gemini_result["entry"]) + float(openai_result["entry"])) / 2.0
+    sl = (float(gemini_result["sl"]) + float(openai_result["sl"])) / 2.0
+    tp = (float(gemini_result["tp"]) + float(openai_result["tp"])) / 2.0
+
+    long_ = g_dec == "LONG"
+    if long_ and not (sl < entry < tp):
+        return None
+    if (not long_) and not (tp < entry < sl):
+        return None
+
+    if abs(entry - price) > MAX_ENTRY_DRIFT_ATR * atr:
+        return None
+
+    sl_dist = abs(entry - sl)
+    tp_dist = abs(tp - entry)
+    if sl_dist <= 0 or tp_dist <= 0:
+        return None
+    sl_mult = sl_dist / atr
+    if not (SL_ATR_MIN <= sl_mult <= SL_ATR_MAX):
+        return None
+    rr = tp_dist / sl_dist
     if rr < MIN_RR:
         return None
 
     return {
-        "signal": g_sig,
-        "confidence": min(g_conf, o_conf),
-        "sl_atr_mult": sl_mult,
-        "tp_atr_mult": tp_mult,
-        "rr": rr,
-        "gemini_reasoning": gemini_result.get("reasoning", ""),
-        "openai_reasoning": openai_result.get("reasoning", ""),
+        "signal": "long" if long_ else "short",
+        "decision": g_dec,
+        "entry": entry, "sl": sl, "tp": tp,
+        "sl_dist": sl_dist, "tp_dist": tp_dist,
+        "sl_atr_mult": sl_mult, "rr": rr,
+        "gemini_reasoning": str(gemini_result.get("reason", "")),
+        "openai_reasoning": str(openai_result.get("reason", "")),
     }
 
 
@@ -489,7 +579,7 @@ class ChartAITraderBot:
 
     def _safe_signal(self, name: str, fn, api_key: str, model: str,
                      png: bytes, symbol: str, price: float, bars: int,
-                     atr: float) -> Optional[dict]:
+                     atr: float, payload_text: str) -> Optional[dict]:
         # [2026-08-12 FIX] These were bare calls with NO timeout. Observed
         # live: the bot sat inside one for 7+ minutes with zero log output,
         # its heartbeat frozen the whole time. The google-genai / openai
@@ -503,7 +593,7 @@ class ChartAITraderBot:
         try:
             return self._call_with_timeout(
                 fn, AI_CALL_TIMEOUT_SEC, api_key, model, png, symbol,
-                price, bars, atr)
+                price, bars, atr, payload_text)
         except Exception as e:
             self.log.warning(f"[{name.upper()}] chart-signal call failed -- "
                              f"skip this symbol this cycle: {str(e)[:200]}")
@@ -547,6 +637,9 @@ class ChartAITraderBot:
             self.log.warning(f"[{canon}] invalid ATR -- skip (no API call made)")
             return
 
+        payload = build_market_payload(candles, atr)
+        payload_text = format_payload(canon, payload)
+
         sys.path.insert(0, _BASE_DIR)
         from news_gemini_bot import render_chart_png
         try:
@@ -557,7 +650,8 @@ class ChartAITraderBot:
 
         gemini_result = self._safe_signal("gemini", gemini_chart_signal,
                                           self.gemini_key, self.gemini_model,
-                                          png, canon, price, len(candles), atr)
+                                          png, canon, price, len(candles), atr,
+                                          payload_text)
         if gemini_result is None:
             return
         if not self.openai_key:
@@ -566,21 +660,27 @@ class ChartAITraderBot:
             return
         openai_result = self._safe_signal("openai", openai_chart_signal,
                                           self.openai_key, self.openai_model,
-                                          png, canon, price, len(candles), atr)
+                                          png, canon, price, len(candles), atr,
+                                          payload_text)
         if openai_result is None:
             return
 
-        self.log.info(f"[{canon}] gemini={gemini_result.get('signal')}/"
-                      f"{gemini_result.get('confidence')}  "
-                      f"openai={openai_result.get('signal')}/"
-                      f"{openai_result.get('confidence')}")
-        decision = cross_check_signal(gemini_result, openai_result)
+        self.log.info(
+            f"[{canon}] gemini={gemini_result.get('decision')} "
+            f"(e={gemini_result.get('entry')} sl={gemini_result.get('sl')} "
+            f"tp={gemini_result.get('tp')})  "
+            f"openai={openai_result.get('decision')} "
+            f"(e={openai_result.get('entry')} sl={openai_result.get('sl')} "
+            f"tp={openai_result.get('tp')})")
+        decision = cross_check_signal(gemini_result, openai_result, price, atr)
         if decision is None:
-            self.log.info(f"[{canon}] no consensus this cycle")
+            self.log.info(f"[{canon}] no consensus / failed validation this cycle")
             return
 
-        self.log.info(f"[{canon}] CONSENSUS {decision['signal']} "
-                      f"conf={decision['confidence']:.2f}")
+        self.log.info(f"[{canon}] CONSENSUS {decision['decision']} "
+                      f"entry={decision['entry']:.2f} sl={decision['sl']:.2f} "
+                      f"tp={decision['tp']:.2f} "
+                      f"(sl={decision['sl_atr_mult']:.2f}xATR, R:R {decision['rr']:.2f})")
         self._enter(canon, bsym, decision)
 
     def _enter(self, canon: str, bsym: str, decision: dict) -> bool:
@@ -597,14 +697,14 @@ class ChartAITraderBot:
             return False
         long_ = signal == "long"
         px = ask if long_ else bid
-        # AI-chosen distances (already averaged, clamped and RR-checked in
-        # cross_check_signal). Fall back to the old fixed shape only if a
-        # caller somehow passes a decision without them.
-        sl_mult = float(decision.get("sl_atr_mult") or 2.5)
-        tp_mult = float(decision.get("tp_atr_mult") or 15.0)
-        sd = sl_mult * atr
+        # Apply the AI's DISTANCES to the real execution price, not its
+        # stated absolute levels. Price can move between the decision and
+        # the fill; anchoring to the fill preserves the intended stop
+        # distance (and therefore the risk sizing below) and the intended
+        # reward:risk, instead of silently widening or tightening both.
+        sd = float(decision["sl_dist"])
+        td = float(decision["tp_dist"])
         sl = px - sd if long_ else px + sd
-        td = tp_mult * atr
         tp = px + td if long_ else px - td
 
         pip_size = self.cfg.get_pip_size(bsym)
@@ -648,9 +748,8 @@ class ChartAITraderBot:
         self._telegram(
             f"\U0001F7E2 CHART-AI ENTRY {side.upper()} {bsym}\n"
             f"lot={lot}  fill={fill:.2f}  SL={sl:.2f} TP={tp:.2f}\n"
-            f"AI-chosen: SL {sl_mult:.2f}xATR / TP {tp_mult:.2f}xATR "
-            f"(R:R {decision.get('rr', tp_mult / sl_mult):.2f})\n"
-            f"conf={decision['confidence']:.2f}\n"
+            f"AI-chosen: SL {decision['sl_atr_mult']:.2f}xATR  "
+            f"R:R {decision['rr']:.2f}\n"
             f"gemini: {decision['gemini_reasoning'][:250]}\n"
             f"openai: {decision['openai_reasoning'][:250]}")
         return True
@@ -680,10 +779,11 @@ class ChartAITraderBot:
                       f"account={acct_tag}  symbols={self.symbols}")
         self.log.info(f"  equity={eq:.2f}  risk/trade={self.risk_pct}%  "
                       f"poll={self.poll_min}min  timeframe={TIMEFRAME}  "
-                      f"conf_min={CONF_MIN}")
-        self.log.info(f"  SL/TP: chosen per-setup by the AI, clamped to "
-                      f"SL {SL_ATR_MIN}-{SL_ATR_MAX}xATR / TP {TP_ATR_MIN}-"
-                      f"{TP_ATR_MAX}xATR, minimum R:R {MIN_RR}")
+                      f"rule=2-of-3")
+        self.log.info(f"  SL/TP: chosen per-setup by the AI as absolute "
+                      f"prices; stop must land in {SL_ATR_MIN}-{SL_ATR_MAX}"
+                      f"xATR and R:R >= {MIN_RR}, else the setup is REJECTED "
+                      f"(entry drift limit {MAX_ENTRY_DRIFT_ATR}xATR)")
         self.log.info(f"  stacking: up to {self.max_per_symbol}/symbol, "
                       f"{self.max_total} total -> worst-case simultaneous "
                       f"risk {self.max_total * self.risk_pct:.2f}% of equity "

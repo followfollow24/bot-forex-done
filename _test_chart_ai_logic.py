@@ -9,125 +9,127 @@ os.environ.pop("TELEGRAM_BOT_TOKEN", None)
 os.environ.pop("TELEGRAM_CHAT_ID", None)
 import chart_ai_trader as cat
 
-X = cat.cross_check_signal
+# ---------------------------------------------------------------- #
+# [2026-08-12 v2] New contract per the user's spec: models return
+# decision=LONG/SHORT/WAIT with ABSOLUTE entry/sl/tp, no confidence.
+# ---------------------------------------------------------------- #
+PRICE, ATR = 4400.0, 6.0        # stop band = 1.2..2.5 xATR = 7.2..15.0
 
+def R(dec, entry=PRICE, sl=None, tp=None, reason=""):
+    """Well-formed response. Defaults: stop 10.0 (1.67xATR, in band),
+    target 20.0 (R:R 2.0, over the 1.5 floor)."""
+    if dec == "LONG":
+        sl = PRICE - 10.0 if sl is None else sl
+        tp = PRICE + 20.0 if tp is None else tp
+    else:
+        sl = PRICE + 10.0 if sl is None else sl
+        tp = PRICE - 20.0 if tp is None else tp
+    return {"decision": dec, "entry": entry, "sl": sl, "tp": tp, "reason": reason}
 
-def R(sig, conf, sl=2.0, tp=6.0, reasoning=""):
-    """A well-formed model response. Defaults give RR 3.0, comfortably
-    over MIN_RR, so tests that aren't about SL/TP aren't accidentally
-    rejected by the R:R floor."""
-    return {"signal": sig, "confidence": conf, "sl_atr_mult": sl,
-            "tp_atr_mult": tp, "reasoning": reasoning}
+def X(g, o, price=PRICE, atr=ATR):
+    return cat.cross_check_signal(g, o, price, atr)
 
-
-print("=== Case 1: both agree LONG, both above CONF_MIN -> trade ===")
-d = X(R("long", 0.85, reasoning="g"), R("long", 0.75, reasoning="o"))
+print("=== Case 1: both LONG -> trade, levels AVERAGED ===")
+d = X(R("LONG", sl=PRICE-10, tp=PRICE+20, reason="g"),
+      R("LONG", sl=PRICE-12, tp=PRICE+24, reason="o"))
 assert d is not None
-assert d["signal"] == "long"
-assert d["confidence"] == 0.75, "merged confidence must be the MINIMUM (weakest link)"
+assert d["signal"] == "long" and d["decision"] == "LONG"
+assert abs(d["sl"] - (PRICE - 11.0)) < 1e-9, d["sl"]
+assert abs(d["tp"] - (PRICE + 22.0)) < 1e-9, d["tp"]
+assert abs(d["sl_dist"] - 11.0) < 1e-9 and abs(d["tp_dist"] - 22.0) < 1e-9
 assert d["gemini_reasoning"] == "g" and d["openai_reasoning"] == "o"
-print("PASS", d, "\n")
+print("PASS sl=%.2f tp=%.2f rr=%.2f\n" % (d["sl"], d["tp"], d["rr"]))
 
-print("=== Case 2: both agree SHORT -> trade ===")
-d = X(R("short", 0.9), R("short", 0.95))
+print("=== Case 2: both SHORT -> trade ===")
+d = X(R("SHORT"), R("SHORT"))
 assert d is not None and d["signal"] == "short"
 print("PASS\n")
 
-print("=== Case 3: DISAGREE (long vs short) -> no trade ===")
-assert X(R("long", 0.99), R("short", 0.99)) is None
+print("=== Case 3: WAIT from either side -> no trade ===")
+assert X(R("LONG"), R("WAIT")) is None
+assert X(R("WAIT"), R("LONG")) is None
+assert X(R("WAIT"), R("WAIT")) is None
 print("PASS\n")
 
-print("=== Case 4: one says none -> no trade (even if other is very confident) ===")
-assert X(R("long", 0.99), R("none", 0.99)) is None
-assert X(R("none", 0.99), R("long", 0.99)) is None
+print("=== Case 4: opposite directions -> no trade ===")
+assert X(R("LONG"), R("SHORT")) is None
 print("PASS\n")
 
-print("=== Case 5: agree but ONE below CONF_MIN -> no trade ===")
-assert X(R("long", 0.95), R("long", cat.CONF_MIN - 0.01)) is None
-assert X(R("long", cat.CONF_MIN - 0.01), R("long", 0.95)) is None
+print("=== Case 5: case/whitespace tolerated (models are chatty) ===")
+g = R("LONG"); g["decision"] = " long "
+assert X(g, R("LONG")) is not None, "must accept ' long ' as LONG"
 print("PASS\n")
 
-print("=== Case 6: exactly at CONF_MIN boundary -> trades (>= not >) ===")
-assert X(R("long", cat.CONF_MIN), R("long", cat.CONF_MIN)) is not None
+print("=== Case 6: SL/TP on the WRONG SIDE of entry -> reject ===")
+assert X(R("LONG", sl=PRICE+10, tp=PRICE+20), R("LONG")) is None, "LONG stop above entry"
+assert X(R("LONG", sl=PRICE-10, tp=PRICE-20), R("LONG")) is None, "LONG target below entry"
+assert X(R("SHORT", sl=PRICE-10, tp=PRICE-20), R("SHORT")) is None, "SHORT stop below entry"
+assert X(R("SHORT", sl=PRICE+10, tp=PRICE+20), R("SHORT")) is None, "SHORT target above entry"
+print("PASS -- a level on the wrong side is rejected, never auto-corrected\n")
+
+print("=== Case 7: stop outside the 1.2-2.5xATR band -> reject (not clamped) ===")
+assert X(R("LONG", sl=PRICE-2.0, tp=PRICE+20), R("LONG", sl=PRICE-2.0, tp=PRICE+20)) is None, \
+    "0.33xATR stop far too tight"
+assert X(R("LONG", sl=PRICE-60.0, tp=PRICE+200), R("LONG", sl=PRICE-60.0, tp=PRICE+200)) is None, \
+    "10xATR stop far too wide"
+ok = X(R("LONG", sl=PRICE-9.0, tp=PRICE+20), R("LONG", sl=PRICE-9.0, tp=PRICE+20))
+assert ok is not None and 1.2 <= ok["sl_atr_mult"] <= 2.5
+print("PASS -- in-band %.2fxATR accepted, out-of-band rejected outright\n" % ok["sl_atr_mult"])
+
+print("=== Case 8: reward:risk below 1.5 -> reject ===")
+assert X(R("LONG", sl=PRICE-10, tp=PRICE+14), R("LONG", sl=PRICE-10, tp=PRICE+14)) is None, "R:R 1.4"
+assert X(R("LONG", sl=PRICE-10, tp=PRICE+15), R("LONG", sl=PRICE-10, tp=PRICE+15)) is not None, "R:R 1.5"
 print("PASS\n")
 
-print("=== Case 7: malformed/missing fields -> no trade, no crash ===")
-assert X({}, {}) is None
-assert X({"signal": "long"}, {"signal": "long"}) is None
-assert X({"signal": "long", "confidence": None}, {"signal": "long", "confidence": None}) is None
-assert X(R("LONG", 0.9), R("LONG", 0.9)) is None, \
-    "signal is case-sensitive by design; uppercase must not silently trade"
-print("PASS\n")
+print("=== Case 9: entry far from the live price (stale/hallucinated) -> reject ===")
+drift = cat.MAX_ENTRY_DRIFT_ATR * ATR
+bad = PRICE + drift + 1.0
+assert X(R("LONG", entry=bad, sl=bad-10, tp=bad+20),
+         R("LONG", entry=bad, sl=bad-10, tp=bad+20)) is None, \
+    "entry %.1f is beyond %.1f of live price %.1f" % (bad, drift, PRICE)
+near = PRICE + drift - 1.0
+assert X(R("LONG", entry=near, sl=near-10, tp=near+20),
+         R("LONG", entry=near, sl=near-10, tp=near+20)) is not None
+print("PASS -- drift limit %.1f (%.1fxATR) enforced\n" % (drift, cat.MAX_ENTRY_DRIFT_ATR))
 
-print("=== Case 8: garbage signal strings -> no trade ===")
-assert X(R("buy", 0.9), R("buy", 0.9)) is None
-assert X(R("", 0.9), R("", 0.9)) is None
-print("PASS\n")
+print("=== Case 10: malformed / missing / non-numeric levels -> reject ===")
+for bad_r in ({"decision": "LONG"},
+              {"decision": "LONG", "entry": PRICE, "sl": None, "tp": PRICE+20},
+              R("LONG", sl=float("nan")),
+              R("LONG", sl=float("inf")),
+              R("LONG", sl=-5.0),
+              R("LONG", sl=0.0),
+              {"decision": "LONG", "entry": PRICE, "sl": "low", "tp": PRICE+20}):
+    assert X(bad_r, R("LONG")) is None, "must reject %r" % (bad_r,)
+    assert X(R("LONG"), bad_r) is None, "must reject (other side) %r" % (bad_r,)
+assert X(R("LONG"), R("LONG"), atr=0) is None, "zero ATR must reject"
+print("PASS -- a bad level can never reach a live order\n")
 
-print("=== Case 9: config sanity -- magic/risk are what was agreed ===")
-assert cat.MAGIC == 671001, "magic must not collide with 555/666/667/668/669 families"
-assert cat.DEFAULT_RISK_PCT == 0.30, "user chose the technical-bot tier"
-assert set(cat.SYMBOLS) == {"XAUUSD", "BTCUSDC", "ETHUSDC"}
-print("PASS\n")
+print("=== Case 11: averaging can itself break a rule -> still rejected ===")
+# each side individually fine, but the AVERAGE lands under the R:R floor
+g = R("LONG", sl=PRICE-10, tp=PRICE+16)   # rr 1.60 ok
+o = R("LONG", sl=PRICE-14, tp=PRICE+20)   # rr 1.43 -- fails on its own
+d = X(g, o)                                # avg: sl 12, tp 18 -> rr 1.50
+assert d is not None and abs(d["rr"] - 1.5) < 1e-9, d
+g2 = R("LONG", sl=PRICE-10, tp=PRICE+16)
+o2 = R("LONG", sl=PRICE-14, tp=PRICE+18)  # avg rr = 17/12 = 1.417 -> reject
+assert X(g2, o2) is None, "averaged R:R below the floor must reject"
+print("PASS -- validation runs on the AVERAGE, not on either input alone\n")
 
-# ===================================================================
-# [2026-08-12] AI-chosen SL/TP guardrails + M15 + lowered CONF_MIN
-# ===================================================================
-print("=== Case 10: config reflects the requested changes ===")
-assert cat.CONF_MIN == 0.60, "user asked for 0.60"
-assert cat.TIMEFRAME == "15m", "user asked for M15"
-assert cat.POLL_MIN == 15, "poll should match the M15 bar"
-print("PASS conf_min=%s tf=%s poll=%s\n" % (cat.CONF_MIN, cat.TIMEFRAME, cat.POLL_MIN))
-
-print("=== Case 11: 0.60 now trades where 0.70 previously blocked ===")
-d = X(R("long", 0.62), R("long", 0.60))
-assert d is not None, "the exact live case (0.62/0.60) must now trade"
-assert d["confidence"] == 0.60
-print("PASS -- the real observed 0.62/0.60 XAUUSD case now passes\n")
-
-print("=== Case 12: AI SL/TP are averaged, not taken from one model ===")
-d = X(R("long", 0.8, sl=2.0, tp=6.0), R("long", 0.8, sl=3.0, tp=9.0))
-assert abs(d["sl_atr_mult"] - 2.5) < 1e-9, d["sl_atr_mult"]
-assert abs(d["tp_atr_mult"] - 7.5) < 1e-9, d["tp_atr_mult"]
-assert abs(d["rr"] - 3.0) < 1e-9
-print("PASS sl=%.2f tp=%.2f rr=%.2f\n" % (d["sl_atr_mult"], d["tp_atr_mult"], d["rr"]))
-
-print("=== Case 13: absurd multiples are CLAMPED, never passed through ===")
-d = X(R("long", 0.9, sl=500.0, tp=9999.0), R("long", 0.9, sl=500.0, tp=9999.0))
-assert d["sl_atr_mult"] == cat.SL_ATR_MAX, "a 500xATR stop must clamp"
-assert d["tp_atr_mult"] == cat.TP_ATR_MAX
-d2 = X(R("long", 0.9, sl=0.0001, tp=0.001), R("long", 0.9, sl=0.0001, tp=0.001))
-assert d2 is None or d2["sl_atr_mult"] >= cat.SL_ATR_MIN
-print("PASS clamped to sl=%.2f tp=%.2f\n" % (d["sl_atr_mult"], d["tp_atr_mult"]))
-
-print("=== Case 14: poor reward:risk is REJECTED even with high confidence ===")
-assert X(R("long", 0.99, sl=4.0, tp=4.4), R("long", 0.99, sl=4.0, tp=4.4)) is None, \
-    "RR 1.1 < MIN_RR 1.2 must reject"
-assert X(R("long", 0.99, sl=4.0, tp=5.0), R("long", 0.99, sl=4.0, tp=5.0)) is not None, \
-    "RR 1.25 >= MIN_RR must pass"
-print("PASS\n")
-
-print("=== Case 15: malformed/missing/negative SL-TP -> reject, never coerce ===")
-for bad in ({"signal": "long", "confidence": 0.9},
-            R("long", 0.9, sl=-2.0),
-            R("long", 0.9, sl=0.0),
-            R("long", 0.9, sl=float("nan")),
-            R("long", 0.9, sl=float("inf")),
-            R("long", 0.9, sl="wide")):
-    assert X(bad, R("long", 0.9)) is None, "must reject: %r" % (bad,)
-    assert X(R("long", 0.9), bad) is None, "must reject (other side): %r" % (bad,)
-print("PASS -- a bad stop distance can never reach a live order\n")
-
-print("=== Case 16: $-risk is invariant to the AI's stop width ===")
-eq, risk_pct, atr, pip_size, pip_value = 16000.0, 0.30, 5.0, 1.0, 0.01
-for mult in (0.5, 2.0, 6.0):
-    sd = mult * atr
-    lot = round((eq * risk_pct / 100.0) / ((sd / pip_size) * pip_value), 2)
-    realized = (sd / pip_size) * pip_value * lot / eq * 100.0
-    assert realized <= risk_pct * 1.5, "mult %s -> %.3f%%" % (mult, realized)
-    print("  sl=%.1fxATR -> lot=%.2f -> realized risk %.3f%% (intended %.2f%%)"
-          % (mult, lot, realized, risk_pct))
-print("PASS -- wider AI stop just means smaller lot, not a bigger loss\n")
+print("=== Case 12: build_market_payload computes the numbers it hands over ===")
+bars = [[0, 100 + i, 101 + i, 99 + i, 100.5 + i, 10 + i] for i in range(60)]
+pl = cat.build_market_payload(bars, atr=2.0)
+assert pl["price"] == 159.5, pl["price"]
+assert pl["recent_high"] == max(101 + i for i in range(40, 60))
+assert pl["recent_low"] == min(99 + i for i in range(40, 60))
+assert pl["bars"] == 60 and len(pl["tail"]) == 5
+assert pl["ema20"] < pl["price"] and pl["ema50"] < pl["ema20"], \
+    "in a clean uptrend price > EMA20 > EMA50"
+txt = cat.format_payload("XAUUSD", pl)
+for must in ("Close=", "EMA20=", "EMA50=", "ATR=", "Recent High=", "Last 5 bars"):
+    assert must in txt, "payload text missing %r" % must
+assert "above BOTH EMAs" in txt
+print("PASS -- payload text:\n" + "\n".join("    " + l for l in txt.splitlines()[:4]) + "\n")
 
 print("=== Case 17: CALL-PATH ARITY -- the wiring, not just the pure logic ===")
 # Regression test for a real bug that reached production: when the `atr`
@@ -142,11 +144,12 @@ print("=== Case 17: CALL-PATH ARITY -- the wiring, not just the pure logic ===")
 import inspect
 
 captured = {}
-def fake_provider(api_key, model, png, symbol, price, bars, atr):
+def fake_provider(api_key, model, png, symbol, price, bars, atr, payload_text):
     captured.update(dict(api_key=api_key, model=model, png=png, symbol=symbol,
-                         price=price, bars=bars, atr=atr))
-    return {"signal": "long", "confidence": 0.9, "sl_atr_mult": 2.0,
-            "tp_atr_mult": 6.0, "reasoning": "ok"}
+                         price=price, bars=bars, atr=atr,
+                         payload_text=payload_text))
+    return {"decision": "LONG", "entry": price, "sl": price - 10,
+            "tp": price + 20, "reason": "ok"}
 
 class _StubLog:
     def warning(self, m): pass
@@ -159,15 +162,17 @@ class _StubSelf:
 
 out = cat.ChartAITraderBot._safe_signal(
     _StubSelf(), "gemini", fake_provider, "KEY", "MODEL",
-    b"PNGBYTES", "XAUUSD", 4390.5, 160, 5.25)
+    b"PNGBYTES", "XAUUSD", 4390.5, 160, 5.25, "PAYLOAD")
 assert out is not None, "_safe_signal must forward the call, not swallow an arity error"
 assert captured["atr"] == 5.25, "atr must actually reach the provider function"
+assert captured["payload_text"] == "PAYLOAD", "numeric payload must reach the provider"
 assert captured["symbol"] == "XAUUSD" and captured["bars"] == 160
 assert captured["price"] == 4390.5 and captured["png"] == b"PNGBYTES"
 print("PASS -- _safe_signal forwards all 7 args including atr")
 
 # and the two REAL provider functions must accept exactly what it forwards
-fwd = ["api_key", "model", "png", "symbol", "price", "bars", "atr"]
+fwd = ["api_key", "model", "png", "symbol", "price", "bars", "atr",
+       "payload_text"]
 for fn in (cat.gemini_chart_signal, cat.openai_chart_signal):
     params = list(inspect.signature(fn).parameters)
     assert params == fwd, "%s signature %s != forwarded %s" % (fn.__name__, params, fwd)
@@ -176,7 +181,7 @@ for fn in (cat.gemini_chart_signal, cat.openai_chart_signal):
 # _safe_signal must accept exactly what _evaluate_symbol passes it
 sig = list(inspect.signature(cat.ChartAITraderBot._safe_signal).parameters)
 assert sig == ["self", "name", "fn", "api_key", "model", "png", "symbol",
-               "price", "bars", "atr"], sig
+               "price", "bars", "atr", "payload_text"], sig
 print("  _safe_signal(%s) OK" % ", ".join(sig[1:]))
 print("PASS\n")
 
@@ -189,7 +194,7 @@ print("=== Case 18: a HUNG AI call must time out, not block forever ===")
 # fleet has had this guard for months; the AI calls never did.
 import time as _time
 
-def hanging_provider(api_key, model, png, symbol, price, bars, atr):
+def hanging_provider(api_key, model, png, symbol, price, bars, atr, payload_text):
     _time.sleep(30)          # far longer than the timeout we pass below
     return {"signal": "long", "confidence": 0.9}
 
@@ -198,7 +203,7 @@ cat.AI_CALL_TIMEOUT_SEC = 1.0   # keep the test fast; behaviour is identical
 t0 = _time.time()
 out = cat.ChartAITraderBot._safe_signal(
     _StubSelf(), "gemini", hanging_provider, "K", "M", b"P", "XAUUSD",
-    100.0, 160, 5.0)
+    100.0, 160, 5.0, "PAYLOAD")
 elapsed = _time.time() - t0
 cat.AI_CALL_TIMEOUT_SEC = _orig_timeout
 assert out is None, "a hung call must return None (skip symbol), not a result"
