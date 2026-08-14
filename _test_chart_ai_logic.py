@@ -629,6 +629,22 @@ assert calls == ["a", "b", "c"], calls
 print("  all 3 models fail -> None (skip symbol), all were tried   OK")
 print("PASS\n")
 
+print("=== Case 35b: duplicate models are de-duplicated ===")
+# Found on the real deploy: the VPS .env pinned GEMINI_MODEL to the heavy
+# model, so the "fallback" chain came out as [heavy, heavy] -- retrying
+# the same overloaded model and buying nothing.
+def _dd(seq):
+    out = []
+    for x in seq:
+        if x and x not in out:
+            out.append(x)
+    return out
+assert _dd(["a", "a"]) == ["a"], "duplicate must collapse"
+assert _dd(["a", ""]) == ["a"], "empty fallback must drop out"
+assert _dd(["a", "b"]) == ["a", "b"], "distinct models must be preserved in order"
+assert _dd(["b", "a"]) == ["b", "a"], "order must be preserved (primary first)"
+print("PASS -- [heavy, heavy] collapses to one call, not two wasted ones\n")
+
 print("=== Case 35: measured model config -- lite is primary ===")
 import os as _os
 for v in ("GEMINI_MODEL", "GEMINI_MODEL_FALLBACK"):

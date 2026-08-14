@@ -656,16 +656,26 @@ class ChartAITraderBot:
         # heavier one measured 3/5 at ~71s; the heavier one stays as the
         # fallback because it is presumably the better chart reader, and
         # a slow good answer beats no answer. Override either via env.
-        self.gemini_models = [
+        # _dedupe matters in practice, not just in theory: the VPS .env
+        # already pinned GEMINI_MODEL=gemini-flash-latest, so the first
+        # deploy of this chain produced ['gemini-flash-latest',
+        # 'gemini-flash-latest'] -- a "fallback" that retried the same
+        # overloaded model and silently bought nothing. Order-preserving.
+        def _dedupe(seq):
+            out = []
+            for x in seq:
+                if x and x not in out:
+                    out.append(x)
+            return out
+
+        self.gemini_models = _dedupe([
             os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest"),
             os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-flash-latest"),
-        ]
-        self.openai_models = [
+        ])
+        self.openai_models = _dedupe([
             os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
-        ]
-        fb = os.environ.get("OPENAI_MODEL_FALLBACK", "")
-        if fb:
-            self.openai_models.append(fb)
+            os.environ.get("OPENAI_MODEL_FALLBACK", ""),
+        ])
         # kept for the news-veto scan, which takes a single model
         self.gemini_model = self.gemini_models[0]
         self.openai_model = self.openai_models[0]
