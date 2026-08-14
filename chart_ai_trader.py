@@ -145,12 +145,22 @@ MAX_CONSEC_LOSSES = 0
 MAX_POSITIONS_PER_SYMBOL = 3
 MAX_TOTAL_POSITIONS = 6
 
-# Wall-clock cap on a single AI call. Sized so a full cycle (3 symbols x 2
-# providers) still cannot exceed the watchdog's 5-minute staleness window
-# once the per-symbol heartbeat below is taken into account: the heartbeat
-# is refreshed between symbols, so the longest gap between two heartbeats
-# is one symbol's two calls = 2 x AI_CALL_TIMEOUT_SEC = 120s < 300s.
-AI_CALL_TIMEOUT_SEC = 60
+# [2026-08-14] Raised 60 -> 120 after measuring the providers directly
+# (_gemini_probe.py, 5 calls per model):
+#     gemini-flash-latest        3 ok / 2x 503, avg 71,009 ms
+#     gemini-flash-lite-latest   5 ok / 0x 503, avg  6,073 ms
+# The model in use averaged SEVENTY-ONE SECONDS against a 60s cap, so a
+# meaningful share of what the log called "failures" were our own timeout
+# firing before Google answered -- not Google refusing. A 60s cap would
+# also have made the fallback below useless, since the fallback is exactly
+# the slow model.
+#
+# The watchdog constraint is now met a better way: the heartbeat is
+# written before EVERY provider attempt (see _safe_signal), not just
+# between symbols, so the largest gap between heartbeats is ONE call --
+# 120s against the watchdog's 300s -- regardless of how many models a
+# cycle tries. That decouples the two settings entirely.
+AI_CALL_TIMEOUT_SEC = 120
 
 # [2026-08-13] NEWS VETO. News can only BLOCK a chart setup, never create
 # one -- the 2-of-3 chart rule stays the sole source of entries, exactly
@@ -640,9 +650,25 @@ class ChartAITraderBot:
         self._mt5_timeout = 90.0
 
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        self.gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
         self.openai_key = os.environ.get("OPENAI_API_KEY", "")
-        self.openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        # [2026-08-14] PRIMARY + FALLBACK, ordered. The lite model is
+        # primary because it measured 5/5 available at ~6s while the
+        # heavier one measured 3/5 at ~71s; the heavier one stays as the
+        # fallback because it is presumably the better chart reader, and
+        # a slow good answer beats no answer. Override either via env.
+        self.gemini_models = [
+            os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest"),
+            os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-flash-latest"),
+        ]
+        self.openai_models = [
+            os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+        ]
+        fb = os.environ.get("OPENAI_MODEL_FALLBACK", "")
+        if fb:
+            self.openai_models.append(fb)
+        # kept for the news-veto scan, which takes a single model
+        self.gemini_model = self.gemini_models[0]
+        self.openai_model = self.openai_models[0]
 
         self.state = self._load_state()
         self.symbols: dict = {}
@@ -903,7 +929,7 @@ class ChartAITraderBot:
         finally:
             ex.shutdown(wait=False)
 
-    def _safe_signal(self, name: str, fn, api_key: str, model: str,
+    def _safe_signal(self, name: str, fn, api_key: str, models: list,
                      png: bytes, symbol: str, price: float, bars: int,
                      atr: float, payload_text: str) -> Optional[dict]:
         # [2026-08-12 FIX] These were bare calls with NO timeout. Observed
@@ -916,14 +942,24 @@ class ChartAITraderBot:
         # threshold -- so the watchdog restarts it mid-cycle, forever.
         # Every MT5 call in this fleet has had this guard for months; the
         # AI calls were simply never given one.
-        try:
-            return self._call_with_timeout(
-                fn, AI_CALL_TIMEOUT_SEC, api_key, model, png, symbol,
-                price, bars, atr, payload_text)
-        except Exception as e:
-            self.log.warning(f"[{name.upper()}] chart-signal call failed -- "
-                             f"skip this symbol this cycle: {str(e)[:200]}")
-            return None
+        for i, model in enumerate(models):
+            # heartbeat before EVERY attempt: this is what lets the timeout
+            # be raised without the watchdog mistaking a slow provider for
+            # a hung process. Largest heartbeat gap == one call, not one
+            # symbol's worth of calls.
+            self._heartbeat()
+            try:
+                return self._call_with_timeout(
+                    fn, AI_CALL_TIMEOUT_SEC, api_key, model, png, symbol,
+                    price, bars, atr, payload_text)
+            except Exception as e:
+                role = "primary" if i == 0 else f"fallback {i}"
+                more = " -- trying fallback" if i + 1 < len(models) else ""
+                self.log.warning(f"[{name.upper()}] {model} ({role}) failed: "
+                                 f"{str(e)[:160]}{more}")
+        self.log.warning(f"[{name.upper()}] all {len(models)} model(s) failed "
+                         f"-- skip this symbol this cycle")
+        return None
 
     def _evaluate_symbol(self, canon: str, bsym: str):
         # [2026-08-12] Stacking allowed at the user's explicit request ("ถ้า
@@ -992,7 +1028,7 @@ class ChartAITraderBot:
             return
 
         gemini_result = self._safe_signal("gemini", gemini_chart_signal,
-                                          self.gemini_key, self.gemini_model,
+                                          self.gemini_key, self.gemini_models,
                                           png, canon, price, len(candles), atr,
                                           payload_text)
         if gemini_result is None:
@@ -1002,7 +1038,7 @@ class ChartAITraderBot:
                           f"unavailable, no entry this cycle (fail-safe)")
             return
         openai_result = self._safe_signal("openai", openai_chart_signal,
-                                          self.openai_key, self.openai_model,
+                                          self.openai_key, self.openai_models,
                                           png, canon, price, len(candles), atr,
                                           payload_text)
         if openai_result is None:
@@ -1166,11 +1202,12 @@ class ChartAITraderBot:
                       f"{self.max_total} total -> worst-case simultaneous "
                       f"risk {self.max_total * self.risk_pct:.2f}% of equity "
                       f"if every stop hits at once")
-        self.log.info(f"  gemini model={self.gemini_model}")
+        self.log.info(f"  gemini models={self.gemini_models} (primary first, "
+                      f"fallback on failure)  timeout={AI_CALL_TIMEOUT_SEC}s/call")
         openai_status = ("configured" if self.openai_key else
                         "NOT SET -- dual-consensus unavailable, bot will idle "
                         "(no new entries) until OPENAI_API_KEY is added to .env")
-        self.log.info(f"  openai model={self.openai_model}  {openai_status}")
+        self.log.info(f"  openai models={self.openai_models}  {openai_status}")
         if self.invert:
             self.log.warning("  *** INVERT MODE: every order is the OPPOSITE of "
                              "what the models decided (same stop/target "

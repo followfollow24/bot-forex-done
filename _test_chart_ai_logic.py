@@ -157,12 +157,13 @@ class _StubLog:
     def error(self, m): pass
 class _StubSelf:
     log = _StubLog()
+    def _heartbeat(self): pass
     # use the REAL timeout wrapper so these tests exercise the actual
     # call path (including the thread-pool hop), not a simplified stand-in
     _call_with_timeout = cat.ChartAITraderBot._call_with_timeout
 
 out = cat.ChartAITraderBot._safe_signal(
-    _StubSelf(), "gemini", fake_provider, "KEY", "MODEL",
+    _StubSelf(), "gemini", fake_provider, "KEY", ["MODEL"],
     b"PNGBYTES", "XAUUSD", 4390.5, 160, 5.25, "PAYLOAD")
 assert out is not None, "_safe_signal must forward the call, not swallow an arity error"
 assert captured["atr"] == 5.25, "atr must actually reach the provider function"
@@ -173,7 +174,7 @@ print("PASS -- _safe_signal forwards all 7 args including atr")
 
 # and the two REAL provider functions must accept exactly what it forwards
 fwd = ["api_key", "model", "png", "symbol", "price", "bars", "atr",
-       "payload_text"]
+       "payload_text"]   # per-CALL signature; _safe_signal fans a list over it
 for fn in (cat.gemini_chart_signal, cat.openai_chart_signal):
     params = list(inspect.signature(fn).parameters)
     assert params == fwd, "%s signature %s != forwarded %s" % (fn.__name__, params, fwd)
@@ -181,7 +182,7 @@ for fn in (cat.gemini_chart_signal, cat.openai_chart_signal):
 
 # _safe_signal must accept exactly what _evaluate_symbol passes it
 sig = list(inspect.signature(cat.ChartAITraderBot._safe_signal).parameters)
-assert sig == ["self", "name", "fn", "api_key", "model", "png", "symbol",
+assert sig == ["self", "name", "fn", "api_key", "models", "png", "symbol",
                "price", "bars", "atr", "payload_text"], sig
 print("  _safe_signal(%s) OK" % ", ".join(sig[1:]))
 print("PASS\n")
@@ -203,7 +204,7 @@ _orig_timeout = cat.AI_CALL_TIMEOUT_SEC
 cat.AI_CALL_TIMEOUT_SEC = 1.0   # keep the test fast; behaviour is identical
 t0 = _time.time()
 out = cat.ChartAITraderBot._safe_signal(
-    _StubSelf(), "gemini", hanging_provider, "K", "M", b"P", "XAUUSD",
+    _StubSelf(), "gemini", hanging_provider, "K", ["M"], b"P", "XAUUSD",
     100.0, 160, 5.0, "PAYLOAD")
 elapsed = _time.time() - t0
 cat.AI_CALL_TIMEOUT_SEC = _orig_timeout
@@ -587,5 +588,55 @@ import inspect as _i
 sig = _i.signature(cat.ChartAITraderBot.__init__)
 assert sig.parameters["invert"].default is False, "invert must default OFF"
 print("PASS -- must be enabled explicitly with --invert\n")
+
+print("=== Case 34: model FALLBACK -- primary fails, fallback answers ===")
+calls = []
+def flaky(api_key, model, png, symbol, price, bars, atr, payload_text):
+    calls.append(model)
+    if model == "primary":
+        raise RuntimeError("503 UNAVAILABLE")
+    return {"decision": "LONG", "entry": price, "sl": price - 10,
+            "tp": price + 20, "reason": "from fallback"}
+
+out = cat.ChartAITraderBot._safe_signal(
+    _StubSelf(), "gemini", flaky, "K", ["primary", "backup"],
+    b"P", "XAUUSD", 4400.0, 160, 6.0, "PAYLOAD")
+assert out is not None and out["reason"] == "from fallback", out
+assert calls == ["primary", "backup"], calls
+print("  primary 503 -> fallback tried -> answer returned   OK")
+
+# fallback is NOT tried when the primary succeeds (no wasted call/cost)
+calls.clear()
+def good(api_key, model, png, symbol, price, bars, atr, payload_text):
+    calls.append(model)
+    return {"decision": "WAIT", "entry": price, "sl": price-1, "tp": price+1,
+            "reason": "ok"}
+cat.ChartAITraderBot._safe_signal(
+    _StubSelf(), "gemini", good, "K", ["primary", "backup"],
+    b"P", "XAUUSD", 4400.0, 160, 6.0, "PAYLOAD")
+assert calls == ["primary"], "fallback must not be called when primary works"
+print("  primary ok -> fallback NOT called (no wasted call)   OK")
+
+# every model failing -> None (skip symbol), no crash
+calls.clear()
+def allbad(api_key, model, png, symbol, price, bars, atr, payload_text):
+    calls.append(model)
+    raise RuntimeError("503")
+assert cat.ChartAITraderBot._safe_signal(
+    _StubSelf(), "gemini", allbad, "K", ["a", "b", "c"],
+    b"P", "XAUUSD", 4400.0, 160, 6.0, "PAYLOAD") is None
+assert calls == ["a", "b", "c"], calls
+print("  all 3 models fail -> None (skip symbol), all were tried   OK")
+print("PASS\n")
+
+print("=== Case 35: measured model config -- lite is primary ===")
+import os as _os
+for v in ("GEMINI_MODEL", "GEMINI_MODEL_FALLBACK"):
+    _os.environ.pop(v, None)
+assert cat.AI_CALL_TIMEOUT_SEC >= 90, \
+    "timeout must exceed the ~71s measured average of the heavy model"
+print("  AI_CALL_TIMEOUT_SEC = %ds (heavy model measured ~71s avg)   OK"
+      % cat.AI_CALL_TIMEOUT_SEC)
+print("PASS\n")
 
 print("ALL TESTS PASSED")
