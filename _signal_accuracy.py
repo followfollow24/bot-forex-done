@@ -35,6 +35,7 @@ Usage (on the VPS):  python _signal_accuracy.py [symbol] [samples] [horizon_bars
 import math
 import os
 import sys
+import time
 from datetime import datetime
 
 try:
@@ -110,6 +111,26 @@ def htf_series(htf_rates, m15, i, period_sec, keep=140):
     return out
 
 
+RETRIES = 3
+RETRY_SLEEP = 8.0
+
+
+def call_with_retry(name, fn, *args):
+    """Returns the model's answer, or None once the retries are spent.
+    Never raises: one dead sample must not end a run that has already
+    spent real API calls on the samples before it."""
+    last = ""
+    for attempt in range(RETRIES):
+        try:
+            return fn(*args)
+        except Exception as e:
+            last = str(e)[:70] or type(e).__name__
+            if attempt < RETRIES - 1:
+                time.sleep(RETRY_SLEEP * (attempt + 1))
+    print(f"    {name} gave up after {RETRIES} tries: {last}")
+    return None
+
+
 def binom_p(k, n, p0):
     """Two-sided normal approximation. Enough to tell 'indistinguishable
     from the base rate' from 'clearly different'; not a substitute for a
@@ -124,11 +145,13 @@ def binom_p(k, n, p0):
 
 
 def main():
+    # chart_ai_trader calls load_dotenv() at import, so the keys are
+    # already in os.environ by the time we get here.
+    if not os.environ.get("GEMINI_API_KEY"):
+        print("[ERROR] GEMINI_API_KEY not set (expected in .env beside this file)")
+        sys.exit(1)
     if not mt5.initialize():
         print("[ERROR] MT5 init failed")
-        sys.exit(1)
-    if not cat.__dict__.get("os").environ.get("GEMINI_API_KEY"):
-        print("[ERROR] GEMINI_API_KEY not set")
         sys.exit(1)
 
     need = LOOKBACK + N_SAMPLES * STRIDE_MIN + HORIZON + 50
@@ -162,6 +185,7 @@ def main():
     print("-" * 88)
 
     stat = {k: [0, 0] for k in ("gemini", "openai", "consensus")}  # [hit, calls]
+    lost = {"gemini": 0, "openai": 0}
     ups = 0
     n_done = 0
 
@@ -184,18 +208,21 @@ def main():
             ptext = cat.format_payload(SYMBOL, payload)
             png = render_chart_png(candles, SYMBOL, "")
 
-            g = o = None
-            try:
-                g = cat.gemini_chart_signal(gkeys, gmodel, png, SYMBOL,
-                                            price, len(candles), atr, ptext)
-            except Exception as e:
-                print(f"  gemini failed at {i}: {str(e)[:70]}")
-            if okeys:
-                try:
-                    o = cat.openai_chart_signal(okeys, omodel, png, SYMBOL,
-                                                price, len(candles), atr, ptext)
-                except Exception as e:
-                    print(f"  openai failed at {i}: {str(e)[:70]}")
+            # Gemini's 503 rate ran near 40% during the invert run. Without
+            # retries those samples vanish, and a sample that vanishes
+            # because the API was busy is not a random one -- busy periods
+            # cluster by time of day, so silently dropping them biases the
+            # measurement. Retry, then report what was still lost.
+            g = call_with_retry("gemini", cat.gemini_chart_signal, gkeys,
+                                gmodel, png, SYMBOL, price, len(candles),
+                                atr, ptext)
+            o = (call_with_retry("openai", cat.openai_chart_signal, okeys,
+                                 omodel, png, SYMBOL, price, len(candles),
+                                 atr, ptext) if okeys else None)
+            if g is None:
+                lost["gemini"] += 1
+            if okeys and o is None:
+                lost["openai"] += 1
             if g is None and o is None:
                 continue
 
@@ -238,7 +265,11 @@ def main():
         return
 
     base_up = ups / n_done
-    print(f"  samples resolved       : {n_done}")
+    print(f"  samples resolved       : {n_done} of {len(idxs)}")
+    if lost["gemini"] or lost["openai"]:
+        print(f"  lost to API failures   : gemini {lost['gemini']}, "
+              f"openai {lost['openai']}  (these cluster by time of day -- "
+              f"if large, the sample is not random)")
     print(f"  price rose in          : {100*base_up:.1f}%  "
           f"(a permanently-LONG model scores this by default)")
     print()
