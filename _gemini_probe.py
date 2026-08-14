@@ -15,8 +15,15 @@ of assuming it, and tests whether a different model id is healthier,
 because the bot currently asks for "gemini-flash-latest": a floating
 alias that can resolve to whatever build is under the most load.
 
-It sends small text-only prompts (a few tokens each, negligible cost) --
-enough to measure availability without exercising the vision path.
+[2026-08-14] Now probes the VISION path too, which is the gap that made
+the first version's verdict unsafe to act on. The bot sends a rendered
+chart PNG on every call; the original probe sent a few tokens of text.
+Those are not the same request to a capacity-limited service, and after
+switching to the lite model on the text-only result the bot still logged
+503s -- exactly what you would expect if image calls are rationed
+separately. So each model is now measured BOTH ways and the two rates
+printed side by side. If vision fails far more than text, the fix is not
+a different model id.
 
 Usage (on the VPS):  python _gemini_probe.py [rounds]
 """
@@ -46,6 +53,30 @@ CANDIDATES = [
 ROUNDS = int(sys.argv[1]) if len(sys.argv) > 1 else 5
 
 
+def make_chart_png() -> bytes:
+    """A PNG of roughly the size and shape the bot really sends, so the
+    probe exercises the same code path and payload class rather than a
+    token-sized stand-in."""
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import random
+    random.seed(7)                       # fixed: the image must not vary
+    px, series = 100.0, []
+    for _ in range(160):
+        px += random.uniform(-1, 1)
+        series.append(px)
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=100)
+    ax.plot(series, linewidth=0.9)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def classify(exc: Exception) -> str:
     m = str(exc)
     if "503" in m or "UNAVAILABLE" in m:
@@ -65,42 +96,59 @@ def main():
     from google import genai
     client = genai.Client(api_key=KEY)
 
-    print("=" * 72)
-    print(f" GEMINI PROBE -- {ROUNDS} calls per model, small text prompts")
-    print("=" * 72)
-    print(f"{'model':<28}{'ok':>4}{'503':>6}{'429':>6}{'other':>7}{'avg ms':>9}")
-    print("-" * 72)
+    from google.genai import types
+    png = make_chart_png()
+    print("=" * 78)
+    print(f" GEMINI PROBE -- {ROUNDS} calls per model per mode")
+    print(f" TEXT = a few tokens.  VISION = {len(png)//1024} KB chart PNG "
+          f"(what the bot actually sends)")
+    print("=" * 78)
+    print(f"{'model':<26}{'mode':<8}{'ok':>4}{'503':>6}{'429':>6}"
+          f"{'other':>7}{'avg ms':>9}")
+    print("-" * 78)
 
     seen = []
     for model in CANDIDATES:
         if model in seen:
             continue
         seen.append(model)
-        res = Counter()
-        lat = []
-        for _ in range(ROUNDS):
-            t0 = time.time()
-            try:
-                client.models.generate_content(model=model, contents="Reply with: ok")
-                res["ok"] += 1
-                lat.append((time.time() - t0) * 1000)
-            except Exception as e:
-                res[classify(e)] += 1
-            time.sleep(1.0)          # be a polite citizen while measuring
-        avg = f"{sum(lat)/len(lat):.0f}" if lat else "-"
-        other = sum(v for k, v in res.items()
-                    if k not in ("ok", "503 overloaded", "429 quota"))
-        print(f"{model:<28}{res['ok']:>4}{res['503 overloaded']:>6}"
-              f"{res['429 quota']:>6}{other:>7}{avg:>9}")
-        for k, v in res.items():
-            if k.startswith("other") or k.startswith("40"):
-                print(f"    -> {k} x{v}")
+        for mode in ("text", "vision"):
+            res = Counter()
+            lat = []
+            for _ in range(ROUNDS):
+                t0 = time.time()
+                try:
+                    if mode == "text":
+                        client.models.generate_content(
+                            model=model, contents="Reply with: ok")
+                    else:
+                        client.models.generate_content(
+                            model=model,
+                            contents=[types.Part.from_bytes(
+                                data=png, mime_type="image/png"),
+                                "Reply with one word describing the trend."])
+                    res["ok"] += 1
+                    lat.append((time.time() - t0) * 1000)
+                except Exception as e:
+                    res[classify(e)] += 1
+                time.sleep(1.0)      # be a polite citizen while measuring
+            avg = f"{sum(lat)/len(lat):.0f}" if lat else "-"
+            other = sum(v for k, v in res.items()
+                        if k not in ("ok", "503 overloaded", "429 quota"))
+            print(f"{model:<26}{mode:<8}{res['ok']:>4}"
+                  f"{res['503 overloaded']:>6}{res['429 quota']:>6}"
+                  f"{other:>7}{avg:>9}")
+            for k, v in res.items():
+                if k.startswith("other") or k.startswith("40"):
+                    print(f"    -> {k} x{v}")
 
-    print("-" * 72)
-    print("  503 on the alias but ok on a pinned id  -> switch GEMINI_MODEL")
-    print("  503 everywhere                          -> Google-side, wait it out")
-    print("  429                                     -> our quota, not capacity")
-    print("  404                                     -> that id is not available")
+    print("-" * 78)
+    print("  vision fails but text is fine -> image calls are rationed harder;")
+    print("     changing model id will NOT fix it. Reduce image size/frequency,")
+    print("     or lean on the fallback chain and accept skipped cycles.")
+    print("  both fail on one id, fine on another -> switch GEMINI_MODEL")
+    print("  both fail everywhere -> Google-side capacity, wait it out")
+    print("  429 -> our quota after all, not capacity")
 
 
 if __name__ == "__main__":
