@@ -655,4 +655,32 @@ print("  AI_CALL_TIMEOUT_SEC = %ds (heavy model measured ~71s avg)   OK"
       % cat.AI_CALL_TIMEOUT_SEC)
 print("PASS\n")
 
+print("=== Case 36: symbol set + live spread ceiling (measured cost) ===")
+assert "ETHUSDC" not in cat.SYMBOLS, "ETH is excluded by default on cost"
+assert "ETHUSDC" in cat.ALL_SYMBOLS, "but must remain restorable via --symbols"
+assert list(cat.SYMBOLS) == ["XAUUSD", "BTCUSDC"], list(cat.SYMBOLS)
+print("  default %s   (ETHUSDC restorable via --symbols)" % list(cat.SYMBOLS))
+
+# the ceiling must sit ABOVE the measured BTC cost and BELOW ETH's, or it
+# would either block a symbol we intend to keep or fail to block ETH.
+MEASURED = {"XAUUSDc": 0.020, "BTCUSDc": 0.068, "ETHUSDc": 0.093}
+assert MEASURED["BTCUSDc"] < cat.MAX_SPREAD_R < MEASURED["ETHUSDc"], \
+    "ceiling %.3f must separate BTC (%.3f) from ETH (%.3f)" % (
+        cat.MAX_SPREAD_R, MEASURED["BTCUSDc"], MEASURED["ETHUSDc"])
+for sym, drag in MEASURED.items():
+    verdict = "pass" if drag <= cat.MAX_SPREAD_R else "BLOCK"
+    print("  %-9s %.3fR -> %s" % (sym, drag, verdict))
+
+# the gate is a simple ratio; check the arithmetic and both boundaries
+def gate(spread, sl_dist):
+    return (spread / sl_dist) <= cat.MAX_SPREAD_R
+assert gate(0.24, 12.0) is True,  "gold: 0.24 spread on a 12.0 stop = 0.020R"
+assert gate(10.0, 147.0) is True, "btc: 10 on 147 = 0.068R"
+assert gate(0.6, 6.45) is False,  "eth: 0.6 on 6.45 = 0.093R -> blocked"
+# a normally-cheap symbol with a blown-out spread must ALSO be blocked --
+# this is what the live check buys over a static symbol list
+assert gate(2.0, 12.0) is False, "gold at 0.167R (news blowout) must block"
+print("  live check also blocks gold if its spread blows out to 0.167R   OK")
+print("PASS\n")
+
 print("ALL TESTS PASSED")

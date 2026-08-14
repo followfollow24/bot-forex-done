@@ -76,11 +76,37 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 669001 is news_gemini_bot.py).
 MAGIC = 671001
 
+# [2026-08-14] ETHUSDC dropped from the default set on measured cost.
+# _straddle_geometry.py swept ~3,800 M15 entries per symbol and reported
+# spread as a fraction of the intended stop distance -- the honest unit,
+# since it is what the cost actually competes against:
+#     XAUUSDc  0.020R/trade  -> breakeven WR 40.8%
+#     BTCUSDc  0.068R/trade  -> breakeven WR 42.7%
+#     ETHUSDC  0.093R/trade  -> breakeven WR 43.7%   (4.6x gold)
+# ETH hands back ~9% of every trade's risk before direction is even
+# considered. Stated plainly: that is a ~3 percentage-point handicap on
+# required win rate, which is real but is NOT what produced 0-for-21 --
+# dropping it trims a known cost, it does not fix the strategy.
+# Restore with --symbols XAUUSD,BTCUSDC,ETHUSDC.
 SYMBOLS = {
+    "XAUUSD": "gold",
+    "BTCUSDC": "BTC",
+}
+ALL_SYMBOLS = {
     "XAUUSD": "gold",
     "BTCUSDC": "BTC",
     "ETHUSDC": "ETH",
 }
+
+# Live per-trade spread ceiling, as a fraction of the stop distance.
+# The table above is a historical average; this is the same quantity
+# measured at the moment of entry, so it also catches a symbol whose
+# spread blows out temporarily (news, rollover, thin book) even if its
+# average is fine. 0.08 was chosen to sit above the measured BTC figure
+# (0.068) and below ETH's (0.093) -- i.e. it encodes the same decision as
+# the symbol list, but self-adjusting and applied to whatever is actually
+# quoted rather than to a name.
+MAX_SPREAD_R = 0.08
 
 TIMEFRAME = "15m"    # [2026-08-12] was 1h, changed at the user's request.
 CHART_BARS = 160     # 160 M15 bars = ~40h of context. On H1 this was 120
@@ -1103,6 +1129,19 @@ class ChartAITraderBot:
             return False
         long_ = signal == "long"
         px = ask if long_ else bid
+
+        # cost gate: refuse to pay more than MAX_SPREAD_R of the risk just
+        # to get in and out. Uses the LIVE quote, so a temporary blowout is
+        # caught even on a normally-cheap symbol.
+        spread = abs(ask - bid)
+        sd_check = float(decision["sl_dist"])
+        if sd_check > 0:
+            spread_r = spread / sd_check
+            if spread_r > MAX_SPREAD_R:
+                self.log.info(f"[{canon}] SKIP -- spread {spread:.4f} is "
+                              f"{spread_r:.3f}R of the {sd_check:.4f} stop, "
+                              f"over the {MAX_SPREAD_R}R ceiling")
+                return False
         # Apply the AI's DISTANCES to the real execution price, not its
         # stated absolute levels. Price can move between the decision and
         # the fill; anchoring to the fill preserves the intended stop
@@ -1200,6 +1239,8 @@ class ChartAITraderBot:
                       f"prices; stop must land in {SL_ATR_MIN}-{SL_ATR_MAX}"
                       f"xATR and R:R >= {MIN_RR}, else the setup is REJECTED "
                       f"(entry drift limit {MAX_ENTRY_DRIFT_ATR}xATR)")
+        self.log.info(f"  spread ceiling: skip if spread > {MAX_SPREAD_R}R of "
+                      f"the stop (measured: gold 0.020R, BTC 0.068R, ETH 0.093R)")
         self.log.info(f"  entry filters: HTF alignment ({HTF_TIMEFRAME}) "
                       f"{'ON' if REQUIRE_HTF_ALIGNMENT else 'off'}, key-level "
                       f"proximity <= {KEY_LEVEL_MAX_ATR}xATR "
@@ -1331,6 +1372,11 @@ def main():
                     help=f"auto-stop after this many consecutive losses "
                          f"(default {MAX_CONSEC_LOSSES}; 0 = never stop, which "
                          f"is the setting for collecting an uncensored sample)")
+    ap.add_argument("--symbols", default=",".join(SYMBOLS),
+                    help=f"comma-separated symbols to trade (default "
+                         f"{','.join(SYMBOLS)}; ETHUSDC is excluded by "
+                         f"default on measured spread cost -- see the SYMBOLS "
+                         f"comment. Pass {','.join(ALL_SYMBOLS)} to restore it)")
     ap.add_argument("--invert", action="store_true",
                     help="trade the OPPOSITE of the models' direction, keeping "
                          "their stop/target distances. Hypothesis under test "
@@ -1350,6 +1396,15 @@ def main():
     if not cfg.dry_run and not _cfg_has_credentials(cfg):
         print("[ERROR] live mode needs MT5 (Windows) -- use --dry-run to test elsewhere")
         sys.exit(1)
+
+    want = [x.strip().upper() for x in args.symbols.split(",") if x.strip()]
+    unknown = [x for x in want if x not in ALL_SYMBOLS]
+    if unknown:
+        print(f"[ERROR] unknown symbol(s): {unknown}. "
+             f"Known: {list(ALL_SYMBOLS)}")
+        sys.exit(1)
+    SYMBOLS.clear()
+    SYMBOLS.update({k: ALL_SYMBOLS[k] for k in want})
 
     bot = ChartAITraderBot(cfg, risk_pct=args.risk, poll_min=args.poll_min,
                           max_per_symbol=args.max_per_symbol,
