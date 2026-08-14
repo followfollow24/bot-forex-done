@@ -548,4 +548,44 @@ assert len(on.tg) == 1 and "AUTO-STOPPED" in on.tg[0]
 print("  --max-consec-losses 3 -> still trips exactly at 3   OK")
 print("PASS -- action disabled, measurement intact\n")
 
+print("=== Case 32: invert_decision mirrors direction, PRESERVES distances ===")
+base = X(R("SHORT", sl=PRICE+10, tp=PRICE-20), R("SHORT", sl=PRICE+10, tp=PRICE-20))
+assert base is not None and base["signal"] == "short"
+inv = cat.invert_decision(base)
+assert inv["signal"] == "long" and inv["decision"] == "LONG"
+assert inv["inverted_from"] == "SHORT"
+# distances must be identical -- that is what _flip_test.py measured
+assert abs(inv["sl_dist"] - base["sl_dist"]) < 1e-9
+assert abs(inv["tp_dist"] - base["tp_dist"]) < 1e-9
+# levels reflected across entry, and on the correct sides for a LONG
+assert inv["sl"] < inv["entry"] < inv["tp"], (inv["sl"], inv["entry"], inv["tp"])
+assert abs(inv["sl"] - (PRICE - 10)) < 1e-9, inv["sl"]
+assert abs(inv["tp"] - (PRICE + 20)) < 1e-9, inv["tp"]
+print("  SHORT sl=%.0f tp=%.0f  ->  LONG sl=%.0f tp=%.0f (distances 10/20 kept)"
+      % (base["sl"], base["tp"], inv["sl"], inv["tp"]))
+
+# and the reverse direction
+base2 = X(R("LONG"), R("LONG"))
+inv2 = cat.invert_decision(base2)
+assert inv2["signal"] == "short" and inv2["tp"] < inv2["entry"] < inv2["sl"]
+assert abs(inv2["rr"] - base2["rr"]) < 1e-9, "R:R must survive inversion"
+print("  LONG -> SHORT, R:R preserved at %.2f" % inv2["rr"])
+
+# inverting twice returns the original
+rt = cat.invert_decision(inv2)
+assert rt["signal"] == base2["signal"]
+assert abs(rt["sl"] - base2["sl"]) < 1e-9 and abs(rt["tp"] - base2["tp"]) < 1e-9
+print("  double inversion is identity (no drift)   OK")
+
+# the original dict must not be mutated -- the caller still logs it
+assert base["signal"] == "short" and base["decision"] == "SHORT"
+print("  source decision left untouched (no in-place mutation)   OK")
+print("PASS\n")
+
+print("=== Case 33: invert is OFF by default and opt-in only ===")
+import inspect as _i
+sig = _i.signature(cat.ChartAITraderBot.__init__)
+assert sig.parameters["invert"].default is False, "invert must default OFF"
+print("PASS -- must be enabled explicitly with --invert\n")
+
 print("ALL TESTS PASSED")

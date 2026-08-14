@@ -531,6 +531,51 @@ def cross_check_signal(gemini_result: dict, openai_result: dict,
     }
 
 
+def invert_decision(decision: dict) -> dict:
+    """Mirror a validated decision: opposite direction, SAME stop and target
+    DISTANCES, levels reflected across the entry.
+
+    [2026-08-14] Added after the live bot went 0-for-17 and _flip_test.py
+    replayed every logged [OPEN] against real M15 bars: 15 of 17 trades
+    that hit their stop would have hit their target reversed --
+    ORIGINAL 11.8% WR / -12.85R vs MIRROR 88.2% WR / +20.67R, both net of
+    the repo's verified spreads and scoring any bar that spans both levels
+    as a LOSS for whichever side is being judged.
+
+    WHERE THE FLIP SITS, and why it matters: this runs AFTER consensus,
+    validation, the HTF/key-level gates and the news veto -- i.e. it
+    mirrors the pipeline's OUTPUT, exactly as _flip_test.py measured
+    (that test mirrored logged orders, which had already passed every
+    gate). Flipping earlier would feed a reversed direction into the HTF
+    gate, which would then reject nearly everything, and would NOT be the
+    thing the +20.67R was measured on.
+
+    So the premise being traded is narrow and worth stating plainly: the
+    models' ANALYSIS is treated as sound enough to locate a setup and size
+    its stop, but its DIRECTION is taken as systematically backwards.
+
+    ** This is a hypothesis under test, not an established edge. 17 trades
+    over ~2 days is one market regime, 14 of them SHORT -- so "reversed
+    wins" may be indistinguishable from "the market rose for two days".
+    And if the true cause is a direction bug somewhere in the pipeline,
+    this cancels one error with another and will break the moment the
+    underlying bug is fixed. Investigate the cause; do not treat this
+    number as validation. **
+    """
+    out = dict(decision)
+    entry = float(decision["entry"])
+    sl_dist = float(decision["sl_dist"])
+    tp_dist = float(decision["tp_dist"])
+    was_long = decision["signal"] == "long"
+    now_long = not was_long
+    out["signal"] = "long" if now_long else "short"
+    out["decision"] = "LONG" if now_long else "SHORT"
+    out["sl"] = entry - sl_dist if now_long else entry + sl_dist
+    out["tp"] = entry + tp_dist if now_long else entry - tp_dist
+    out["inverted_from"] = decision["decision"]
+    return out
+
+
 def entry_filters_allow(decision: dict, payload: dict, atr: float):
     """Hard entry gates: higher-timeframe alignment + proximity to a key
     level. Returns (allowed, reason). Pure function -- the whole point is
@@ -571,13 +616,15 @@ class ChartAITraderBot:
     def __init__(self, cfg: ForexConfig, risk_pct: float, poll_min: int,
                  max_per_symbol: int = MAX_POSITIONS_PER_SYMBOL,
                  max_total: int = MAX_TOTAL_POSITIONS,
-                 max_consec_losses: int = MAX_CONSEC_LOSSES):
+                 max_consec_losses: int = MAX_CONSEC_LOSSES,
+                 invert: bool = False):
         self.cfg = cfg
         self.risk_pct = risk_pct
         self.poll_min = poll_min
         self.max_per_symbol = max_per_symbol
         self.max_total = max_total
         self.max_consec_losses = max_consec_losses
+        self.invert = invert
 
         self.stop_file = os.path.join(_BASE_DIR, "STOP_CHART_AI_TRADER")
         self.breaker_file = os.path.join(_BASE_DIR, "BREAKER_CHART_AI_TRADER")
@@ -988,6 +1035,12 @@ class ChartAITraderBot:
         self._heartbeat()
         if not self._news_allows(canon, decision["signal"]):
             return
+
+        if self.invert:
+            decision = invert_decision(decision)
+            self.log.info(f"[{canon}] INVERTED -> {decision['decision']} "
+                          f"sl={decision['sl']:.2f} tp={decision['tp']:.2f} "
+                          f"(was {decision['inverted_from']})")
         self._enter(canon, bsym, decision)
 
     def _enter(self, canon: str, bsym: str, decision: dict) -> bool:
@@ -1063,7 +1116,10 @@ class ChartAITraderBot:
             f"lot={lot}  fill={fill:.2f}  SL={sl:.2f} TP={tp:.2f}\n"
             f"AI-chosen: SL {decision['sl_atr_mult']:.2f}xATR  "
             f"R:R {decision['rr']:.2f}\n"
-            f"news veto: {veto_state}\n"
+            f"news veto: {veto_state}"
+            + ("\n\U0001F501 INVERTED (models said "
+               f"{decision['inverted_from']})" if decision.get('inverted_from') else "")
+            + "\n"
             f"gemini: {decision['gemini_reasoning'][:250]}\n"
             f"openai: {decision['openai_reasoning'][:250]}")
         return True
@@ -1115,6 +1171,13 @@ class ChartAITraderBot:
                         "NOT SET -- dual-consensus unavailable, bot will idle "
                         "(no new entries) until OPENAI_API_KEY is added to .env")
         self.log.info(f"  openai model={self.openai_model}  {openai_status}")
+        if self.invert:
+            self.log.warning("  *** INVERT MODE: every order is the OPPOSITE of "
+                             "what the models decided (same stop/target "
+                             "distances). Basis: 0-for-17 live, mirror replay "
+                             "88.2% WR / +20.67R on real bars. HYPOTHESIS UNDER "
+                             "TEST -- 2 days, one regime, possible upstream "
+                             "direction bug. ***")
         if self.max_consec_losses <= 0:
             self.log.warning("  consecutive-loss breaker: OFF -- the bot will NOT "
                              "auto-stop after losing streaks (data-collection "
@@ -1221,6 +1284,10 @@ def main():
                     help=f"auto-stop after this many consecutive losses "
                          f"(default {MAX_CONSEC_LOSSES}; 0 = never stop, which "
                          f"is the setting for collecting an uncensored sample)")
+    ap.add_argument("--invert", action="store_true",
+                    help="trade the OPPOSITE of the models' direction, keeping "
+                         "their stop/target distances. Hypothesis under test "
+                         "(see invert_decision docstring); not a validated edge.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-real", action="store_true")
     args = ap.parse_args()
@@ -1240,7 +1307,8 @@ def main():
     bot = ChartAITraderBot(cfg, risk_pct=args.risk, poll_min=args.poll_min,
                           max_per_symbol=args.max_per_symbol,
                           max_total=args.max_total,
-                          max_consec_losses=args.max_consec_losses)
+                          max_consec_losses=args.max_consec_losses,
+                          invert=args.invert)
     bot.run()
 
 
