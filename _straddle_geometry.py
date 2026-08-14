@@ -39,9 +39,18 @@ except ImportError:
 
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDc"
 SL_ATR = float(sys.argv[2]) if len(sys.argv) > 2 else 1.8   # bot's typical stop
+TF = sys.argv[3] if len(sys.argv) > 3 else "15m"
 RR = 1.5                    # bot's minimum reward:risk
-BARS = 4000                 # ~6 weeks of M15
-HOLD = 96                   # 24h max hold, same as the live bot's horizon
+BARS = 4000
+# hold = 96 bars on M15 (24h). Scaled per timeframe so every run asks the
+# same question -- "does it resolve within a comparable horizon?" -- rather
+# than giving slower timeframes an unfairly short window.
+_TF = {"15m": (mt5.TIMEFRAME_M15, 96), "1h": (mt5.TIMEFRAME_H1, 48),
+       "4h": (mt5.TIMEFRAME_H4, 30), "1d": (mt5.TIMEFRAME_D1, 20)}
+if TF not in _TF:
+    print(f"[ERROR] timeframe must be one of {list(_TF)}")
+    sys.exit(1)
+MT5_TF, HOLD = _TF[TF]
 SPREAD = {"XAUUSDc": 0.24, "BTCUSDc": 10.0, "ETHUSDc": 0.6}
 
 
@@ -60,7 +69,7 @@ def main():
     if not mt5.initialize():
         print("[ERROR] MT5 init failed")
         sys.exit(1)
-    rates = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, BARS)
+    rates = mt5.copy_rates_from_pos(SYMBOL, MT5_TF, 0, BARS)
     if rates is None or len(rates) < 200:
         print(f"[ERROR] no bars for {SYMBOL}")
         mt5.shutdown()
@@ -116,8 +125,8 @@ def main():
     ev = p_run * (RR - 1.0) + p_both * (-2.0) + p_nei * (-1.0) - spread_R
 
     print("=" * 78)
-    print(f" STRADDLE GEOMETRY -- {SYMBOL} M15, stop {SL_ATR}xATR, target {RR}R")
-    print(f" {n} sample entries, {HOLD}-bar (24h) hold, {BARS} bars of history")
+    print(f" STRADDLE GEOMETRY -- {SYMBOL} {TF}, stop {SL_ATR}xATR, target {RR}R")
+    print(f" {n} sample entries, {HOLD}-bar hold, {BARS} bars of history")
     print("=" * 78)
     print(f"  clean run UP    (long TP first) : {up:>5}  {100*up/n:>5.1f}%")
     print(f"  clean run DOWN  (short TP first): {down:>5}  {100*down/n:>5.1f}%")
@@ -131,6 +140,19 @@ def main():
     need = (2.0 * p_both + 1.0 * p_nei + spread_R) / (RR - 1.0)
     print(f"  breakeven needs P(clean run) >= {100*min(need,1.0):.1f}%  "
           f"(actual {100*p_run:.1f}%)")
+    print()
+    # ---- what a CONSTANT direction would earn: the bar any predictor
+    # must clear. If this is already near breakeven, there is very little
+    # room for skill to add value on this timeframe.
+    c1 = spread_R / 2.0                       # one-sided spread cost
+    ev_long = (up / n) * RR - ((down + both) / n) - c1
+    ev_short = (down / n) * RR - ((up + both) / n) - c1
+    be_wr = (1.0 + c1) / (1.0 + RR)
+    print(f"  ALWAYS-LONG  : hit {100*up/n:.1f}%  EV {ev_long:+.3f}R")
+    print(f"  ALWAYS-SHORT : hit {100*down/n:.1f}%  EV {ev_short:+.3f}R")
+    print(f"  breakeven win rate on this timeframe : {100*be_wr:.1f}%")
+    print(f"  headroom over a coin flip            : "
+          f"{100*(max(up,down)/n - be_wr):+.1f} points")
     print()
     if ev > 0:
         print("  -> POSITIVE. Worth a closer look (then walk-forward it).")
