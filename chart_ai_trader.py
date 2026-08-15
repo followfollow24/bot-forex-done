@@ -1303,12 +1303,15 @@ class ChartAITraderBot:
                         "(no new entries) until OPENAI_API_KEY is added to .env")
         self.log.info(f"  openai models={self.openai_models}  {openai_status}")
         if self.invert:
-            self.log.warning("  *** INVERT MODE: every order is the OPPOSITE of "
-                             "what the models decided (same stop/target "
-                             "distances). Basis: 0-for-17 live, mirror replay "
-                             "88.2% WR / +20.67R on real bars. HYPOTHESIS UNDER "
-                             "TEST -- 2 days, one regime, possible upstream "
-                             "direction bug. ***")
+            self.log.warning(
+                f"  *** INVERT MODE: every order is the OPPOSITE of what the "
+                f"models decided. Stop distance kept; TARGET REPLACED with "
+                f"{INVERT_TP_R}xSL (the models' 1.5R wins only 46.7% once "
+                f"flipped, vs 73.3% at 1.25R). Basis: 29 real trades -- 16 "
+                f"never showed +0.1R as traded, 28 of 29 did inverted; flat "
+                f"1.25R scored EV +0.353R out-of-sample on BTC. HYPOTHESIS "
+                f"UNDER TEST -- late half is 8 trades from one 3-day window, "
+                f"and a fixed upstream direction bug would kill it. ***")
         if self.max_consec_losses <= 0:
             self.log.warning("  consecutive-loss breaker: OFF -- the bot will NOT "
                              "auto-stop after losing streaks (data-collection "
