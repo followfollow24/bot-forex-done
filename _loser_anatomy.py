@@ -118,23 +118,41 @@ def bars_after(sym, ts, n=MAX_HOLD_BARS):
 def best_excursion(bars, entry, long_, R):
     """Maximum favourable move (in R) reached BEFORE the 1R stop is touched.
 
-    Returns (best_R, stopped). Within each bar the adverse extreme is taken
-    first, so a bar containing both the target and the stop resolves as the
-    stop -- the pessimistic reading, applied to original and mirror alike so
-    neither side is flattered.
+    Returns (best_R, stopped, bars_used). Within each bar the adverse extreme
+    is taken first, so a bar containing both the target and the stop resolves
+    as the stop -- the pessimistic reading, applied to original and mirror
+    alike so neither side is flattered. bars_used is how many M15 bars had
+    elapsed when the stop hit, i.e. how fast the trade died.
     """
     best = 0.0
-    for b in bars:
+    for i, b in enumerate(bars):
         hi, lo = float(b["high"]), float(b["low"])
         adverse = lo if long_ else hi
         adv_R = ((entry - adverse) if long_ else (adverse - entry)) / R
         if adv_R >= 1.0:
-            return best, True
+            return best, True, i + 1
         fav = hi if long_ else lo
         fav_R = ((fav - entry) if long_ else (entry - fav)) / R
         if fav_R > best:
             best = fav_R
-    return best, False
+    return best, False, len(bars)
+
+
+def verdict(o_best, own_rr):
+    """Why this trade lost, in one label, from how far it ever got.
+
+    The distinction that matters is whether the trade was EVER in profit.
+    'wrong way' means the direction call failed outright and no exit rule
+    could have helped. 'gave it back' means the direction was right for a
+    while and only the target placement failed -- a fixable problem.
+    """
+    if o_best >= own_rr:
+        return "WON (reached its target)"
+    if o_best < 0.10:
+        return "wrong way from bar 1"
+    if o_best < 0.50:
+        return f"barely moved (max +{o_best:.2f}R)"
+    return f"gave it back (was +{o_best:.2f}R)"
 
 
 def report(title, rows, sym):
@@ -161,6 +179,42 @@ def report(title, rows, sym):
 
 
 WF = []
+PER_TRADE = []
+
+
+def per_trade_table():
+    """One line per real trade: why it lost, and what it would have done
+    under the inverted rule. The aggregates hide the thing worth seeing --
+    that the failures are not assorted, they are one failure repeated.
+    """
+    rows = sorted(PER_TRADE, key=lambda r: r["ts"])
+    print("\n" + "=" * 100)
+    print("  EVERY TRADE, ONE LINE EACH")
+    print("  maxfav = most profit ever available before the stop, in R")
+    print("  bars   = M15 bars until the stop hit (4 = one hour)")
+    print("=" * 100)
+    print(f"  {'when':<13}{'symbol':<10}{'side':<7}{'own':>5}{'maxfav':>8}"
+          f"{'bars':>6}  {'why it lost':<26}{'inv@1.25R':>10}")
+    print("  " + "-" * 96)
+    inv_win = inv_loss = 0
+    tally = {}
+    for r in rows:
+        v = verdict(r["o_best"], r["own_rr"])
+        tally[v.split(" (")[0]] = tally.get(v.split(" (")[0], 0) + 1
+        iw = r["i_best"] >= 1.25
+        if iw:
+            inv_win += 1
+        else:
+            inv_loss += 1
+        print(f"  {r['ts']:%m-%d %H:%M}  {r['sym']:<10}{r['side']:<7}"
+              f"{r['own_rr']:>5.2f}{r['o_best']:>8.2f}{r['bars']:>6}  "
+              f"{v:<26}{'WIN' if iw else 'loss':>10}")
+    print("  " + "-" * 96)
+    n = len(rows)
+    for k, c in sorted(tally.items(), key=lambda kv: -kv[1]):
+        print(f"    {c:>3}/{n}  {k}")
+    print(f"\n    inverted with a 1.25R target: {inv_win} win / {inv_loss} loss"
+          f"  ({100*inv_win/max(n,1):.0f}% win rate on these same entries)")
 
 
 def ev_at(rows, tp):
@@ -247,15 +301,23 @@ def main():
         cost_R = sp / R
         long_ = t["side"] == "LONG"
 
-        o_best, _ = best_excursion(bars, t["fill"], long_, R)
-        i_best, _ = best_excursion(bars, t["fill"], not long_, R)
+        o_best, o_stopped, o_bars = best_excursion(bars, t["fill"], long_, R)
+        i_best, _, _ = best_excursion(bars, t["fill"], not long_, R)
+        own_rr = abs(t["tp"] - t["fill"]) / R
+        PER_TRADE.append({
+            "ts": t["ts"], "sym": t["sym"], "side": t["side"],
+            "own_rr": own_rr, "o_best": o_best, "i_best": i_best,
+            "bars": o_bars, "stopped": o_stopped, "cost": cost_R,
+        })
         WF.append({"ts": t["ts"], "sym": t["sym"],
                    "inv": i_best, "cost": cost_R})
         d = by_sym.setdefault(t["sym"], {"orig": [], "inv": []})
         d["orig"].append((o_best, True, cost_R))
         d["inv"].append((i_best, True, cost_R))
 
-    print("=" * 74)
+    per_trade_table()
+
+    print("\n" + "=" * 74)
     print(" LOSER ANATOMY -- chart_ai_trader, real trades vs real M15 bars")
     print(" 'best excursion' = most profit ever available before the 1R stop")
     print(" pessimistic: a bar spanning both levels counts as the stop")
