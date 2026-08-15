@@ -762,4 +762,44 @@ else:
     print("  both .ps1 files are ASCII-only (PS 5.1 parse safety)   OK")
     print("PASS\n")
 
+print("=== Case 39: exhaustion prompt is measurement-only, live path untouched ===")
+# chart_ai_trader.py is the SAME file the live invert bot runs, so an
+# experimental prompt added for measurement must be inert unless explicitly
+# switched on -- including after a watchdog restart, which relaunches from
+# the .ps1 Args and would pick up whatever the module defaults to.
+assert cat.EXHAUSTION_MODE is False, "experimental prompt must default OFF"
+_pbase = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+assert "2 of the 3 rules" in _pbase, "live prompt changed"
+assert "EXHAUSTION" not in _pbase, "experimental text leaked into the live prompt"
+print("  EXHAUSTION_MODE False -> live prompt is the original   OK")
+
+_cd = [[i * 900000, 100.0 + i, 100.5 + i, 99.5 + i, 100.0 + i, 10.0]
+       for i in range(30)]
+_lp = cat.build_market_payload(_cd, 1.0)
+assert "exhaustion" not in _lp, "live payload must not carry stretch figures"
+_lp["htf"] = {"htf": {"trend": "BULLISH", "price": 130.0, "ema20": 120.0,
+                      "ema50": 110.0}, "mtf": None}
+_txt = cat.format_payload("BTCUSDC", _lp)
+assert "you may only go LONG" in _txt, "HTF veto must stay HARD on the live path"
+assert "STRETCH (how far" not in _txt
+print("  live payload keeps the hard HTF veto, no stretch block   OK")
+
+# and the variant must actually differ, or the A/B measures nothing
+cat.EXHAUSTION_MODE = True
+_pv = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+cat.EXHAUSTION_MODE = False
+assert "EXHAUSTION" in _pv and "counter-trend entry is allowed" in _pv
+_lp["exhaustion"] = cat.build_exhaustion_context(_cd, 1.0)
+_tv = cat.format_payload("BTCUSDC", _lp)
+assert "you may only go LONG" not in _tv and "context only" in _tv
+print("  variant differs: two-way framing + HTF advisory   OK")
+
+# zero-range and zero-ATR must not fabricate an extreme reading
+_flat = [[i * 900000, 100.0, 100.0, 100.0, 100.0, 1.0] for i in range(30)]
+assert cat.build_exhaustion_context(_flat, 1.0)["range_pos"] == 0.5
+_z = cat.build_exhaustion_context(_cd, 0.0)
+assert _z["stretch_atr"] == 0.0 and _z["travel_atr"] == 0.0
+print("  flat range -> 0.50 (not an extreme); ATR=0 -> no divide-by-zero   OK")
+print("PASS\n")
+
 print("ALL TESTS PASSED")

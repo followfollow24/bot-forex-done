@@ -51,6 +51,12 @@ from news_gemini_bot import render_chart_png
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUUSDc"
 N_SAMPLES = int(sys.argv[2]) if len(sys.argv) > 2 else 40
 HORIZON = int(sys.argv[3]) if len(sys.argv) > 3 else 16     # 16 M15 bars = 4h
+# 4th arg "exh" swaps in the exhaustion prompt + stretch figures, to A/B
+# against the measured baseline (BTC consensus edge -25.2 points, p=0.004).
+# Everything else about the run is held identical -- same symbol, same
+# sample indices, same horizon -- so any change in edge is attributable to
+# the prompt and not to a different slice of history.
+EXHAUSTION = len(sys.argv) > 4 and sys.argv[4].lower().startswith("exh")
 LOOKBACK = cat.CHART_BARS                                    # 160, as live
 STRIDE_MIN = 24                                              # >=6h apart
 
@@ -175,9 +181,14 @@ def main():
         idxs.append(i)
         i += STRIDE_MIN
 
+    cat.EXHAUSTION_MODE = EXHAUSTION
     print("=" * 88)
     print(f" SIGNAL ACCURACY -- {SYMBOL} M15, {len(idxs)} samples, "
           f"{HORIZON}-bar ({HORIZON/4:.0f}h) horizon")
+    which = ("EXHAUSTION (continuation-vs-exhaustion, stretch figures, "
+             "HTF advisory)" if EXHAUSTION
+             else "BASELINE (trend continuation, HTF veto)")
+    print(f" prompt: {which}")
     print(f" replayed through the LIVE pipeline; no stops, no costs, no lookahead")
     print("=" * 88)
     print(f"{'when':<15}{'gemini':<8}{'openai':<8}{'consensus':<11}"
@@ -205,6 +216,9 @@ def main():
                 htf_series(h1, m15, i, 3600))
             payload["keylevels"] = cat.build_key_levels(
                 htf_series(d1, m15, i, 24 * 3600, keep=30), price)
+            if EXHAUSTION:
+                payload["exhaustion"] = cat.build_exhaustion_context(
+                    candles, atr)
             ptext = cat.format_payload(SYMBOL, payload)
             png = render_chart_png(candles, SYMBOL, "")
 

@@ -306,6 +306,126 @@ ignored) -- for example entry {price} and any two nearby values.
 Respond ONLY via the provided JSON schema."""
 
 
+ENTRY_PROMPT_TEMPLATE_EXHAUSTION = """You are an AI trading-chart analysis \
+system. Below is the latest market data for {symbol} on the M15 (15-minute) \
+timeframe, plus a candlestick chart of the same data.
+
+{payload}
+
+At any point on a chart two different things can happen next, and your job \
+is to say WHICH:
+  A. CONTINUATION -- the move has room left and will extend.
+  B. EXHAUSTION -- the move is stretched and will revert.
+
+Weigh BOTH before answering. The stretch figures above exist for exactly \
+this judgement:
+  * price far from EMA20 (large |stretch|), sitting at the extreme top or \
+bottom of its recent range, after a long unbroken run of same-direction \
+bars, is evidence for EXHAUSTION -- and note that every trend indicator \
+looks strongest at precisely that moment.
+  * price near EMA20, mid-range, after a pause or pullback, with the higher \
+timeframe pointing the same way, is evidence for CONTINUATION.
+
+DECISION:
+  * CONTINUATION -> trade WITH the move (LONG in an uptrend, SHORT in a \
+downtrend).
+  * EXHAUSTION -> trade AGAINST the move (SHORT after a stretched rally, \
+LONG after a stretched selloff).
+  * genuinely unclear, or the two readings are equally supported -> "WAIT".
+
+Do NOT default to continuation just because the trend indicators agree. At \
+a turning point they always agree. The higher-timeframe trend is context, \
+not a veto: a counter-trend entry is allowed when the exhaustion evidence \
+is strong.
+
+LEVELS (only meaningful when the decision is LONG or SHORT):
+  * entry: the current price, {price}.
+  * sl: stop loss placed 1.5 to 2.0 x ATR away from entry. ATR is {atr}, \
+so the stop distance must be between {sl_lo} and {sl_hi}. For LONG the \
+stop goes BELOW entry; for SHORT it goes ABOVE.
+  * tp: take profit giving a reward:risk of AT LEAST 1:{min_rr} -- i.e. \
+the distance from entry to tp must be at least {min_rr} times the \
+distance from entry to sl. For LONG the target is ABOVE entry; for \
+SHORT it is BELOW.
+  * reason: one or two sentences saying whether you read this as \
+CONTINUATION or EXHAUSTION, which figures drove that, and where you put \
+the stop and target.
+
+If the decision is "WAIT", still return numeric entry/sl/tp (they are \
+ignored) -- for example entry {price} and any two nearby values.
+
+Respond ONLY via the provided JSON schema."""
+
+# Measurement switch, NOT a live setting. False means every live bot keeps
+# the original trend-continuation prompt, so the running invert bot is
+# unaffected even if the watchdog restarts it. _signal_accuracy.py sets this
+# to True to A/B the exhaustion prompt against the measured baseline
+# (BTC consensus edge -25.2 points, p=0.004). Only wire a CLI flag for it if
+# the measurement actually beats that.
+EXHAUSTION_MODE = False
+
+
+def build_exhaustion_context(candles: list, atr: float) -> dict:
+    """The four numbers the original payload never supplied: how STRETCHED
+    the move already is.
+
+    Every input the models currently get -- price vs EMA20/EMA50, 5-bar
+    momentum, H4/H1 trend -- measures trend DIRECTION, and the prompt then
+    asks them to confirm continuation. At a local extreme all of those look
+    their most bullish at the exact moment price is about to revert, which
+    is what the live trades show: 16 of 29 never reached +0.1R and the
+    median loser died in 2 M15 bars, i.e. entries landed on the turn.
+
+    So the models were answering the question they were asked. These are
+    the figures needed to ask a better one -- all pure functions of candles
+    already in hand, no extra data source:
+
+      stretch_atr : (price - EMA20) / ATR. How far price has run from its
+                    own mean, in units of its own volatility.
+      range_pos   : where price sits in the recent high-low range, 0..1.
+                    0.98 means "at the very top", 0.5 means mid-range.
+      run_bars    : consecutive same-direction closes ending now. A long
+                    run is momentum AND an ageing move at the same time.
+      travel_atr  : net distance covered over the last 10 bars, in ATR.
+                    Separates a grind from a spike.
+    """
+    closes = [float(c[4]) for c in candles]
+    highs = [float(c[2]) for c in candles]
+    lows = [float(c[3]) for c in candles]
+    price = closes[-1]
+    ema20 = _ema(closes, 20)
+    a = atr if (atr and math.isfinite(atr) and atr > 0) else 0.0
+
+    look = min(20, len(candles))
+    hi, lo = max(highs[-look:]), min(lows[-look:])
+    rng = hi - lo
+    # mid-range when the window is flat, so a zero range cannot read as an
+    # extreme and manufacture a false exhaustion signal
+    range_pos = (price - lo) / rng if rng > 0 else 0.5
+
+    dirs = [1 if closes[i] > closes[i - 1] else -1 if closes[i] < closes[i - 1]
+            else 0 for i in range(1, len(closes))]
+    run_bars, run_dir = 0, "flat"
+    if dirs and dirs[-1] != 0:
+        run_dir = "up" if dirs[-1] > 0 else "down"
+        for d in reversed(dirs):
+            if d == dirs[-1]:
+                run_bars += 1
+            else:
+                break
+
+    n = min(10, len(closes) - 1)
+    travel_atr = ((price - closes[-1 - n]) / a) if (a > 0 and n > 0) else 0.0
+
+    return {
+        "stretch_atr": ((price - ema20) / a) if a > 0 else 0.0,
+        "range_pos": range_pos,
+        "run_bars": run_bars,
+        "run_dir": run_dir,
+        "travel_atr": travel_atr,
+    }
+
+
 def _ema(values: list, span: int) -> float:
     k = 2.0 / (span + 1.0)
     prev = values[0]
@@ -367,15 +487,34 @@ def format_payload(symbol: str, p: dict) -> str:
         lines.append(f"    {b['o']:.2f} / {b['h']:.2f} / {b['l']:.2f} / "
                      f"{b['c']:.2f} / {b['v']:.0f}")
 
+    ex = p.get("exhaustion")
+    if ex:
+        lines.append("  STRETCH (how far this move has already run):")
+        lines.append(f"    distance from EMA20 = {ex['stretch_atr']:+.2f} ATR")
+        lines.append(f"    position in the last-20-bar range = "
+                     f"{ex['range_pos']:.2f}  (0.00 = at the low, "
+                     f"1.00 = at the high)")
+        lines.append(f"    consecutive {ex['run_dir']} closes = {ex['run_bars']}")
+        lines.append(f"    net travel over the last 10 bars = "
+                     f"{ex['travel_atr']:+.2f} ATR")
+
     htf = (p.get("htf") or {}).get("htf")
     mtf = (p.get("htf") or {}).get("mtf")
     if htf:
         lines.append(f"  HTF_Trend (H4): {htf['trend']} "
                      f"(close {htf['price']:.2f}, EMA20 {htf['ema20']:.2f}, "
                      f"EMA50 {htf['ema50']:.2f})")
-        lines.append(f"    -> you may only go LONG if this is BULLISH, "
-                     f"or SHORT if this is BEARISH. If it is NEUTRAL, or "
-                     f"points the other way, the answer is WAIT.")
+        if ex:
+            # The hard veto below would make a counter-trend call impossible
+            # to express, so the exhaustion variant could never differ from
+            # the baseline and the A/B would measure nothing.
+            lines.append(f"    -> context only. A counter-trend entry is "
+                         f"allowed here when the stretch figures argue for "
+                         f"exhaustion.")
+        else:
+            lines.append(f"    -> you may only go LONG if this is BULLISH, "
+                         f"or SHORT if this is BEARISH. If it is NEUTRAL, or "
+                         f"points the other way, the answer is WAIT.")
     if mtf:
         lines.append(f"  MTF_Trend (H1, context only): {mtf['trend']}")
 
@@ -440,7 +579,13 @@ def build_key_levels(daily_candles: list, price: float) -> dict:
 
 def _fmt_prompt(symbol: str, bars: int, price: float, atr: float,
                 payload_text: str) -> str:
-    return ENTRY_PROMPT_TEMPLATE.format(
+    # Template chosen by a module switch rather than a new argument: adding
+    # a parameter here would change the arity of every call path down to
+    # gemini_chart_signal/openai_chart_signal, and a missed call site is
+    # exactly the bug that left this bot inert for six hours twice.
+    tpl = (ENTRY_PROMPT_TEMPLATE_EXHAUSTION if EXHAUSTION_MODE
+           else ENTRY_PROMPT_TEMPLATE)
+    return tpl.format(
         symbol=symbol, bars=bars, price=f"{price:.2f}", atr=f"{atr:.2f}",
         payload=payload_text,
         sl_lo=f"{SL_ATR_MIN * atr:.2f}", sl_hi=f"{SL_ATR_MAX * atr:.2f}",
