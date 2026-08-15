@@ -160,6 +160,66 @@ def report(title, rows, sym):
     return best_ev, best_tp
 
 
+WF = []
+
+
+def ev_at(rows, tp):
+    """EV per trade in R for a fixed target, net of spread."""
+    if not rows:
+        return None
+    wins = sum(1 for r in rows if r["inv"] >= tp)
+    wr = wins / len(rows)
+    cost = sum(r["cost"] for r in rows) / len(rows)
+    return wr * tp - (1 - wr) * 1.0 - cost, wr
+
+
+def walk_forward():
+    """The TP table above is fitted on the SAME trades it is scored on, so
+    its winner is guaranteed to look good. This is the check that isn't
+    rigged: split chronologically, choose the target using only the EARLY
+    half, then score it on the LATE half it never saw.
+
+    Two rules are tested on the late half:
+      - the target fitted on the early half (an honest walk-forward)
+      - a flat 1.25R chosen a priori (no fitting anywhere)
+    If the fitted target collapses out of sample while the flat rule holds,
+    the fitting was noise and the flat rule is what should ship.
+
+    n is small enough that this cannot CONFIRM an edge -- it can only fail
+    to refute one. A collapse here is still decisive in the other
+    direction: it would kill the idea outright.
+    """
+    print("\n" + "=" * 74)
+    print("  WALK-FORWARD -- fit on early trades, score on later ones")
+    print("=" * 74)
+    rows = sorted(WF, key=lambda r: r["ts"])
+    groups = {"ALL": rows}
+    for r in rows:
+        groups.setdefault(r["sym"], []).append(r)
+
+    print(f"  {'group':<10}{'n':>4}{'split':>7}{'fit TP':>8}"
+          f"{'EV in':>8}{'EV out':>8}{'WR out':>8}{'flat 1.25R out':>16}")
+    for name in ("ALL", "BTCUSDc", "XAUUSDc", "ETHUSDc"):
+        g = groups.get(name) or []
+        if len(g) < 6:
+            print(f"  {name:<10}{len(g):>4}   too few trades to split")
+            continue
+        cut = len(g) // 2
+        early, late = g[:cut], g[cut:]
+        best = max(TP_GRID, key=lambda tp: ev_at(early, tp)[0])
+        ev_in, _ = ev_at(early, best)
+        ev_out, wr_out = ev_at(late, best)
+        ev_flat, _ = ev_at(late, 1.25)
+        print(f"  {name:<10}{len(g):>4}{cut:>4}/{len(late):<3}{best:>7.2f}"
+              f"{ev_in:>+8.3f}{ev_out:>+8.3f}{100*wr_out:>7.1f}%"
+              f"{ev_flat:>+16.3f}")
+    print()
+    print("  'EV out' near or above 'EV in' -> the target was not just fitted")
+    print("     to noise. Far below -> it was, and the in-sample table lied.")
+    print("  'flat 1.25R out' is the number to trust most: nothing about it")
+    print("     was chosen by looking at these trades.")
+
+
 def main():
     global LOG
     LOG = find_log()
@@ -189,6 +249,8 @@ def main():
 
         o_best, _ = best_excursion(bars, t["fill"], long_, R)
         i_best, _ = best_excursion(bars, t["fill"], not long_, R)
+        WF.append({"ts": t["ts"], "sym": t["sym"],
+                   "inv": i_best, "cost": cost_R})
         d = by_sym.setdefault(t["sym"], {"orig": [], "inv": []})
         d["orig"].append((o_best, True, cost_R))
         d["inv"].append((i_best, True, cost_R))
@@ -220,6 +282,8 @@ def main():
             r = report(lbl, d[key], sym)
             if r:
                 grand.setdefault(key, []).append((sym, r[0], r[1], len(d[key])))
+
+    walk_forward()
 
     print("\n" + "=" * 74)
     print("  READING IT")
