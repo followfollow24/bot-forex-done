@@ -47,7 +47,36 @@ except ImportError:
     sys.exit(1)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-LOG = os.path.join(BASE, "forex_bot_chart_ai_trader.log")
+
+
+def find_log():
+    """The bots are launched from the Desktop, so the log is NOT beside this
+    script in bot_repo. Search both, and glob rather than hard-code the
+    filename so a renamed log surfaces as a clear list instead of a bare
+    'not found'. An explicit path as argv[1] always wins.
+    """
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    import glob
+    roots = [BASE, os.path.join(os.path.expanduser("~"), "Desktop")]
+    hits = []
+    for r in roots:
+        hits += glob.glob(os.path.join(r, "*chart_ai*.log"))
+    if not hits:
+        print("[ERROR] no *chart_ai*.log found in:")
+        for r in roots:
+            print(f"    {r}")
+        print("  pass the path explicitly:  python _loser_anatomy.py <path>")
+        sys.exit(1)
+    hits.sort(key=lambda p: os.path.getsize(p), reverse=True)
+    if len(hits) > 1:
+        print(f"[note] {len(hits)} candidates; using the largest:")
+        for h in hits:
+            print(f"    {os.path.getsize(h):>10,}  {h}")
+    return hits[0]
+
+
+LOG = None
 
 # round-trip cost in PRICE units, per the repo's verified specs
 SPREAD = {"XAUUSDc": 0.24, "BTCUSDc": 10.0, "ETHUSDc": 0.6}
@@ -61,9 +90,7 @@ OPEN_RE = re.compile(
 
 
 def parse_opens():
-    if not os.path.exists(LOG):
-        print(f"[ERROR] {LOG} not found")
-        sys.exit(1)
+    print(f"  log: {LOG}")
     out = []
     with open(LOG, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -134,11 +161,14 @@ def report(title, rows, sym):
 
 
 def main():
+    global LOG
+    LOG = find_log()
     if not mt5.initialize():
         print("[ERROR] MT5 init failed")
         sys.exit(1)
 
     trades = parse_opens()
+    print(f"  parsed {len(trades)} [OPEN] lines")
     if not trades:
         print("[ERROR] no [OPEN] lines parsed")
         mt5.shutdown()
