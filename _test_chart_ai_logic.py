@@ -683,4 +683,83 @@ assert gate(2.0, 12.0) is False, "gold at 0.167R (news blowout) must block"
 print("  live check also blocks gold if its spread blows out to 0.167R   OK")
 print("PASS\n")
 
+print("=== Case 37: invert TP override rewrites tp_dist and rr, not just tp ===")
+# _enter() sizes the live order from decision["tp_dist"], NOT from the tp
+# price. An override that updated only the price would leave a stale
+# distance behind and the broker would receive the models' old 1.5R target
+# while the log claimed 1.25R -- silently trading the thing the
+# walk-forward showed to be barely profitable. This is that trap.
+b37 = X(R("SHORT", sl=PRICE + 10, tp=PRICE - 20), R("SHORT", sl=PRICE + 10, tp=PRICE - 20))
+assert b37 is not None and abs(b37["sl_dist"] - 10) < 1e-9
+assert abs(b37["tp_dist"] - 20) < 1e-9, b37["tp_dist"]
+
+ov = cat.invert_decision(b37, tp_r=1.25)
+assert ov["signal"] == "long", ov["signal"]
+assert abs(ov["sl_dist"] - 10) < 1e-9, "stop distance must be untouched"
+assert abs(ov["tp_dist"] - 12.5) < 1e-9, ("tp_dist not rewritten", ov["tp_dist"])
+assert abs(ov["rr"] - 1.25) < 1e-9, ("rr not rewritten", ov["rr"])
+assert abs(ov["tp"] - (PRICE + 12.5)) < 1e-9, ov["tp"]
+assert ov["sl"] < ov["entry"] < ov["tp"], "levels on wrong sides for a LONG"
+# the price and the distance must describe the SAME target
+assert abs((ov["tp"] - ov["entry"]) - ov["tp_dist"]) < 1e-9, "tp price/distance disagree"
+print("  SHORT 1.5R -> LONG 1.25R: tp_dist 20 -> 12.5, rr -> 1.25, tp price agrees   OK")
+
+# default must stay a plain mirror, so Case 32's guarantees still hold
+plain = cat.invert_decision(b37)
+assert abs(plain["tp_dist"] - 20) < 1e-9, "default must preserve the models' target"
+assert "tp_r_override" not in plain
+print("  no tp_r argument -> unchanged mirror (Case 32 behaviour intact)   OK")
+
+# a SHORT result must reflect the shorter target on the correct side
+b37b = X(R("LONG"), R("LONG"))
+ovb = cat.invert_decision(b37b, tp_r=1.25)
+assert ovb["signal"] == "short" and ovb["tp"] < ovb["entry"] < ovb["sl"]
+assert abs((ovb["entry"] - ovb["tp"]) - ovb["tp_dist"]) < 1e-9
+assert abs(ovb["rr"] - 1.25) < 1e-9
+print("  LONG -> SHORT at 1.25R, levels and distances consistent   OK")
+
+# the constant actually wired into the live path must be the tested one
+assert abs(cat.INVERT_TP_R - 1.25) < 1e-9, cat.INVERT_TP_R
+src = inspect.getsource(cat.ChartAITraderBot._maybe_enter) if hasattr(
+    cat.ChartAITraderBot, "_maybe_enter") else inspect.getsource(cat.ChartAITraderBot)
+assert "invert_decision(decision, tp_r=INVERT_TP_R)" in src, \
+    "live call site must pass the override, else invert trades the old 1.5R"
+print("  live call site passes tp_r=INVERT_TP_R (1.25)   OK")
+print("PASS\n")
+
+print("=== Case 38: deploy and watchdog launch args agree ===")
+# The watchdog relaunches from its own Args string. When that string drifts
+# from the deploy script's, a crash-restart silently swaps the bot's
+# settings and nothing reports it -- this has bitten twice in this repo
+# (btc risk 1.00->1.90, gold regime-filter OFF->ON), and most likely a
+# third time when --invert appeared to revert to normal direction.
+# Skips when run from the Desktop, where the .ps1 files are not copied.
+import re as _re
+_here = os.path.dirname(os.path.abspath(__file__))
+_wd = os.path.join(_here, "watchdog_h1.ps1")
+_dep = os.path.join(_here, "deploy_chart_ai.ps1")
+if not (os.path.exists(_wd) and os.path.exists(_dep)):
+    print("SKIP -- .ps1 files not beside the test (running from Desktop)\n")
+else:
+    _wtxt = open(_wd, encoding="utf-8", errors="replace").read()
+    _dtxt = open(_dep, encoding="utf-8", errors="replace").read()
+    _wm = _re.search(r'Args\s*=\s*"(chart_ai_trader\.py[^"]*)"', _wtxt)
+    _dm = _re.search(r'\$Args\s*=\s*"(chart_ai_trader\.py[^"]*)"', _dtxt)
+    assert _wm, "no chart_ai Args line found in watchdog_h1.ps1"
+    assert _dm, "no $Args line found in deploy_chart_ai.ps1"
+    assert _wm.group(1) == _dm.group(1), (
+        "LAUNCH ARG DRIFT -- watchdog would relaunch with different settings\n"
+        f"  watchdog: {_wm.group(1)}\n  deploy  : {_dm.group(1)}")
+    print(f"  both launch: {_wm.group(1)}")
+    # the flags this deploy exists to apply must actually be present
+    assert "--invert" in _wm.group(1), "invert mode missing from launch args"
+    assert "--symbols BTCUSDC" in _wm.group(1), "BTC-only restriction missing"
+    print("  --invert and --symbols BTCUSDC present in both   OK")
+    # .ps1 must stay ASCII: PowerShell 5.1 fails to parse non-ASCII without a BOM
+    for _p, _t in ((_wd, _wtxt), (_dep, _dtxt)):
+        _bad = [c for c in _t if ord(c) > 127]
+        assert not _bad, f"{os.path.basename(_p)} has non-ASCII: {_bad[:5]}"
+    print("  both .ps1 files are ASCII-only (PS 5.1 parse safety)   OK")
+    print("PASS\n")
+
 print("ALL TESTS PASSED")

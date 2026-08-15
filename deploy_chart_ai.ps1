@@ -28,7 +28,10 @@ param(
 $ErrorActionPreference = "Stop"
 $Desktop = "$env:USERPROFILE\Desktop"
 $Repo    = "$Desktop\bot_repo"
-$Args    = "chart_ai_trader.py --risk 0.30 --allow-real"
+# [2026-08-15] INVERTED, BTC-only. Keep this string identical to the Args
+# entry in watchdog_h1.ps1 -- if they drift, the watchdog silently relaunches
+# the bot with different settings than this script started it with.
+$Args    = "chart_ai_trader.py --risk 0.30 --allow-real --invert --symbols BTCUSDC"
 
 Write-Host "=== 1. pull latest code ===" -ForegroundColor Cyan
 Set-Location $Repo

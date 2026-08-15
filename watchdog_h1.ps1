@@ -276,8 +276,20 @@ $bots = @(
         StaleMinutes  = 5
         StopFile      = "STOP_CHART_AI_TRADER"
         HeartbeatFile = "HEARTBEAT_CHART_AI_TRADER"
+        # [2026-08-15] Now runs INVERTED and BTC-only. Both flags MUST stay
+        # in this string: the watchdog relaunches from Args, so a restart
+        # would otherwise put the bot back to normal-direction, all-symbols
+        # without anyone noticing -- which is what appears to have happened
+        # the first time invert was switched on by hand.
+        #   --invert         : trade the opposite side, target 1.25R (the
+        #                      models' 1.5R wins only 46.7% once flipped).
+        #   --symbols BTCUSDC: BTC is the only market where two independent
+        #                      measurements agree. _signal_accuracy.py found
+        #                      BTC consensus right 17.4% vs a 53.3% base
+        #                      (p=0.001) while GOLD came out at 50.0% vs
+        #                      48.7% (p=0.92) -- nothing to invert there.
         ProcessMatch  = "*chart_ai_trader.py*"
-        Args          = "chart_ai_trader.py --risk 0.30 --allow-real"
+        Args          = "chart_ai_trader.py --risk 0.30 --allow-real --invert --symbols BTCUSDC"
     }
 )
 

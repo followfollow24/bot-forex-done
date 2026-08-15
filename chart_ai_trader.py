@@ -142,6 +142,14 @@ POLL_MIN = 15        # one M15 bar -- matches the entry timeframe, same way
 # guessing what it meant with real money is worse than skipping).
 SL_ATR_MIN, SL_ATR_MAX = 1.2, 2.5
 MIN_RR = 1.5          # spec: TP must be at least 1:1.5 reward:risk
+# Target used in INVERT mode, as a multiple of the stop distance. The
+# models' own 1.5R is too far once the side is flipped -- price reverses
+# before reaching it. Measured on all 29 real trades (see invert_decision):
+# BTC inverted wins 46.7% at 1.5R (EV +0.107R) but 73.3% at 1.25R
+# (EV +0.591R). Chosen a priori, then confirmed out-of-sample on the later
+# half of a chronological split at EV +0.353R. Applies ONLY when inverting;
+# normal-direction trades still use whatever target the models proposed.
+INVERT_TP_R = 1.25
 # The AI's stated entry must sit within this many ATR of the real current
 # price, or the quote is stale/hallucinated and the setup is rejected.
 MAX_ENTRY_DRIFT_ATR = 1.5
@@ -567,16 +575,40 @@ def cross_check_signal(gemini_result: dict, openai_result: dict,
     }
 
 
-def invert_decision(decision: dict) -> dict:
-    """Mirror a validated decision: opposite direction, SAME stop and target
-    DISTANCES, levels reflected across the entry.
+def invert_decision(decision: dict, tp_r: Optional[float] = None) -> dict:
+    """Mirror a validated decision: opposite direction, stop distance kept,
+    levels reflected across the entry. `tp_r` overrides the target, as a
+    multiple of the STOP distance; None keeps the models' own target.
 
-    [2026-08-14] Added after the live bot went 0-for-17 and _flip_test.py
-    replayed every logged [OPEN] against real M15 bars: 15 of 17 trades
-    that hit their stop would have hit their target reversed --
-    ORIGINAL 11.8% WR / -12.85R vs MIRROR 88.2% WR / +20.67R, both net of
-    the repo's verified spreads and scoring any bar that spans both levels
-    as a LOSS for whichever side is being judged.
+    [2026-08-15] Why the override exists. _loser_anatomy.py walked all 29
+    real trades against M15 bars and recorded the most profit ever
+    available before the 1R stop would have been touched. Two facts came
+    out of it:
+
+      - 16 of 29 trades never showed even +0.1R. Price went the wrong way
+        from the first bar, so no exit rule could have saved them. Every
+        one of 21 tested (symbol x target) combinations lost as traded.
+      - inverted, 28 of 29 went into profit and 28 of 29 reached +0.5R.
+
+    So the models locate the setup and size the stop well; the SIDE is
+    backwards. But the target matters as much as the side, which is what
+    the first invert attempt missed: on BTC, inverted at the models' usual
+    1.5R the win rate is only 46.7% (EV +0.107R), while at 1.25R it is
+    73.3% (EV +0.591R). Price reverses before reaching the far target.
+    Hence 1.25R, and hence this override rather than a plain mirror.
+
+    1.25R was NOT picked by fitting -- that is the point. Fitting the
+    target on the same 29 trades that suggested the idea is circular, so
+    _loser_anatomy.py also splits them chronologically and scores a flat
+    1.25R, chosen a priori, on the later half alone:
+
+        ALL      n=29  14/15 split   EV out +0.434R   WR 66.7%
+        BTCUSDc  n=15   7/8  split   EV out +0.353R   WR 62.5%
+
+    Out-of-sample EV lands at roughly half the in-sample figure -- the
+    normal overfitting haircut -- but stays clearly positive rather than
+    collapsing. That is a failure to refute, not a confirmation: the late
+    halves are 15 and 8 trades from a single 3-day window.
 
     WHERE THE FLIP SITS, and why it matters: this runs AFTER consensus,
     validation, the HTF/key-level gates and the news veto -- i.e. it
@@ -584,24 +616,34 @@ def invert_decision(decision: dict) -> dict:
     (that test mirrored logged orders, which had already passed every
     gate). Flipping earlier would feed a reversed direction into the HTF
     gate, which would then reject nearly everything, and would NOT be the
-    thing the +20.67R was measured on.
+    thing the measurements were taken on.
 
     So the premise being traded is narrow and worth stating plainly: the
     models' ANALYSIS is treated as sound enough to locate a setup and size
     its stop, but its DIRECTION is taken as systematically backwards.
 
-    ** This is a hypothesis under test, not an established edge. 17 trades
-    over ~2 days is one market regime, 14 of them SHORT -- so "reversed
-    wins" may be indistinguishable from "the market rose for two days".
-    And if the true cause is a direction bug somewhere in the pipeline,
-    this cancels one error with another and will break the moment the
-    underlying bug is fixed. Investigate the cause; do not treat this
-    number as validation. **
+    ** Still a hypothesis under test. It has support on BTC from two
+    independent measurements -- _signal_accuracy.py replayed 150 historical
+    charts and found BTC consensus right 17.4% of the time against a 53.3%
+    base rate (p=0.001), and these 15 live trades invert profitably -- but
+    on GOLD the same replay found 50.0% against a 48.7% base (p=0.92),
+    i.e. no information to invert. Trade BTC only until that disagreement
+    is settled. And if the true cause is a direction bug in the pipeline,
+    this cancels one error with another and breaks the moment the bug is
+    fixed. Keep investigating the cause. **
     """
     out = dict(decision)
     entry = float(decision["entry"])
     sl_dist = float(decision["sl_dist"])
     tp_dist = float(decision["tp_dist"])
+    if tp_r is not None:
+        # _enter() sizes the real order from tp_dist, so tp_dist and rr must
+        # be rewritten here too. Updating only the tp PRICE would leave a
+        # stale distance behind and the broker would get the old target.
+        tp_dist = float(tp_r) * sl_dist
+        out["tp_dist"] = tp_dist
+        out["rr"] = tp_dist / sl_dist if sl_dist > 0 else 0.0
+        out["tp_r_override"] = float(tp_r)
     was_long = decision["signal"] == "long"
     now_long = not was_long
     out["signal"] = "long" if now_long else "short"
@@ -1109,9 +1151,10 @@ class ChartAITraderBot:
             return
 
         if self.invert:
-            decision = invert_decision(decision)
+            decision = invert_decision(decision, tp_r=INVERT_TP_R)
             self.log.info(f"[{canon}] INVERTED -> {decision['decision']} "
                           f"sl={decision['sl']:.2f} tp={decision['tp']:.2f} "
+                          f"rr={decision['rr']:.2f} "
                           f"(was {decision['inverted_from']})")
         self._enter(canon, bsym, decision)
 
