@@ -473,6 +473,58 @@ def build_exhaustion_context(candles: list, atr: float) -> dict:
     }
 
 
+# Code-level entry gate derived from the 29 real trades (see
+# _entry_conditions.py). Default OFF until it clears out-of-sample
+# validation -- shipping a threshold fitted on the trades that suggested
+# it is the exact mistake that put this bot live unvalidated.
+STRETCH_GATE = False
+STRETCH_MAX_ATR = 2.0        # |price - EMA20| in ATR
+TRAVEL_MAX_ATR = 2.0         # |net move over 10 bars| in ATR
+RUN_MIN, RUN_MAX = 2, 4      # consecutive same-direction closes, [min, max)
+
+
+def entry_conditions_allow(ex: dict):
+    """Block the market states that lost every single time in the live
+    sample. Returns (allowed, reason).
+
+    Rebuilding the market state at all 29 real entries and splitting by
+    condition produced three bands with ZERO winners between them:
+
+        |distance from EMA20| >= 2.0 ATR      0 wins / 7
+        |net travel over 10 bars| >= 2.0 ATR  0 wins / 7
+        fewer than 2 consecutive same-way closes   0 wins / 11
+        4 or more consecutive same-way closes      0 wins / 5
+
+    against an overall 4/29 = 14%. Applying all three would have kept
+    every one of the four winners and removed 19 of the 25 losers -- 44%
+    on what remains.
+
+    The shape is coherent rather than three unrelated cuts. Both extremes
+    fail: a market that has already run hard (large stretch, large travel,
+    a long unbroken sequence) is done moving, and a market with no
+    sequence at all has nothing to move. What survives is the middle --
+    a modest, ongoing move with room left.
+
+    ** That 44% is in-sample. The thresholds were read off the same 29
+    trades they are scored on, only 9 survive the filter, and a rule fitted
+    that tightly usually evaporates. Hence STRETCH_GATE defaults False.
+    _stretch_gate_validate.py scores the same rule on thousands of
+    historical bars; wire it live only if it holds there. **
+    """
+    s = abs(float(ex.get("stretch_atr", 0.0)))
+    t = abs(float(ex.get("travel_atr", 0.0)))
+    r = int(ex.get("run_bars", 0))
+    if s >= STRETCH_MAX_ATR:
+        return False, f"stretched {s:.2f}ATR from EMA20 (>= {STRETCH_MAX_ATR})"
+    if t >= TRAVEL_MAX_ATR:
+        return False, f"travelled {t:.2f}ATR in 10 bars (>= {TRAVEL_MAX_ATR})"
+    if r < RUN_MIN:
+        return False, f"no established run ({r} bars < {RUN_MIN})"
+    if r >= RUN_MAX:
+        return False, f"run already {r} bars (>= {RUN_MAX})"
+    return True, "ok"
+
+
 def _ema(values: list, span: int) -> float:
     k = 2.0 / (span + 1.0)
     prev = values[0]
