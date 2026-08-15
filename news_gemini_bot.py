@@ -571,7 +571,19 @@ class NewsGeminiBot:
         self._mt5_timeout = 90.0
 
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        self.gemini_model = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+        # [2026-08-15] Model CHAIN, not a single id -- chart_ai_trader has had
+        # one for a while and this bot did not, which is why it kept giving up
+        # on 503s. "This model is currently experiencing high demand" is
+        # per-model capacity on Google's side, so retrying the SAME id after
+        # 20s is close to the least useful response available; a different id
+        # is usually served fine at that moment. Deduped, because the VPS .env
+        # pins GEMINI_MODEL and a chain of [x, x] would burn a retry attempt
+        # on the identical overloaded model.
+        _gm = [os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest"),
+               os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-flash-latest")]
+        self.gemini_models = list(dict.fromkeys([m for m in _gm if m]))
+        # kept for the chart-veto call site, which takes a single id
+        self.gemini_model = self.gemini_models[0]
         self.openai_key = os.environ.get("OPENAI_API_KEY", "")
         self.openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
@@ -740,7 +752,8 @@ class NewsGeminiBot:
                       f"poll={self.poll_min}min (boosted to {self.boost_poll_min}min "
                       f"during {self.boost_start_hour:02d}:00-{self.boost_end_hour:02d}:00 UTC "
                       f"= 19:00-20:00 Thai time)")
-        self.log.info(f"  gemini model={self.gemini_model}")
+        self.log.info(f"  gemini models={self.gemini_models} "
+                      f"(primary first, next on a 503 rather than a re-ask)")
         openai_status = ("configured" if self.openai_key else
                         "NOT SET -- dual-consensus unavailable, bot will idle "
                         "(no new entries) until OPENAI_API_KEY is added to .env")
@@ -927,12 +940,28 @@ class NewsGeminiBot:
         of short retries first -- see SCAN_MAX_RETRIES. Quota exhaustion and
         anything else non-transient (bad schema, auth) skip immediately;
         retrying those wastes the retry budget on something that can't
-        recover within one poll cycle anyway."""
-        attempt = 0
+        recover within one poll cycle anyway.
+
+        `model` accepts a single id or a CHAIN. On a transient failure the
+        chain advances to the next id BEFORE sleeping, because a 503 reading
+        "this model is currently experiencing high demand" is a statement
+        about that model's capacity -- another id is usually served fine
+        straight away, so waiting 20s to ask the identical overloaded model
+        again is the weakest available response. Only once the distinct ids
+        are exhausted does the delay apply. Taking a list or a string keeps
+        the signature and both call sites unchanged: adding a parameter here
+        is exactly the arity change that has silently disabled a bot in this
+        repo twice."""
+        models = [model] if isinstance(model, str) else [m for m in model if m]
+        if not models:
+            self.log.error(f"[{name.upper()}] no model configured -- skip cycle")
+            return None
+        attempt, idx = 0, 0
         while True:
+            active = models[min(idx, len(models) - 1)]
             try:
                 return self._call_with_timeout(
-                    fn, SCAN_CALL_TIMEOUT_SEC, api_key, model, lookback_min)
+                    fn, SCAN_CALL_TIMEOUT_SEC, api_key, active, lookback_min)
             except Exception as e:
                 # str(TimeoutError()) is '' -- fall back to the class name so
                 # the log/Telegram line says something instead of nothing.
@@ -951,10 +980,23 @@ class NewsGeminiBot:
                                           concurrent.futures.TimeoutError))
                 if (timed_out or _is_transient_error(msg)) and attempt < SCAN_MAX_RETRIES:
                     attempt += 1
-                    self.log.warning(f"[{name.upper()}] transient error, retry "
-                                     f"{attempt}/{SCAN_MAX_RETRIES} in "
-                                     f"{SCAN_RETRY_DELAY_SEC}s: {msg[:200]}")
-                    time.sleep(SCAN_RETRY_DELAY_SEC)
+                    had_spare = idx < len(models) - 1
+                    idx += 1
+                    nxt = models[min(idx, len(models) - 1)]
+                    if had_spare:
+                        # different model available: go immediately, the wait
+                        # buys nothing when the congestion is per-model
+                        self.log.warning(
+                            f"[{name.upper()}] transient on {active}, retry "
+                            f"{attempt}/{SCAN_MAX_RETRIES} NOW on {nxt}: "
+                            f"{msg[:200]}")
+                    else:
+                        self.log.warning(
+                            f"[{name.upper()}] transient on {active}, no "
+                            f"further models -- retry {attempt}/"
+                            f"{SCAN_MAX_RETRIES} in {SCAN_RETRY_DELAY_SEC}s: "
+                            f"{msg[:200]}")
+                        time.sleep(SCAN_RETRY_DELAY_SEC)
                     continue
                 suffix = (f" (after {attempt} retr{'y' if attempt == 1 else 'ies'})"
                          if attempt else "")
@@ -975,7 +1017,7 @@ class NewsGeminiBot:
         # 5-minute staleness threshold and get restarted mid-decision.
         self._heartbeat()
         gemini_candidates = self._safe_scan("gemini", gemini_scan,
-                                            self.gemini_key, self.gemini_model,
+                                            self.gemini_key, self.gemini_models,
                                             lookback_min)
         self._heartbeat()
         if gemini_candidates is None:
