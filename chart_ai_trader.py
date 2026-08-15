@@ -84,19 +84,27 @@ MAGIC = 671001
 #     BTCUSDc  0.068R/trade  -> breakeven WR 42.7%
 #     ETHUSDC  0.093R/trade  -> breakeven WR 43.7%   (4.6x gold)
 # ETH hands back ~9% of every trade's risk before direction is even
-# considered. Stated plainly: that is a ~3 percentage-point handicap on
-# required win rate, which is real but is NOT what produced 0-for-21 --
-# dropping it trims a known cost, it does not fix the strategy.
-# Restore with --symbols XAUUSD,BTCUSDC,ETHUSDC.
+# considered.
+#
+# [2026-08-15] REMOVED ENTIRELY at the user's explicit instruction: ETH is
+# not to be traded again by any bot. It is gone from ALL_SYMBOLS, not just
+# from the default, so --symbols cannot bring it back -- an unknown symbol
+# is rejected at startup. This is deliberate: leaving it "restorable"
+# meant one CLI flag stood between the account and a symbol whose drag is
+# 4.6x gold's, and after MAX_SPREAD_R rose to 0.12 the cost gate no longer
+# blocks ETH either, so the symbol list was the last guard.
+#
+# Live evidence behind the instruction: ETH went 0 wins from 7 chart_ai
+# trades, 5 of which never showed even +0.1R, and eth_h1_manual lost
+# 335.14 on its single trade at the highest risk setting in the fleet.
+#
+# Do NOT re-add. If it is ever reconsidered, that is a new decision needing
+# fresh measurement, not a revert of this line.
 SYMBOLS = {
     "XAUUSD": "gold",
     "BTCUSDC": "BTC",
 }
-ALL_SYMBOLS = {
-    "XAUUSD": "gold",
-    "BTCUSDC": "BTC",
-    "ETHUSDC": "ETH",
-}
+ALL_SYMBOLS = dict(SYMBOLS)
 
 # Live per-trade spread ceiling, as a fraction of the stop distance.
 # The table above is a historical average; this is the same quantity
@@ -1663,10 +1671,10 @@ def main():
                          f"(default {MAX_CONSEC_LOSSES}; 0 = never stop, which "
                          f"is the setting for collecting an uncensored sample)")
     ap.add_argument("--symbols", default=",".join(SYMBOLS),
-                    help=f"comma-separated symbols to trade (default "
-                         f"{','.join(SYMBOLS)}; ETHUSDC is excluded by "
-                         f"default on measured spread cost -- see the SYMBOLS "
-                         f"comment. Pass {','.join(ALL_SYMBOLS)} to restore it)")
+                    help=f"comma-separated symbols to trade (default and only "
+                         f"permitted set: {','.join(SYMBOLS)}). ETHUSDC was "
+                         f"removed entirely on 2026-08-15 and is NOT "
+                         f"restorable here -- see the SYMBOLS comment.")
     ap.add_argument("--invert", action="store_true",
                     help="trade the OPPOSITE of the models' direction, keeping "
                          "their stop/target distances. Hypothesis under test "

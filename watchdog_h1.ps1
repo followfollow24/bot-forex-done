@@ -146,12 +146,15 @@ $bots = @(
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --xasset-short-gate ETHUSDc:36:168 --allow-real"
     },
-    @{
-        Symbol       = "ethusdc"
-        Variant      = "eth_h1_manual"
-        StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol ETHUSDc --variant-tag eth_h1_manual --timeframe 1h --sl-atr 3.0 --tp-atr 15.0 --manual-exit --adx-min 18 --max-positions 1 --risk 1.90 --allow-real"
-    },
+    # [2026-08-15] eth_h1_manual REMOVED, not commented out, at the user's
+    # explicit instruction that ETH is never traded again. It was stopped
+    # earlier the same day behind STOP_ETHUSDC_ETH_H1_MANUAL after losing
+    # 335.14 on its only trade, at --risk 1.90 -- the highest setting in the
+    # fleet on the worst-performing symbol. Deleting the entry rather than
+    # relying on the STOP file matters: a kill-switch is one file deletion
+    # away from being undone, whereas an absent entry cannot be relaunched
+    # by the watchdog at all. ETHUSDC is also gone from chart_ai_trader's
+    # ALL_SYMBOLS and news_gemini_bot's SYMBOLS, so no bot can reach it.
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"

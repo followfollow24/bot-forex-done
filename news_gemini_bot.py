@@ -3,7 +3,7 @@
 """
 news_gemini_bot.py -- 2026-08-10/11. Live news-driven trading signal using
 DUAL-PROVIDER CONSENSUS (Gemini + OpenAI, each with their own live web
-search), trading XAUUSDc / BTCUSDc / ETHUSDc.
+search), trading XAUUSDc / BTCUSDc.  (ETHUSDc removed 2026-08-15.)
 
 [!!] UNVALIDATED STRATEGY -- unlike every other bot in this repo, this one
 has NO historical backtest (an LLM's news judgement today is not the same
@@ -106,7 +106,10 @@ MAGIC = 669001  # 669xxx family: unused by any existing bot (555/666/667/668)
 SYMBOLS = {
     "XAUUSD": {"canon": "XAUUSD", "label": "gold", "ps": None, "pv": None},
     "BTCUSDC": {"canon": "BTCUSDC", "label": "BTC", "ps": 1.0, "pv": 0.01},
-    "ETHUSDC": {"canon": "ETHUSDC", "label": "ETH", "ps": 1.0, "pv": 0.01},
+    # [2026-08-15] ETHUSDC removed on the user's explicit instruction:
+    # never traded again by any bot. Removed from the SPEC, not just from
+    # the traded list, so a stray symbol string cannot resolve to a
+    # tradeable instrument anywhere downstream.
 }
 
 # Domains the CODE (not the model) accepts as tier-1. Deliberately narrow --
@@ -207,7 +210,7 @@ RESPONSE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "symbol": {"type": "string", "enum": ["XAUUSD", "BTCUSDC", "ETHUSDC"]},
+                    "symbol": {"type": "string", "enum": ["XAUUSD", "BTCUSDC"]},
                     "signal": {"type": "string", "enum": ["long", "short", "none"]},
                     "confidence": {"type": "number"},
                     "headline": {"type": "string"},
@@ -226,8 +229,8 @@ RESPONSE_SCHEMA = {
 
 PROMPT_TEMPLATE = """You are a market-moving-news scanner for a live trading system. \
 Use Google Search to find REAL, VERIFIED news published in the last {lookback_min} \
-minutes (current UTC time: {now_utc}) that could move XAUUSD (gold), BTCUSDC (Bitcoin), \
-or ETHUSDC (Ethereum) prices. Focus on:
+minutes (current UTC time: {now_utc}) that could move XAUUSD (gold) or BTCUSDC (Bitcoin) \
+prices. Focus on:
   - Macro: Fed/central bank rate decisions or statements, CPI/inflation prints, \
 NFP/jobs data, GDP, major fiscal policy news.
   - Crypto-specific: ETF flows/approvals, exchange incidents, regulatory actions, \
@@ -1272,11 +1275,11 @@ def main():
               "entries) until it's added to .env. Not fatal, continuing.")
 
     cfg = ForexConfig()
-    cfg.symbols = ["XAUUSD", "BTCUSDC", "ETHUSDC"]
+    cfg.symbols = ["XAUUSD", "BTCUSDC"]
     cfg.magic_number = MAGIC
     cfg.dry_run = args.dry_run
     cfg.allow_real = args.allow_real
-    for s in ("BTCUSDC", "ETHUSDC"):
+    for s in ("BTCUSDC",):
         cfg.pip_size[s] = 1.0
         cfg.pip_value_usd_approx[s] = 0.01
 

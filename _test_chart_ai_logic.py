@@ -657,9 +657,11 @@ print("PASS\n")
 
 print("=== Case 36: symbol set + live spread ceiling (measured cost) ===")
 assert "ETHUSDC" not in cat.SYMBOLS, "ETH is excluded by default on cost"
-assert "ETHUSDC" in cat.ALL_SYMBOLS, "but must remain restorable via --symbols"
+# [2026-08-15] previously this asserted ETH stayed RESTORABLE via --symbols.
+# That is now the opposite of the instruction; Case 40 owns the rule.
 assert list(cat.SYMBOLS) == ["XAUUSD", "BTCUSDC"], list(cat.SYMBOLS)
-print("  default %s   (ETHUSDC restorable via --symbols)" % list(cat.SYMBOLS))
+print("  default %s   (ETHUSDC removed entirely -- see Case 40)"
+      % list(cat.SYMBOLS))
 
 # [2026-08-15] The ceiling no longer encodes the symbol decision. It was
 # 0.08 purely to sit between BTC's average (0.068) and ETH's (0.093); it is
@@ -839,6 +841,53 @@ assert cat.build_exhaustion_context(_flat, 1.0)["range_pos"] == 0.5
 _z = cat.build_exhaustion_context(_cd, 0.0)
 assert _z["stretch_atr"] == 0.0 and _z["travel_atr"] == 0.0
 print("  flat range -> 0.50 (not an extreme); ATR=0 -> no divide-by-zero   OK")
+print("PASS\n")
+
+print("=== Case 40: ETH is gone from every bot and cannot be restored ===")
+# [2026-08-15] The user's instruction was "remove ETH from every bot, never
+# bring it back". A default is not a guarantee -- one CLI flag used to be
+# enough -- so this asserts the symbol is absent from the sets that decide
+# what is REACHABLE, not merely from what is selected by default.
+assert "ETHUSDC" not in cat.SYMBOLS, "ETH back in the default set"
+assert "ETHUSDC" not in cat.ALL_SYMBOLS, \
+    "ETH back in ALL_SYMBOLS -- --symbols could restore it"
+assert set(cat.ALL_SYMBOLS) == set(cat.SYMBOLS), \
+    "ALL_SYMBOLS must not offer anything the default set does not"
+print("  chart_ai: SYMBOLS == ALL_SYMBOLS == %s   OK" % list(cat.SYMBOLS))
+
+# --symbols must REJECT it rather than silently ignore it: a typo'd restore
+# attempt should stop the bot, not start it on a reduced set.
+_unknown = [x for x in ["XAUUSD", "ETHUSDC"] if x not in cat.ALL_SYMBOLS]
+assert _unknown == ["ETHUSDC"], _unknown
+print("  --symbols XAUUSD,ETHUSDC -> rejected at startup   OK")
+
+# news_gemini_bot trades its own symbol list and had ETH until today
+_ng = os.path.join(_here, "news_gemini_bot.py")
+if os.path.exists(_ng):
+    _t = open(_ng, encoding="utf-8").read()
+    assert '"ETHUSDC": {' not in _t, "ETH back in news_gemini SYMBOLS spec"
+    assert '"ETHUSDC"]' not in _t.replace('# ', ''), \
+        "ETH back in a news_gemini list/enum (scan schema or cfg.symbols)"
+    print("  news_gemini: no tradeable ETH spec, not in the scan enum   OK")
+
+# the watchdog is what actually relaunches bots; an entry there outranks
+# any in-code default
+_wd2 = os.path.join(_here, "watchdog_h1.ps1")
+if os.path.exists(_wd2):
+    _w2 = open(_wd2, encoding="utf-8", errors="replace").read()
+    _live = [l for l in _w2.splitlines()
+             if "Args" in l and "=" in l and not l.strip().startswith("#")]
+    _eth = [l for l in _live if "--symbol ETHUSDc" in l or "ETHUSDC" in l]
+    assert not _eth, ("watchdog would launch an ETH bot", _eth)
+    print("  watchdog: no launch line trades ETH   OK")
+    # the xasset gate READS the ETH/BTC ratio but opens no ETH position and
+    # pays no ETH spread; it is a validated filter (Sharpe 1.33->1.47) and
+    # is deliberately kept. Pinned here so its survival is a decision on
+    # record rather than something that looks like a miss.
+    assert any("--xasset-short-gate ETHUSDc" in l for l in _live), \
+        "xasset ETH/BTC ratio gate disappeared -- that was NOT part of " \
+        "removing ETH exposure; it reads a price and opens no position"
+    print("  btc_h1_manual keeps --xasset-short-gate (reads ETH, trades none)   OK")
 print("PASS\n")
 
 print("ALL TESTS PASSED")
