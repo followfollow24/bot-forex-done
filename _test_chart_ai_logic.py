@@ -789,6 +789,13 @@ cat.EXHAUSTION_MODE = True
 _pv = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
 cat.EXHAUSTION_MODE = False
 assert "EXHAUSTION" in _pv and "counter-trend entry is allowed" in _pv
+# The variant MUST carry a countable trigger. Without one, OpenAI answered
+# WAIT to all 150 replayed charts and the consensus could never fire --
+# a prompt that never trades measures nothing, however good its framing.
+for _need in ("E1.", "E2.", "E3.", "E4.", "C1.", "C2.", "C3.", "C4.",
+              "count >= 2", "Do NOT answer \"WAIT\" merely because"):
+    assert _need in _pv, f"countable-trigger element missing: {_need}"
+print("  variant carries a countable 4v4 trigger + anti-WAIT rule   OK")
 _lp["exhaustion"] = cat.build_exhaustion_context(_cd, 1.0)
 _tv = cat.format_payload("BTCUSDC", _lp)
 assert "you may only go LONG" not in _tv and "context only" in _tv

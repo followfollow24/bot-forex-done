@@ -317,26 +317,39 @@ is to say WHICH:
   A. CONTINUATION -- the move has room left and will extend.
   B. EXHAUSTION -- the move is stretched and will revert.
 
-Weigh BOTH before answering. The stretch figures above exist for exactly \
-this judgement:
-  * price far from EMA20 (large |stretch|), sitting at the extreme top or \
-bottom of its recent range, after a long unbroken run of same-direction \
-bars, is evidence for EXHAUSTION -- and note that every trend indicator \
-looks strongest at precisely that moment.
-  * price near EMA20, mid-range, after a pause or pullback, with the higher \
-timeframe pointing the same way, is evidence for CONTINUATION.
+Count the evidence. Use the STRETCH figures given above.
 
-DECISION:
-  * CONTINUATION -> trade WITH the move (LONG in an uptrend, SHORT in a \
-downtrend).
-  * EXHAUSTION -> trade AGAINST the move (SHORT after a stretched rally, \
-LONG after a stretched selloff).
-  * genuinely unclear, or the two readings are equally supported -> "WAIT".
+EXHAUSTION evidence -- count how many of these four are TRUE:
+  E1. |distance from EMA20| >= 1.5 ATR
+  E2. position in range >= 0.85, or <= 0.15
+  E3. consecutive same-direction closes >= 4
+  E4. |net travel over the last 10 bars| >= 2.0 ATR
+
+CONTINUATION evidence -- count how many of these four are TRUE:
+  C1. |distance from EMA20| <= 0.75 ATR
+  C2. position in range between 0.25 and 0.75
+  C3. the H4 and H1 trends point the SAME way
+  C4. the last 1-2 bars paused or pulled back against the move
+
+DECISION -- apply this mechanically:
+  * EXHAUSTION count >= 2 AND greater than the continuation count:
+      trade AGAINST the run. If the run direction is UP -> "SHORT".
+      If the run direction is DOWN -> "LONG".
+  * CONTINUATION count >= 2 AND greater than the exhaustion count:
+      trade WITH the move -- "LONG" if price is above both EMAs,
+      "SHORT" if below both.
+  * neither side reaches 2, or the two counts are EQUAL -> "WAIT".
+
+"WAIT" is only for the case above. Do NOT answer "WAIT" merely because \
+you feel uncertain, because both stories sound plausible, or because the \
+setup is not perfect -- the counts decide, not your comfort level. A \
+system that answers "WAIT" to everything is as useless as one that is \
+always wrong.
 
 Do NOT default to continuation just because the trend indicators agree. At \
 a turning point they always agree. The higher-timeframe trend is context, \
-not a veto: a counter-trend entry is allowed when the exhaustion evidence \
-is strong.
+not a veto: a counter-trend entry is allowed and expected when the \
+exhaustion count wins.
 
 LEVELS (only meaningful when the decision is LONG or SHORT):
   * entry: the current price, {price}.
@@ -347,9 +360,9 @@ stop goes BELOW entry; for SHORT it goes ABOVE.
 the distance from entry to tp must be at least {min_rr} times the \
 distance from entry to sl. For LONG the target is ABOVE entry; for \
 SHORT it is BELOW.
-  * reason: one or two sentences saying whether you read this as \
-CONTINUATION or EXHAUSTION, which figures drove that, and where you put \
-the stop and target.
+  * reason: state the two counts explicitly, e.g. "E=3 (E1,E2,E4) vs C=1 \
+-> exhaustion, run is up, so SHORT", then where you put the stop and \
+target.
 
 If the decision is "WAIT", still return numeric entry/sl/tp (they are \
 ignored) -- for example entry {price} and any two nearby values.
@@ -359,9 +372,24 @@ Respond ONLY via the provided JSON schema."""
 # Measurement switch, NOT a live setting. False means every live bot keeps
 # the original trend-continuation prompt, so the running invert bot is
 # unaffected even if the watchdog restarts it. _signal_accuracy.py sets this
-# to True to A/B the exhaustion prompt against the measured baseline
-# (BTC consensus edge -25.2 points, p=0.004). Only wire a CLI flag for it if
-# the measurement actually beats that.
+# to True to A/B against the measured baseline. Only wire a CLI flag for it
+# if the measurement actually beats that.
+#
+# [2026-08-15] First exhaustion run, 150 BTC samples:
+#     gemini     -25.2 (p=0.004)  ->  +4.2 (p=0.597)
+#     openai     -20.0 (p=0.007)  ->  0 directional calls
+#     consensus  -35.9 (p=0.001)  ->  0 (cannot fire without openai)
+# The reframing did what it was meant to: gemini's significant ANTI-edge
+# disappeared. +4.2 at p=0.597 is not a positive edge, only the absence of
+# a negative one -- but the negative one was the thing losing money.
+#
+# OpenAI, however, answered WAIT all 150 times with zero API errors. The
+# first version asked it to "weigh both readings" and offered "genuinely
+# unclear -> WAIT", which makes WAIT the safe answer to every chart. The
+# baseline prompt drew 45 calls out of it precisely because it had a
+# countable trigger ("at least 2 of 3 rules"), so the rewrite puts a
+# countable trigger back: four numeric exhaustion tests, four continuation
+# tests, higher count wins, WAIT only on a tie or when neither reaches 2.
 EXHAUSTION_MODE = False
 
 
