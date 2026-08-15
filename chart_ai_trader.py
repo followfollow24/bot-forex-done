@@ -102,11 +102,30 @@ ALL_SYMBOLS = {
 # The table above is a historical average; this is the same quantity
 # measured at the moment of entry, so it also catches a symbol whose
 # spread blows out temporarily (news, rollover, thin book) even if its
-# average is fine. 0.08 was chosen to sit above the measured BTC figure
-# (0.068) and below ETH's (0.093) -- i.e. it encodes the same decision as
-# the symbol list, but self-adjusting and applied to whatever is actually
-# quoted rather than to a name.
-MAX_SPREAD_R = 0.08
+# average is fine.
+#
+# 0.08 originally encoded the same decision as the symbol list -- above
+# BTC's measured 0.068, below ETH's 0.093 -- rather than anything derived
+# from expected value.
+#
+# [2026-08-15] Raised to 0.12. BTC volatility halved and the gate began
+# rejecting every inverted setup: the stop distance fell from ~200 points
+# to 81-102 while the $10 spread stayed put, so the same trade now costs
+# 0.098-0.123R instead of 0.050R. Four consensus decisions in one morning
+# were skipped, which stalls the 40-trade sample the stopping rule needs.
+#
+# Why 0.12 and not 0.15: this is NOT merely "pay a bit more". Every trade
+# behind the +0.353R walk-forward figure was taken at ~0.068R cost, in a
+# higher-ATR regime. Widening the gate admits setups from a volatility
+# regime with no measurements behind it at all -- tighter stops, the same
+# noise, spread a larger share of the risk. 0.12 steps one notch outside
+# the measured envelope (1.8x the sampled cost) and still rejects the
+# most expensive case seen today; 0.15 would be 2.2x and admit everything.
+# Required win rate moves 48.0% -> 49.8%, against a measured 62.5%.
+#
+# _atr_regime_geometry.py checks whether the low-ATR regime is actually
+# worse. If it is, put this back to 0.08.
+MAX_SPREAD_R = 0.12
 
 TIMEFRAME = "15m"    # [2026-08-12] was 1h, changed at the user's request.
 CHART_BARS = 160     # 160 M15 bars = ~40h of context. On H1 this was 120

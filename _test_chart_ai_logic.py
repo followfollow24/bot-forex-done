@@ -661,22 +661,54 @@ assert "ETHUSDC" in cat.ALL_SYMBOLS, "but must remain restorable via --symbols"
 assert list(cat.SYMBOLS) == ["XAUUSD", "BTCUSDC"], list(cat.SYMBOLS)
 print("  default %s   (ETHUSDC restorable via --symbols)" % list(cat.SYMBOLS))
 
-# the ceiling must sit ABOVE the measured BTC cost and BELOW ETH's, or it
-# would either block a symbol we intend to keep or fail to block ETH.
+# [2026-08-15] The ceiling no longer encodes the symbol decision. It was
+# 0.08 purely to sit between BTC's average (0.068) and ETH's (0.093); it is
+# now 0.12, derived from expected value instead: at a 1.25R target a trade
+# breaks even at cost = 0.406R, and the required win rate at 0.12 is 49.8%
+# against a measured 62.5%. The rise was forced by BTC volatility halving,
+# which pushed the SAME setups from 0.050R to 0.098-0.123R and skipped four
+# consensus decisions in one morning.
 MEASURED = {"XAUUSDc": 0.020, "BTCUSDc": 0.068, "ETHUSDc": 0.093}
-assert MEASURED["BTCUSDc"] < cat.MAX_SPREAD_R < MEASURED["ETHUSDc"], \
-    "ceiling %.3f must separate BTC (%.3f) from ETH (%.3f)" % (
-        cat.MAX_SPREAD_R, MEASURED["BTCUSDc"], MEASURED["ETHUSDc"])
+assert MEASURED["BTCUSDc"] < cat.MAX_SPREAD_R, \
+    "ceiling %.3f must still admit BTC at its measured %.3f" % (
+        cat.MAX_SPREAD_R, MEASURED["BTCUSDc"])
+# EV bound: never let the ceiling approach the break-even cost. At a 1.25R
+# target, EV = wr*1.25 - (1-wr) - cost, so cost must stay far below the
+# 0.406R that zeroes it at the measured 62.5% win rate.
+_be_cost = 0.625 * 1.25 - 0.375
+assert cat.MAX_SPREAD_R < _be_cost / 2.0, \
+    "ceiling %.3f is more than half the %.3fR break-even cost" % (
+        cat.MAX_SPREAD_R, _be_cost)
+_req_wr = (1.0 + cat.MAX_SPREAD_R) / 2.25
+assert _req_wr < 0.55, "required win rate %.1f%% too close to a coin flip" % (
+    100 * _req_wr)
+print("  ceiling %.2fR -> break-even cost %.3fR, required WR %.1f%%   OK"
+      % (cat.MAX_SPREAD_R, _be_cost, 100 * _req_wr))
 for sym, drag in MEASURED.items():
     verdict = "pass" if drag <= cat.MAX_SPREAD_R else "BLOCK"
     print("  %-9s %.3fR -> %s" % (sym, drag, verdict))
+
+# CONSEQUENCE worth pinning: at 0.12 the ceiling no longer excludes ETH on
+# cost -- ETH's 0.093 average now passes. ETH is kept out by the symbol
+# list alone, so that list is now the ONLY thing standing between the bot
+# and a symbol whose spread drag is 4.6x gold's.
+assert MEASURED["ETHUSDc"] < cat.MAX_SPREAD_R, \
+    "if ETH is blocked by cost again, update this comment"
+assert "ETHUSDC" not in cat.SYMBOLS, \
+    "ETH must stay out of the default symbol set -- the cost gate no " \
+    "longer blocks it, so the symbol list is the only remaining guard"
+print("  NOTE: ETH (0.093) now passes on cost; only the symbol list keeps "
+      "it out   OK")
 
 # the gate is a simple ratio; check the arithmetic and both boundaries
 def gate(spread, sl_dist):
     return (spread / sl_dist) <= cat.MAX_SPREAD_R
 assert gate(0.24, 12.0) is True,  "gold: 0.24 spread on a 12.0 stop = 0.020R"
 assert gate(10.0, 147.0) is True, "btc: 10 on 147 = 0.068R"
-assert gate(0.6, 6.45) is False,  "eth: 0.6 on 6.45 = 0.093R -> blocked"
+# the two real cases that stalled the bot on 2026-08-15
+assert gate(10.0, 102.375) is True, "btc low-ATR: 10 on 102.4 = 0.098R -> now passes"
+assert gate(10.0, 81.455) is False, "btc: 10 on 81.5 = 0.123R -> still blocked"
+print("  live cases: 0.098R now passes, 0.123R still blocked   OK")
 # a normally-cheap symbol with a blown-out spread must ALSO be blocked --
 # this is what the live check buys over a static symbol list
 assert gate(2.0, 12.0) is False, "gold at 0.167R (news blowout) must block"
