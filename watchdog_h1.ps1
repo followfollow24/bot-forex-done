@@ -131,10 +131,20 @@ function WLog($msg) {
 # -----------------------------------------------------------------------------
 $bots = @(
     @{
+        # [2026-08-15] risk 1.00 -> 0.30 while the backtest-vs-live gap is
+        # investigated. Live: 13 trades, 8 wins, 61.5% -- and -421.62. A
+        # win rate that high losing money means the losers are more than
+        # 1.6x the winners, which is what --tp-atr 15.0 with --manual-exit
+        # produces: profits taken small by the exit logic, losses paid in
+        # full at 2.5xATR. The backtest says this configuration is
+        # profitable (walk-forward OOS Sharpe 1.00) and the account says it
+        # is not, and that contradiction is unresolved. 0.30 matches
+        # gold_h1_manual, the one trend bot currently making money, and
+        # caps the damage without stopping data collection.
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 1.00 --xasset-short-gate ETHUSDc:36:168 --allow-real"
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --xasset-short-gate ETHUSDc:36:168 --allow-real"
     },
     @{
         Symbol       = "ethusdc"
