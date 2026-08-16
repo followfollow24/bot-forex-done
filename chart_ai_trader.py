@@ -194,6 +194,14 @@ DEFAULT_RISK_PCT = 0.30
 # because that count is itself one of the statistics being collected.
 MAX_CONSEC_LOSSES = 0
 
+# Consecutive failed cycles for ONE provider before the bot says so. At the
+# 15-minute default poll, 4 cycles is an hour of not trading -- long enough
+# that a routine 503 blip has cleared, short enough to matter. Then a
+# reminder every 24 cycles (~6h) so a multi-day outage stays visible without
+# becoming noise.
+PROVIDER_FAIL_ALERT_CYCLES = 4
+PROVIDER_FAIL_REMIND_CYCLES = 24
+
 # [2026-08-12] Position stacking. The user asked for the bot to be able to
 # keep opening as the AI sees setups, rather than one-position-per-symbol.
 # These are the bound on that: NOT a limit on the idea, a limit on the
@@ -951,6 +959,9 @@ class ChartAITraderBot:
         self.cfg = cfg
         self.risk_pct = risk_pct
         self.poll_min = poll_min
+        # consecutive failed cycles per provider; in-memory, so a restart
+        # re-alerts rather than staying quiet about an ongoing outage
+        self.provider_fails: dict = {}
         self.max_per_symbol = max_per_symbol
         self.max_total = max_total
         self.max_consec_losses = max_consec_losses
@@ -1279,9 +1290,11 @@ class ChartAITraderBot:
             # symbol's worth of calls.
             self._heartbeat()
             try:
-                return self._call_with_timeout(
+                r = self._call_with_timeout(
                     fn, AI_CALL_TIMEOUT_SEC, api_key, model, png, symbol,
                     price, bars, atr, payload_text)
+                self._note_provider_ok(name)
+                return r
             except Exception as e:
                 role = "primary" if i == 0 else f"fallback {i}"
                 more = " -- trying fallback" if i + 1 < len(models) else ""
@@ -1289,7 +1302,49 @@ class ChartAITraderBot:
                                  f"{str(e)[:160]}{more}")
         self.log.warning(f"[{name.upper()}] all {len(models)} model(s) failed "
                          f"-- skip this symbol this cycle")
+        self._note_provider_failure(name, str(e)[:200] if models else "no models")
         return None
+
+    # ── provider health ──────────────────────────────────────────────────
+    # [2026-08-16] chart_ai sat unable to trade for ~12 hours when the
+    # OpenAI credits ran out and said NOTHING. _safe_signal returned None
+    # and the caller did a bare `return`, so the log looked like an ordinary
+    # quiet cycle. The outage was only noticed because news_gemini_bot
+    # happens to alert on the same failure -- had chart_ai been running
+    # alone, the whole invert experiment would have been paused
+    # indefinitely with no signal at all.
+    #
+    # A dual-consensus bot cannot trade without BOTH providers, so a dead
+    # provider is a full outage, not a skipped cycle. It just does not look
+    # like one from the outside.
+    #
+    # Not alerting on single failures: transient 503s reached ~40% at times
+    # and one skipped cycle is genuinely routine. The alert fires only once
+    # a provider has failed PROVIDER_FAIL_ALERT_CYCLES cycles in a row --
+    # at a 15-minute poll that is an hour of not trading, which is worth
+    # interrupting someone for. Recovery is announced too, so the channel
+    # answers "is it back?" without anyone opening a log.
+    def _note_provider_failure(self, name: str, detail: str):
+        n = self.provider_fails.get(name, 0) + 1
+        self.provider_fails[name] = n
+        if n == PROVIDER_FAIL_ALERT_CYCLES:
+            mins = n * self.poll_min
+            self._telegram(
+                f"\U0001F6D1 chart_ai_trader: {name} has failed {n} cycles in "
+                f"a row (~{mins} min). Dual consensus needs BOTH providers, "
+                f"so NO trades are being taken and the log will look normal."
+                f"\n{detail}")
+        elif n > PROVIDER_FAIL_ALERT_CYCLES and n % PROVIDER_FAIL_REMIND_CYCLES == 0:
+            mins = n * self.poll_min
+            self._telegram(f"\U0001F6D1 chart_ai_trader: {name} still down "
+                           f"({n} cycles, ~{mins//60}h). Still no trades.")
+
+    def _note_provider_ok(self, name: str):
+        if self.provider_fails.get(name, 0) >= PROVIDER_FAIL_ALERT_CYCLES:
+            self._telegram(f"✅ chart_ai_trader: {name} recovered after "
+                           f"{self.provider_fails[name]} failed cycles — "
+                           f"trading can resume.")
+        self.provider_fails[name] = 0
 
     def _evaluate_symbol(self, canon: str, bsym: str):
         # [2026-08-12] Stacking allowed at the user's explicit request ("ถ้า
