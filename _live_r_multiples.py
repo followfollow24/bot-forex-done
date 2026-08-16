@@ -116,8 +116,26 @@ def _pair_from_mt5(opens):
             continue
         pos.setdefault(d.position_id, []).append(d)
 
+    # SL/TP come from the ORDER record, not the log. The first attempt
+    # joined on the logged OPEN line and could only price 5 of 13 trades,
+    # because log rotation had eaten the rest -- and the 8 it lost were
+    # precisely the winners, i.e. the ones that mattered. history_orders
+    # carries sl and tp per position, so nothing depends on a log file that
+    # gets truncated on a schedule.
+    orders = mt5.history_orders_get(first - timedelta(days=2),
+                                    datetime.now() + timedelta(days=1))
+    levels = {}
+    for o in (orders or []):
+        if o.magic != magic or not o.position_id:
+            continue
+        if o.sl and o.sl > 0:
+            # the opening order is the earliest one carrying a stop
+            cur = levels.get(o.position_id)
+            if cur is None or o.time_setup < cur[2]:
+                levels[o.position_id] = (o.sl, o.tp, o.time_setup)
+
     out = []
-    unmatched = 0
+    nolevel = 0
     for pid, ds in pos.items():
         ds.sort(key=lambda d: d.time)
         ins = [d for d in ds if d.entry == 0]      # DEAL_ENTRY_IN
@@ -125,29 +143,33 @@ def _pair_from_mt5(opens):
         if not ins or not outs:
             continue                                # still open
         di, do = ins[0], outs[-1]
-        ot = datetime.fromtimestamp(di.time)
-        # find the logged OPEN closest in time; without it there is no SL
-        best, gap = None, None
-        for o in opens:
-            g = abs((datetime.strptime(o["ts"], "%Y-%m-%d %H:%M:%S") - ot)
-                    .total_seconds())
-            if gap is None or g < gap:
-                best, gap = o, g
-        if best is None or gap > OPEN_MATCH_SEC:
-            unmatched += 1
+        lv = levels.get(pid)
+        if lv is None:
+            nolevel += 1
             continue
+        sl, tp, _ = lv
         profit = sum(d.profit + d.swap + d.commission for d in ds)
+        side = "LONG" if di.type == 0 else "SHORT"
+        # how far the exit landed relative to the target that was set:
+        # this is what says whether a winner ran to its target or was cut
+        R = abs(di.price - sl)
+        tp_r = (abs(tp - di.price) / R) if (tp and R > 0) else 0.0
         out.append((
-            {"ts": best["ts"], "side": best["side"], "lot": f"{di.volume:.2f}",
-             "fill": f"{di.price:.5f}", "sl": best["sl"], "slip": best["slip"]},
+            {"ts": datetime.fromtimestamp(di.time).strftime("%Y-%m-%d %H:%M:%S"),
+             "side": side, "lot": f"{di.volume:.2f}",
+             "fill": f"{di.price:.5f}", "sl": f"{sl:.5f}", "slip": "+0.00",
+             "tp_r": tp_r},
             {"reason": "BROKER", "fill": f"{do.price:.5f}",
              "pnl": f"{profit:+.2f}", "slip": "+0.00"},
         ))
     out.sort(key=lambda t: t[0]["ts"])
-    print(f"  matched {len(out)} completed positions from MT5"
-          + (f" ({unmatched} had no logged OPEN within "
-             f"{OPEN_MATCH_SEC}s, so no stop distance -- excluded)"
-             if unmatched else ""))
+    print(f"  matched {len(out)} completed positions from MT5 orders+deals"
+          + (f" ({nolevel} had no stop on the order -- excluded)"
+             if nolevel else ""))
+    if out:
+        print("  TP distance actually set on each order, in R:")
+        for o, _ in out:
+            print(f"    {o['ts'][5:16]}  TP = {o['tp_r']:.2f}R")
     return out
 
 
