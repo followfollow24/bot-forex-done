@@ -900,4 +900,38 @@ if os.path.exists(_wd2):
     print("  btc_h1_manual keeps --xasset-short-gate (reads ETH, trades none)   OK")
 print("PASS\n")
 
+print("=== Case 41: chart timeframe label -- M15 by default, H1 only by override ===")
+# The H1 replay must tell the models the truth about what they are looking
+# at, so the label became a module override (same pattern as EXHAUSTION_MODE).
+# The live path must be byte-identical to before: a live bot that suddenly
+# told its models "H1" while sending M15 candles would skew every distance
+# judgement the prompt asks for.
+assert cat.CHART_TF_LABEL == "M15" and cat.CHART_TF_LONG == "M15 (15-minute)"
+_p41 = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+assert "on the M15 (15-minute) timeframe" in _p41.replace("\n", " ")
+_c41 = [[i * 900000, 100.0 + i * 0.1, 100.6 + i * 0.1, 99.6 + i * 0.1,
+         100.1 + i * 0.1, 5.0] for i in range(60)]
+_hdr = cat.format_payload("BTCUSDC", cat.build_market_payload(_c41, 1.0))
+assert "Current Data (BTCUSDC, M15," in _hdr, _hdr.splitlines()[0]
+print("  defaults: prompt and payload both say M15   OK")
+
+cat.CHART_TF_LABEL, cat.CHART_TF_LONG = "H1", "H1 (1-hour)"
+try:
+    _p41h = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+    assert "H1 (1-hour)" in _p41h and "M15 (15-minute)" not in _p41h
+    _hdrh = cat.format_payload("BTCUSDC", cat.build_market_payload(_c41, 1.0))
+    assert "Current Data (BTCUSDC, H1," in _hdrh
+    # the exhaustion template must carry the same placeholder, or an H1
+    # exhaustion run would silently revert to claiming M15
+    cat.EXHAUSTION_MODE = True
+    _p41e = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+    assert "H1 (1-hour)" in _p41e and "EXHAUSTION" in _p41e
+finally:
+    cat.EXHAUSTION_MODE = False
+    cat.CHART_TF_LABEL, cat.CHART_TF_LONG = "M15", "M15 (15-minute)"
+_p41r = cat._fmt_prompt("BTCUSDC", 160, 100.0, 1.0, "PAYLOAD")
+assert "M15 (15-minute)" in _p41r
+print("  override flows through both templates + payload, restore works   OK")
+print("PASS\n")
+
 print("ALL TESTS PASSED")

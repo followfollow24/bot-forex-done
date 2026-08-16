@@ -305,7 +305,7 @@ CHART_SIGNAL_SCHEMA = {
 }
 
 ENTRY_PROMPT_TEMPLATE = """You are an AI trading-chart analysis system. \
-Below is the latest market data for {symbol} on the M15 (15-minute) \
+Below is the latest market data for {symbol} on the {tf_long} \
 timeframe, plus a candlestick chart of the same data.
 
 {payload}
@@ -342,7 +342,7 @@ Respond ONLY via the provided JSON schema."""
 
 
 ENTRY_PROMPT_TEMPLATE_EXHAUSTION = """You are an AI trading-chart analysis \
-system. Below is the latest market data for {symbol} on the M15 (15-minute) \
+system. Below is the latest market data for {symbol} on the {tf_long} \
 timeframe, plus a candlestick chart of the same data.
 
 {payload}
@@ -426,6 +426,15 @@ Respond ONLY via the provided JSON schema."""
 # countable trigger back: four numeric exhaustion tests, four continuation
 # tests, higher count wins, WAIT only on a tie or when neither reaches 2.
 EXHAUSTION_MODE = False
+
+# Measurement override, same pattern as EXHAUSTION_MODE: what the models are
+# TOLD the chart timeframe is. Live bots always run M15 and never touch
+# these. _signal_accuracy.py overrides them when replaying H1 candles,
+# because feeding H1 bars under an "M15" label would measure the models'
+# reaction to a mislabelled chart, not to the timeframe -- the label anchors
+# how far they expect price to travel per bar.
+CHART_TF_LABEL = "M15"
+CHART_TF_LONG = "M15 (15-minute)"
 
 
 def build_exhaustion_context(candles: list, atr: float) -> dict:
@@ -588,7 +597,7 @@ def format_payload(symbol: str, p: dict) -> str:
              else "below BOTH EMAs (bearish structure)" if price < ema20 and price < ema50
              else "BETWEEN the EMAs (no clear trend)")
     lines = [
-        f"Current Data ({symbol}, M15, {p['bars']} bars):",
+        f"Current Data ({symbol}, {CHART_TF_LABEL}, {p['bars']} bars):",
         f"  Close={price:.2f}  EMA20={ema20:.2f}  EMA50={ema50:.2f}  ATR={p['atr']:.2f}",
         f"  Recent High={p['recent_high']:.2f}  Recent Low={p['recent_low']:.2f}",
         f"  Position vs EMAs: price is {trend}.",
@@ -702,7 +711,7 @@ def _fmt_prompt(symbol: str, bars: int, price: float, atr: float,
            else ENTRY_PROMPT_TEMPLATE)
     return tpl.format(
         symbol=symbol, bars=bars, price=f"{price:.2f}", atr=f"{atr:.2f}",
-        payload=payload_text,
+        payload=payload_text, tf_long=CHART_TF_LONG,
         sl_lo=f"{SL_ATR_MIN * atr:.2f}", sl_hi=f"{SL_ATR_MAX * atr:.2f}",
         min_rr=MIN_RR)
 

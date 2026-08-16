@@ -29,7 +29,7 @@ Reading the result:
     edge clearly < 0     systematically inverted -> inverting has a basis
     edge clearly > 0     the signal works; the loss came from execution
 
-Usage (on the VPS):  python _signal_accuracy.py [symbol] [samples] [horizon_bars]
+Usage (on the VPS):  python _signal_accuracy.py [symbol] [samples] [horizon_bars] [exh] [1h]
   e.g.               python _signal_accuracy.py XAUUSDc 40 16
 """
 import math
@@ -51,12 +51,15 @@ from news_gemini_bot import render_chart_png
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUUSDc"
 N_SAMPLES = int(sys.argv[2]) if len(sys.argv) > 2 else 40
 HORIZON = int(sys.argv[3]) if len(sys.argv) > 3 else 16     # 16 M15 bars = 4h
-# 4th arg "exh" swaps in the exhaustion prompt + stretch figures, to A/B
-# against the measured baseline (BTC consensus edge -25.2 points, p=0.004).
-# Everything else about the run is held identical -- same symbol, same
-# sample indices, same horizon -- so any change in edge is attributable to
-# the prompt and not to a different slice of history.
-EXHAUSTION = len(sys.argv) > 4 and sys.argv[4].lower().startswith("exh")
+# Remaining args are TOKENS, order-free, because ordered flags have already
+# been mangled twice by the RDP clipboard:
+#   "exh"  swaps in the exhaustion prompt + stretch figures
+#   "1h"   replays H1 candles instead of M15 -- the run that asks whether
+#          the anti-predictive signature exists where the spread costs
+#          2-4x less of the stop
+_TOKENS = [t.lower() for t in sys.argv[4:]]
+EXHAUSTION = any(t.startswith("exh") for t in _TOKENS)
+TF = "1h" if "1h" in _TOKENS else "15m"
 LOOKBACK = cat.CHART_BARS                                    # 160, as live
 STRIDE_MIN = 24                                              # >=6h apart
 
@@ -78,10 +81,10 @@ def to_ohlcv(rates_slice):
             for r in rates_slice]
 
 
-M15_SEC = 900
+BASE_SEC = 3600 if TF == "1h" else 900
 
 
-def htf_series(htf_rates, m15, i, period_sec, keep=140):
+def htf_series(htf_rates, base, i, period_sec, keep=140):
     """Higher-timeframe history as it looked AT bar i -- the one place this
     script could quietly cheat, so it is built explicitly.
 
@@ -93,20 +96,20 @@ def htf_series(htf_rates, m15, i, period_sec, keep=140):
     produced that way is pure artefact.
 
     So: keep only bars whose period has fully CLOSED by `now`, then rebuild
-    the still-forming bar by aggregating the M15 bars since that close --
+    the still-forming bar by aggregating the BASE-timeframe bars since that close --
     which is exactly the partial bar the live bot reads from MT5. Same
     information, no leak.
 
-    `now` is the END of decision bar i: the bot acts on closed M15 bars, so
-    everything up to t+900 is legitimately known at decision time.
+    `now` is the END of decision bar i: the bot acts on closed base bars,
+    so everything up to t+BASE_SEC is legitimately known at decision time.
     """
-    now = int(m15[i]["time"]) + M15_SEC
+    now = int(base[i]["time"]) + BASE_SEC
     closed = [r for r in htf_rates if int(r["time"]) + period_sec <= now]
     if not closed:
         return []
     out = to_ohlcv(closed[-keep:])
     start = int(closed[-1]["time"]) + period_sec
-    part = [r for r in m15[:i + 1] if int(r["time"]) >= start]
+    part = [r for r in base[:i + 1] if int(r["time"]) >= start]
     if part:
         out.append([start * 1000,
                     float(part[0]["open"]),
@@ -161,12 +164,13 @@ def main():
         sys.exit(1)
 
     need = LOOKBACK + N_SAMPLES * STRIDE_MIN + HORIZON + 50
-    m15 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, need)
+    _mt5_tf = mt5.TIMEFRAME_H1 if TF == "1h" else mt5.TIMEFRAME_M15
+    base = mt5.copy_rates_from_pos(SYMBOL, _mt5_tf, 0, need)
     h4 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H4, 0, 3000)
     h1 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H1, 0, 3000)
     d1 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_D1, 0, 400)
-    if m15 is None or len(m15) < need * 0.6:
-        print(f"[ERROR] not enough M15 bars for {SYMBOL}")
+    if base is None or len(base) < need * 0.6:
+        print(f"[ERROR] not enough {TF} bars for {SYMBOL}")
         mt5.shutdown()
         return
 
@@ -177,14 +181,17 @@ def main():
 
     idxs = []
     i = LOOKBACK + 20
-    while i < len(m15) - HORIZON - 1 and len(idxs) < N_SAMPLES:
+    while i < len(base) - HORIZON - 1 and len(idxs) < N_SAMPLES:
         idxs.append(i)
         i += STRIDE_MIN
 
     cat.EXHAUSTION_MODE = EXHAUSTION
+    if TF == "1h":
+        cat.CHART_TF_LABEL = "H1"
+        cat.CHART_TF_LONG = "H1 (1-hour)"
     print("=" * 88)
-    print(f" SIGNAL ACCURACY -- {SYMBOL} M15, {len(idxs)} samples, "
-          f"{HORIZON}-bar ({HORIZON/4:.0f}h) horizon")
+    print(f" SIGNAL ACCURACY -- {SYMBOL} {TF.upper()}, {len(idxs)} samples, "
+          f"{HORIZON}-bar ({HORIZON*BASE_SEC/3600:.0f}h) horizon")
     which = ("EXHAUSTION (continuation-vs-exhaustion, stretch figures, "
              "HTF advisory)" if EXHAUSTION
              else "BASELINE (trend continuation, HTF veto)")
@@ -202,20 +209,20 @@ def main():
 
     for i in idxs:
         try:
-            window = m15[i - LOOKBACK + 1:i + 1]
-            atr = atr14(m15, i)
+            window = base[i - LOOKBACK + 1:i + 1]
+            atr = atr14(base, i)
             if not atr or atr <= 0:
                 continue
-            price = float(m15[i]["close"])
-            t = int(m15[i]["time"])
+            price = float(base[i]["close"])
+            t = int(base[i]["time"])
 
             candles = to_ohlcv(window)
             payload = cat.build_market_payload(candles, atr)
             payload["htf"] = cat.build_htf_context(
-                htf_series(h4, m15, i, 4 * 3600),
-                htf_series(h1, m15, i, 3600))
+                htf_series(h4, base, i, 4 * 3600),
+                [] if TF == "1h" else htf_series(h1, base, i, 3600))
             payload["keylevels"] = cat.build_key_levels(
-                htf_series(d1, m15, i, 24 * 3600, keep=30), price)
+                htf_series(d1, base, i, 24 * 3600, keep=30), price)
             if EXHAUSTION:
                 payload["exhaustion"] = cat.build_exhaustion_context(
                     candles, atr)
@@ -240,7 +247,7 @@ def main():
             if g is None and o is None:
                 continue
 
-            future = float(m15[i + HORIZON]["close"])
+            future = float(base[i + HORIZON]["close"])
             moved = "up" if future > price else "down"
             if future > price:
                 ups += 1
