@@ -165,7 +165,17 @@ SCAN_CALL_TIMEOUT_SEC = 120
 CHART_CALL_TIMEOUT_SEC = 60
 TRANSIENT_ERROR_MARKERS = ("503", "UNAVAILABLE", "overloaded", "high demand",
                            "timeout", "Timeout", "ConnectionError",
-                           "connection reset", "temporarily unavailable")
+                           "connection reset", "temporarily unavailable",
+                           # _safe_scan prefixes a recognised 429 rate limit
+                           # with this so it reaches the retry path; billing
+                           # exhaustion is classified separately and never
+                           # gets here, because it does not recover.
+                           "rate limit")
+
+# How long an identical provider-outage alert is suppressed. Billing
+# exhaustion persists for hours or days; re-sending the same line every poll
+# cycle trains the reader to ignore the channel that also carries fills.
+ALERT_REPEAT_SUPPRESS_SEC = 6 * 3600
 
 
 def _is_transient_error(msg: str) -> bool:
@@ -590,6 +600,10 @@ class NewsGeminiBot:
         self.openai_key = os.environ.get("OPENAI_API_KEY", "")
         self.openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
+        # in-memory only: a restart SHOULD re-alert, since the operator may
+        # not have seen the pre-restart message
+        self._alert_last: dict = {}
+
         self.state = self._load_state()
         self.symbols: dict = {}
 
@@ -641,6 +655,25 @@ class NewsGeminiBot:
                 f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=10)
         except Exception as e:
             self.log.warning(f"telegram failed: {e}")
+
+    def _alert_once(self, key: str, msg: str):
+        """Telegram, but at most once per ALERT_REPEAT_SUPPRESS_SEC per key.
+
+        Provider outages last hours. The unthrottled version sent the same
+        line every poll cycle -- every 5 minutes inside the boost window --
+        which is how a channel that also carries fill and close notices
+        becomes one the reader scrolls past. Suppression is per key, so a
+        different failure still gets through immediately, and the log always
+        records every occurrence regardless.
+        """
+        now = time.time()
+        last = self._alert_last.get(key, 0.0)
+        if now - last < ALERT_REPEAT_SUPPRESS_SEC:
+            self.log.info(f"[ALERT] suppressed repeat of '{key}' "
+                          f"({(now - last) / 60:.0f}min since last)")
+            return
+        self._alert_last[key] = now
+        self._telegram(msg)
 
     def _load_state(self) -> dict:
         default = {"seen_urls": {}, "positions": {}, "consec_losses": 0,
@@ -969,11 +1002,46 @@ class NewsGeminiBot:
                 # str(TimeoutError()) is '' -- fall back to the class name so
                 # the log/Telegram line says something instead of nothing.
                 msg = str(e) or f"{type(e).__name__} (no message)"
-                if "RESOURCE_EXHAUSTED" in msg or "429" in msg or "rate_limit" in msg.lower():
-                    self.log.warning(f"[{name.upper()}] quota exceeded -- skip cycle: {msg[:200]}")
-                    self._telegram(f"⚠️ news_gemini: {name} API quota exceeded — "
-                                   f"skipped this cycle (fail-safe, no trades)")
+                low = msg.lower()
+                # A 429 means two very different things and the old branch
+                # treated them identically, which was wrong in both
+                # directions. Billing exhaustion does not recover on its own
+                # -- retrying wastes calls and re-alerts forever. A rate
+                # limit recovers in seconds -- and it was being handled by
+                # NOT retrying, which is the one response guaranteed not to
+                # work. Match the specific wording; a bare 429 with no
+                # further detail is treated as a rate limit, because one
+                # wasted retry is cheaper than silently benching the bot.
+                credit_dead = ("insufficient_quota" in low
+                               or "exceeded your current quota" in low
+                               or "billing" in low
+                               or "RESOURCE_EXHAUSTED" in msg)
+                rate_limited = ("rate_limit" in low or "rate limit" in low
+                                or "too many requests" in low
+                                or ("429" in msg and not credit_dead))
+                if credit_dead and not rate_limited:
+                    self.log.warning(f"[{name.upper()}] provider quota/billing "
+                                     f"exhausted -- skip cycle: {msg[:300]}")
+                    # Throttled: this state persists for hours or days, and
+                    # an identical alert every poll cycle trains the reader
+                    # to ignore the channel that also carries fill notices.
+                    self._alert_once(f"quota:{name}",
+                                     f"⚠️ news_gemini: {name} quota/billing "
+                                     f"exhausted — no trades until it is "
+                                     f"topped up. This will NOT self-recover."
+                                     f"\n{msg[:300]}")
                     return None
+                if rate_limited and attempt >= SCAN_MAX_RETRIES:
+                    self.log.warning(f"[{name.upper()}] rate limited, retries "
+                                     f"spent -- skip cycle: {msg[:300]}")
+                    self._alert_once(f"ratelimit:{name}",
+                                     f"⚠️ news_gemini: {name} rate limited "
+                                     f"after {attempt} retries — skipped this "
+                                     f"cycle (recovers on its own)\n{msg[:200]}")
+                    return None
+                if rate_limited:
+                    # fall through to the transient retry path below
+                    msg = f"rate limit: {msg}"
                 # A timeout from _call_with_timeout is transient by
                 # definition, but must be matched by TYPE, not message:
                 # str(TimeoutError()) is the empty string, so the marker
