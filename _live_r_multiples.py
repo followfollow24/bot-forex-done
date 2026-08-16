@@ -72,6 +72,85 @@ def find_log():
     return hits[0]
 
 
+MAGIC = {"btc_h1_manual": 666120}
+OPEN_MATCH_SEC = 180        # log timestamp vs broker deal timestamp
+
+
+def _pair_from_mt5(opens):
+    """Rebuild (open, close) pairs from MT5 deal history.
+
+    The bot only writes [CLOSE-*] for exits IT initiates; a broker-side
+    stop or target leaves no such line, so for this bot the log alone can
+    never show a completed trade. The deal record has the real exit price
+    and profit but not the stop that was attached, and R is meaningless
+    without it -- hence the join: exits from the broker, stop distance
+    from the log, matched on open time.
+    """
+    try:
+        import MetaTrader5 as mt5
+    except ImportError:
+        print("  [ERROR] MetaTrader5 not importable -- run this on the VPS")
+        return []
+    if not mt5.initialize():
+        print("  [ERROR] MT5 init failed")
+        return []
+    magic = MAGIC.get(VARIANT)
+    if magic is None:
+        print(f"  [ERROR] no magic number known for '{VARIANT}'")
+        mt5.shutdown()
+        return []
+
+    from datetime import timedelta
+    first = min(datetime.strptime(o["ts"], "%Y-%m-%d %H:%M:%S") for o in opens)
+    deals = mt5.history_deals_get(first - timedelta(days=2),
+                                  datetime.now() + timedelta(days=1))
+    mt5.shutdown()
+    if not deals:
+        print("  [ERROR] no deals returned from MT5")
+        return []
+
+    # group by position; a position needs both an IN and an OUT to be done
+    pos: dict = {}
+    for d in deals:
+        if d.magic != magic:
+            continue
+        pos.setdefault(d.position_id, []).append(d)
+
+    out = []
+    unmatched = 0
+    for pid, ds in pos.items():
+        ds.sort(key=lambda d: d.time)
+        ins = [d for d in ds if d.entry == 0]      # DEAL_ENTRY_IN
+        outs = [d for d in ds if d.entry == 1]     # DEAL_ENTRY_OUT
+        if not ins or not outs:
+            continue                                # still open
+        di, do = ins[0], outs[-1]
+        ot = datetime.fromtimestamp(di.time)
+        # find the logged OPEN closest in time; without it there is no SL
+        best, gap = None, None
+        for o in opens:
+            g = abs((datetime.strptime(o["ts"], "%Y-%m-%d %H:%M:%S") - ot)
+                    .total_seconds())
+            if gap is None or g < gap:
+                best, gap = o, g
+        if best is None or gap > OPEN_MATCH_SEC:
+            unmatched += 1
+            continue
+        profit = sum(d.profit + d.swap + d.commission for d in ds)
+        out.append((
+            {"ts": best["ts"], "side": best["side"], "lot": f"{di.volume:.2f}",
+             "fill": f"{di.price:.5f}", "sl": best["sl"], "slip": best["slip"]},
+            {"reason": "BROKER", "fill": f"{do.price:.5f}",
+             "pnl": f"{profit:+.2f}", "slip": "+0.00"},
+        ))
+    out.sort(key=lambda t: t[0]["ts"])
+    print(f"  matched {len(out)} completed positions from MT5"
+          + (f" ({unmatched} had no logged OPEN within "
+             f"{OPEN_MATCH_SEC}s, so no stop distance -- excluded)"
+             if unmatched else ""))
+    return out
+
+
 def main():
     log = find_log()
     events = []
@@ -112,9 +191,14 @@ def main():
         print(" (one position still open, excluded)")
     print("=" * 100)
     if not trades:
-        print("  no paired trades -- broker-side stops may not be logged as")
-        print("  [CLOSE-*]; cross-check against MT5 history_deals if so.")
-        return
+        print("  no [CLOSE-*] lines in this log -- every exit was broker-side")
+        print("  (stop or target), which the bot never writes in that format,")
+        print("  and older lines have rotated away. Falling back to MT5 deal")
+        print("  history for the exits, keeping the log only for each trade's")
+        print("  SL distance, which the deal record does not carry.\n")
+        trades = _pair_from_mt5([d for k, d in events if k == "OPEN"])
+        if not trades:
+            return
 
     print(f"  {'opened':<13}{'side':<7}{'lot':>6}{'R (pts)':>10}  {'exit':<12}"
           f"{'R mult':>8}{'net $':>10}{'slip in':>9}{'slip out':>9}")
