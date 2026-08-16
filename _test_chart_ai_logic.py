@@ -157,10 +157,20 @@ class _StubLog:
     def error(self, m): pass
 class _StubSelf:
     log = _StubLog()
+    poll_min = 15
+    provider_fails: dict = {}
     def _heartbeat(self): pass
+    def _telegram(self, msg): pass
     # use the REAL timeout wrapper so these tests exercise the actual
     # call path (including the thread-pool hop), not a simplified stand-in
     _call_with_timeout = cat.ChartAITraderBot._call_with_timeout
+    # [2026-08-16] _safe_signal now reports provider health on both the
+    # success and failure paths. These are the REAL methods, not no-ops:
+    # stubbing them out would let a broken health hook pass unnoticed here
+    # and only surface as a silent live bot, which is the exact failure
+    # this feature exists to prevent.
+    _note_provider_failure = cat.ChartAITraderBot._note_provider_failure
+    _note_provider_ok = cat.ChartAITraderBot._note_provider_ok
 
 out = cat.ChartAITraderBot._safe_signal(
     _StubSelf(), "gemini", fake_provider, "KEY", ["MODEL"],

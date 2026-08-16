@@ -1283,6 +1283,10 @@ class ChartAITraderBot:
         # threshold -- so the watchdog restarts it mid-cycle, forever.
         # Every MT5 call in this fleet has had this guard for months; the
         # AI calls were simply never given one.
+        # Python deletes the `except` variable when the block exits, so the
+        # last error has to be captured explicitly to still be reportable
+        # after the loop. Caught by case 18 as an UnboundLocalError.
+        last_err = "no models configured"
         for i, model in enumerate(models):
             # heartbeat before EVERY attempt: this is what lets the timeout
             # be raised without the watchdog mistaking a slow provider for
@@ -1296,13 +1300,14 @@ class ChartAITraderBot:
                 self._note_provider_ok(name)
                 return r
             except Exception as e:
+                last_err = str(e)[:200] or type(e).__name__
                 role = "primary" if i == 0 else f"fallback {i}"
                 more = " -- trying fallback" if i + 1 < len(models) else ""
                 self.log.warning(f"[{name.upper()}] {model} ({role}) failed: "
                                  f"{str(e)[:160]}{more}")
         self.log.warning(f"[{name.upper()}] all {len(models)} model(s) failed "
                          f"-- skip this symbol this cycle")
-        self._note_provider_failure(name, str(e)[:200] if models else "no models")
+        self._note_provider_failure(name, last_err)
         return None
 
     # ── provider health ──────────────────────────────────────────────────
