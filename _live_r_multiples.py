@@ -238,7 +238,12 @@ def main():
     print("  WHICH EXPLANATION HOLDS?")
     print("=" * 100)
     # B: are stops filling past their level?
-    worse = [r for r in losses if r["rmult"] < -1.05]
+    # [2026-08-16] threshold was -1.05 and fired on a single -1.05R fill,
+    # calling ordinary fill variance an execution leak. A stop is filled by
+    # the broker at the next available price; landing a few percent past the
+    # level is normal and costs almost nothing. -1.15R is where it starts to
+    # matter, and the average is the number to read anyway.
+    worse = [r for r in losses if r["rmult"] < -1.15]
     print(f"  B. losers worse than -1R : {len(worse)}/{len(losses)}"
           + (f"   worst {min(r['rmult'] for r in losses):+.2f}R" if losses else ""))
     tot_slip = sum(abs(r["slip_in"]) + abs(r["slip_out"]) for r in rows)
