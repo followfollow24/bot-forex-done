@@ -144,7 +144,26 @@ $bots = @(
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
         StaleMinutes = 5
-        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --xasset-short-gate ETHUSDc:36:168 --allow-real"
+        # [2026-08-16] tp-atr 15.0 -> 5.0. _tp_sweep.py priced every target
+        # from 0.5R to 8R on 8000 H1 bars, choosing on the first half and
+        # scoring on the second. The train curve rises monotonically with
+        # distance -- which is probably how 15 was picked -- but the TEST
+        # curve does the opposite: everything past 2.5R is negative, and the
+        # configured 6.0R (=15xATR) scores -0.051R per trade, second worst
+        # on the grid. 5.0xATR is 2.0R, +0.006R on test.
+        #
+        # 1.5R scores +0.007R, a 0.001R difference that is pure noise; 2.0R
+        # is preferred because the bot's entry filter beats random entries
+        # (61.5% live vs 32-36% unconditional), and a better-than-random
+        # entry favours the further of two statistically tied targets. It
+        # also matches the --tp-atr 5.0 already used by btc_tpo and
+        # gold_momentum_rsi.
+        #
+        # Caveat kept deliberately: the sweep walks every bar, so it
+        # optimises the exit geometry against the market, not against this
+        # strategy's filtered entries. Revisit once ~20 trades have run to
+        # their own exit without being closed by hand.
+        Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 5.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --xasset-short-gate ETHUSDc:36:168 --allow-real"
     },
     # [2026-08-15] eth_h1_manual REMOVED, not commented out, at the user's
     # explicit instruction that ETH is never traded again. It was stopped
