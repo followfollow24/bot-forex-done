@@ -109,12 +109,18 @@ def _pair_from_mt5(opens):
         print("  [ERROR] no deals returned from MT5")
         return []
 
-    # group by position; a position needs both an IN and an OUT to be done
+    # Group by position FIRST, then decide the position's owner, instead of
+    # filtering deal-by-deal on magic. A broker-side stop or target creates
+    # a closing deal with magic 0, not the bot's magic -- filtering per deal
+    # therefore discards every such exit, leaves the position looking like
+    # it never closed, and silently reports zero completed trades. That is
+    # exactly what the first version did (matched 0 of 13), and it is why
+    # trade_summary.py resolves ownership through position_id too.
     pos: dict = {}
     for d in deals:
-        if d.magic != magic:
-            continue
         pos.setdefault(d.position_id, []).append(d)
+    pos = {p: ds for p, ds in pos.items()
+           if any(d.magic == magic for d in ds)}
 
     # SL/TP come from the ORDER record, not the log. The first attempt
     # joined on the logged OPEN line and could only price 5 of 13 trades,
@@ -126,13 +132,27 @@ def _pair_from_mt5(opens):
                                     datetime.now() + timedelta(days=1))
     levels = {}
     for o in (orders or []):
-        if o.magic != magic or not o.position_id:
+        if not o.position_id:
             continue
         if o.sl and o.sl > 0:
             # the opening order is the earliest one carrying a stop
             cur = levels.get(o.position_id)
             if cur is None or o.time_setup < cur[2]:
                 levels[o.position_id] = (o.sl, o.tp, o.time_setup)
+
+    def _sl_from_log(open_dt):
+        """Fallback when the order record carries no stop -- some fills
+        attach SL/TP by a follow-up modify, which leaves the original
+        order's sl at 0. The logged OPEN line always has the real level."""
+        best, gap = None, None
+        for lo in opens:
+            g = abs((datetime.strptime(lo["ts"], "%Y-%m-%d %H:%M:%S")
+                     - open_dt).total_seconds())
+            if gap is None or g < gap:
+                best, gap = lo, g
+        if best is not None and gap is not None and gap <= OPEN_MATCH_SEC:
+            return float(best["sl"]), float(best.get("tp", 0) or 0)
+        return None
 
     out = []
     nolevel = 0
@@ -145,9 +165,13 @@ def _pair_from_mt5(opens):
         di, do = ins[0], outs[-1]
         lv = levels.get(pid)
         if lv is None:
-            nolevel += 1
-            continue
-        sl, tp, _ = lv
+            fb = _sl_from_log(datetime.fromtimestamp(di.time))
+            if fb is None:
+                nolevel += 1
+                continue
+            sl, tp = fb
+        else:
+            sl, tp, _ = lv
         profit = sum(d.profit + d.swap + d.commission for d in ds)
         side = "LONG" if di.type == 0 else "SHORT"
         # how far the exit landed relative to the target that was set:
