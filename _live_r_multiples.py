@@ -75,6 +75,14 @@ def find_log():
 MAGIC = {"btc_h1_manual": 666120}
 OPEN_MATCH_SEC = 180        # log timestamp vs broker deal timestamp
 
+# MT5 DEAL_REASON_*. The distinction that matters here is TP vs EXPERT: a
+# target filled by the broker and a position closed by the bot's own logic
+# are indistinguishable in the log, and only one of them is consistent with
+# a 6R target that supposedly never gets reached.
+DEAL_REASON = {0: "CLIENT", 1: "MOBILE", 2: "WEB", 3: "EXPERT(bot)",
+               4: "SL", 5: "TP", 6: "STOPOUT", 7: "ROLLOVER",
+               8: "VMARGIN", 9: "SPLIT"}
+
 
 def _pair_from_mt5(opens):
     """Rebuild (open, close) pairs from MT5 deal history.
@@ -178,13 +186,20 @@ def _pair_from_mt5(opens):
         # this is what says whether a winner ran to its target or was cut
         R = abs(di.price - sl)
         tp_r = (abs(tp - di.price) / R) if (tp and R > 0) else 0.0
+        # The deal's own reason code is the only authority on WHO closed the
+        # position. Labelling every unlogged exit "BROKER" hid the actual
+        # answer: a stop, the target, or the bot itself all look identical
+        # from the log's silence, and they mean completely different things
+        # when the winners are landing at +0.4R against a 6R target.
         out.append((
             {"ts": datetime.fromtimestamp(di.time).strftime("%Y-%m-%d %H:%M:%S"),
              "side": side, "lot": f"{di.volume:.2f}",
              "fill": f"{di.price:.5f}", "sl": f"{sl:.5f}", "slip": "+0.00",
              "tp_r": tp_r},
-            {"reason": "BROKER", "fill": f"{do.price:.5f}",
-             "pnl": f"{profit:+.2f}", "slip": "+0.00"},
+            {"reason": DEAL_REASON.get(do.reason, f"code{do.reason}"),
+             "fill": f"{do.price:.5f}",
+             "pnl": f"{profit:+.2f}", "slip": "+0.00",
+             "partials": len(outs)},
         ))
     out.sort(key=lambda t: t[0]["ts"])
     print(f"  matched {len(out)} completed positions from MT5 orders+deals"
@@ -293,7 +308,12 @@ def main():
     print(f"  B. losers worse than -1R : {len(worse)}/{len(losses)}"
           + (f"   worst {min(r['rmult'] for r in losses):+.2f}R" if losses else ""))
     tot_slip = sum(abs(r["slip_in"]) + abs(r["slip_out"]) for r in rows)
-    print(f"     total |slippage| across {n} trades: {tot_slip:.2f} price units")
+    if tot_slip > 0:
+        print(f"     total |slippage| across {n} trades: {tot_slip:.2f} price units")
+    else:
+        print("     (slippage columns are blank in MT5 mode -- the deal record")
+        print("      has no requested price to difference against; read the")
+        print("      average loss above instead, which already includes it)")
     if worse:
         print("     -> stops ARE filling past their level. That is EXECUTION,")
         print("        and it would affect every bot in the fleet, not just this one.")
