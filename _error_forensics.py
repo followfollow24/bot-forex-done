@@ -28,6 +28,9 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
+INJECTED = re.compile(r"\[[a-z0-9_]+\] (OK -- heartbeat|kill-switch present|"
+                      r"no log file matched|LOG STALE|STALE:)")
+
 DESK = os.path.join(os.path.expanduser("~"), "Desktop")
 TS = re.compile(r"^(2026-\d\d-\d\d \d\d:\d\d:\d\d)")
 ERR = re.compile(r"\[ERROR\]|\[WARNING\]|Traceback|Exception|Error")
@@ -53,6 +56,14 @@ def main():
         name = os.path.basename(path)
         try:
             lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+            # For ~50 minutes on 2026-08-23 the watchdog appended its own
+            # output into these bot logs (a local $logFile aliased the
+            # script's $LOGFILE -- PowerShell names are case-insensitive).
+            # Those lines are left in place because the bots hold the files
+            # open for append, but counting them here would make a frozen
+            # log look freshly written, which is exactly the wrong answer
+            # from a tool whose job is spotting frozen logs.
+            lines = [l for l in lines if not INJECTED.search(l)]
         except OSError:
             continue
         if not lines:

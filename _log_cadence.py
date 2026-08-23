@@ -34,6 +34,19 @@ DESK = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Des
 # every bot log in this repo opens its lines with an ISO-ish stamp
 TS = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
 
+# For about 50 minutes on 2026-08-23 the watchdog appended ITS OWN output
+# into these bot logs -- a local named $logFile silently aliased the script's
+# $LOGFILE, since PowerShell variable names are case-insensitive. Roughly 12-20
+# such lines are stuck in ten bot logs. They are not rewritten out: the bots
+# hold those files open for append and rewriting a locked live log to tidy up
+# cosmetics is a worse risk than the mess. They are skipped on read instead.
+#
+# This matters here specifically: an injected line looks exactly like a bot
+# write, so it would shorten the measured quiet gaps and make the staleness
+# thresholds derived from them too tight.
+INJECTED = re.compile(r"\[[a-z0-9_]+\] (OK -- heartbeat|kill-switch present|"
+                      r"no log file matched|LOG STALE|STALE:)")
+
 
 def stamps(path, cutoff):
     out = []
@@ -42,6 +55,8 @@ def stamps(path, cutoff):
             for line in fh:
                 m = TS.match(line)
                 if not m:
+                    continue
+                if INJECTED.search(line):
                     continue
                 try:
                     t = datetime.strptime(m.group(1) + " " + m.group(2),
