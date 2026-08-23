@@ -26,6 +26,45 @@ function WLog($msg) {
     Add-Content -Path $LOGFILE -Value $line
 }
 
+# [2026-08-23] The watchdog can now escalate to the operator, which it could
+# not do before: its only output was a log file nobody reads.
+#
+# EVERY failure path here is swallowed on purpose. This function is called
+# from inside the bot loop, and PowerShell 5.1 aborts the enclosing script on
+# an unhandled terminating error -- so a missing .env, an unreachable
+# api.telegram.org or an expired token would take the whole watchdog down and
+# leave every bot unsupervised. A watchdog that dies while trying to complain
+# is strictly worse than one that stays quiet, so a failed alert is logged and
+# the loop continues.
+#
+# Credentials are read from the .env at call time and never logged.
+function Send-Telegram($msg) {
+    try {
+        $envFile = "$DESKTOP\.env"
+        if (-not (Test-Path $envFile)) {
+            WLog "  (telegram skipped: no .env)"
+            return
+        }
+        $token = $null; $chat = $null
+        foreach ($line in (Get-Content $envFile)) {
+            if ($line -match '^\s*TELEGRAM_BOT_TOKEN\s*=\s*(.+?)\s*$') { $token = $Matches[1].Trim('"').Trim("'") }
+            if ($line -match '^\s*TELEGRAM_CHAT_ID\s*=\s*(.+?)\s*$')   { $chat  = $Matches[1].Trim('"').Trim("'") }
+        }
+        if (-not $token -or -not $chat) {
+            WLog "  (telegram skipped: token/chat not in .env)"
+            return
+        }
+        # TLS 1.2: PS 5.1 still defaults to SSL3/TLS1.0, which api.telegram.org refuses
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-RestMethod -Method Post -TimeoutSec 15 `
+            -Uri "https://api.telegram.org/bot$token/sendMessage" `
+            -Body @{ chat_id = $chat; text = $msg } | Out-Null
+        WLog "  (telegram alert sent)"
+    } catch {
+        WLog "  (telegram alert FAILED: $($_.Exception.Message))"
+    }
+}
+
 # -----------------------------------------------------------------------------
 #  Bot definitions. Args must match EXACTLY what was launched by hand on
 #  2026-07-29, or a watchdog restart would silently change live parameters:
@@ -365,6 +404,62 @@ foreach ($bot in $bots) {
             $needRestart = $true
         } else {
             WLog "[$variant] OK -- heartbeat $([math]::Round($staleMin,1)) min ago (threshold=$($bot.StaleMinutes))"
+        }
+    }
+
+    # [2026-08-23] A FRESH HEARTBEAT DOES NOT MEAN THE BOT IS WORKING.
+    # Found the hard way: gold_momentum_rsi, btc_lqsweep, btc_amd and
+    # gold_daily_breakout all sat in a "mt5.account_info() returned None:
+    # IPC send failed" loop from 2026-08-05, roughly 18 days, while their
+    # heartbeat threads kept writing on schedule. Every health check in
+    # this project reads the heartbeat, so all four reported healthy the
+    # entire time and the watchdog never restarted them. They could not
+    # read a price or send an order for two and a half weeks.
+    #
+    # The heartbeat proves the process is scheduled; only the LOG proves it
+    # is doing work. So a stale log with a live heartbeat is now its own
+    # restart condition.
+    #
+    # Threshold is deliberately loose (default 90 min, override per bot).
+    # These bots write a status line every poll, so 90 minutes of silence is
+    # far outside normal for any of them, while staying well clear of a
+    # slow-timeframe bot that legitimately has little to say.
+    #
+    # LOOP GUARD: a restart cannot fix a broken MT5 terminal, so without a
+    # cap this would relaunch the same bot forever. At most 2 log-stale
+    # restarts per bot per 6 hours; past that it alerts and leaves it alone
+    # for a human, which is the correct escalation for a fault the watchdog
+    # cannot repair.
+    if (-not $needRestart) {
+        $logStaleLimit = if ($bot.LogStaleMinutes) { $bot.LogStaleMinutes } else { 90 }
+        $pats = if ($bot.LogMatch) { @($bot.LogMatch) } else { @("*$($bot.Symbol)*$variant*.log", "*$variant*.log") }
+        $logFile = $null
+        foreach ($pat in $pats) {
+            $logFile = Get-ChildItem "$DESKTOP\$pat" -ErrorAction SilentlyContinue |
+                       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($logFile) { break }
+        }
+        if (-not $logFile) {
+            WLog "[$variant] no log file matched ($($pats -join ' | ')) -- log-freshness check SKIPPED for this bot"
+        }
+        if ($logFile) {
+            $logAge = ((Get-Date) - $logFile.LastWriteTime).TotalMinutes
+            if ($logAge -gt $logStaleLimit) {
+                $guard = "$DESKTOP\LOGSTALE_$($variant.ToUpper()).count"
+                $recent = @()
+                if (Test-Path $guard) {
+                    $recent = @(Get-Content $guard | Where-Object {
+                        $_ -and (($_ -as [datetime]) -ne $null) -and (($_ -as [datetime]) -gt (Get-Date).AddHours(-6)) })
+                }
+                if ($recent.Count -ge 2) {
+                    WLog "[$variant] LOG STALE $([math]::Round($logAge,1)) min but already restarted $($recent.Count)x in 6h -- NOT restarting, needs a human"
+                    Send-Telegram "$([char]::ConvertFromUtf32(0x1F6D1)) watchdog: $variant log frozen $([math]::Round($logAge)) min and restarts are not fixing it. Heartbeat is alive but the bot is doing no work -- check for 'IPC send failed' in its log."
+                } else {
+                    WLog "[$variant] LOG STALE: $([math]::Round($logAge,1)) min > $logStaleLimit (heartbeat is FRESH -- work loop is dead) -- restarting"
+                    ($recent + @((Get-Date).ToString('o'))) | Set-Content $guard
+                    $needRestart = $true
+                }
+            }
         }
     }
 

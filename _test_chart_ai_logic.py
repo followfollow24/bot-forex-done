@@ -934,4 +934,69 @@ assert "M15 (15-minute)" in _p41r
 print("  override flows through both templates + payload, restore works   OK")
 print("PASS\n")
 
-print("ALL TESTS PASSED")
+
+
+print("=== Case 42: watchdog detects a dead work loop, not just a dead process ===")
+# The failure this guards against actually happened and went unnoticed for
+# 18 days: gold_momentum_rsi, btc_lqsweep, btc_amd and gold_daily_breakout
+# sat in an "mt5.account_info() returned None: IPC send failed" loop from
+# 2026-08-05 while their heartbeat threads kept writing on schedule. Every
+# health check in this project reads the heartbeat, so all four reported
+# healthy and the watchdog never restarted them.
+_wd = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchdog_h1.ps1")
+if not os.path.exists(_wd):
+    print("SKIP -- watchdog_h1.ps1 not beside the test\n")
+else:
+    _w = open(_wd, encoding="utf-8", errors="replace").read()
+
+    # the check itself must exist and must fire on a FRESH heartbeat, i.e.
+    # inside the -not $needRestart branch -- a log check that only runs after
+    # the heartbeat already failed adds nothing
+    assert "LogStaleMinutes" in _w, "no log-freshness threshold in watchdog"
+    assert "if (-not $needRestart) {" in _w, (
+        "log check is not gated on a fresh heartbeat -- it would only run when "
+        "the heartbeat had already triggered a restart, which is the case that "
+        "already worked")
+
+    # loop guard: a restart cannot repair a broken MT5 terminal, so an
+    # ungated log-stale rule would relaunch the same bot forever
+    assert "LOGSTALE_" in _w and "AddHours(-6)" in _w, "no loop guard on log-stale restarts"
+    assert "-ge 2" in _w, "loop guard has no restart cap"
+
+    # escalation must be a real function, not a call to something undefined:
+    # PowerShell 5.1 raises CommandNotFoundException and aborts the script,
+    # so an undefined Send-Telegram would kill the watchdog from inside the
+    # bot loop and leave EVERY bot unsupervised
+    assert "function Send-Telegram" in _w, (
+        "Send-Telegram is called but never defined -- PS 5.1 would abort the "
+        "watchdog on the first alert")
+    _fn = _w[_w.index("function Send-Telegram"):]
+    _fn = _fn[:_fn.index("\n# ---")] if "\n# ---" in _fn else _fn[:2000]
+    assert "try {" in _fn and "} catch {" in _fn, (
+        "Send-Telegram is not wrapped in try/catch -- an unreachable "
+        "api.telegram.org would take the watchdog down with it")
+
+    # astral-plane emoji cannot be produced by [char]: 0x1F6D1 is 128721,
+    # past the 16-bit range, and the cast throws at runtime
+    import re as _re2
+    for _m in _re2.finditer(r'\[char\]0x([0-9A-Fa-f]+)', _w):
+        assert int(_m.group(1), 16) <= 0xFFFF, (
+            f"[char]0x{_m.group(1)} is outside the 16-bit range and throws at "
+            "runtime -- use [char]::ConvertFromUtf32()")
+
+    # a pattern that matches no file makes the check silently not run, which
+    # is the same blindness being fixed -- it has to be reported
+    assert "log-freshness check SKIPPED" in _w, (
+        "a bot whose log file matches no pattern would be silently unchecked")
+
+    # and a malformed guard-file line must not throw inside the loop
+    assert "-as [datetime]" in _w, (
+        "guard file is cast with [datetime], which throws on a bad line and "
+        "aborts the watchdog")
+
+    print("  fires on fresh-heartbeat + stale-log (the 18-day blind spot)   OK")
+    print("  loop guard: max 2 restarts / 6h, then escalates to a human      OK")
+    print("  Send-Telegram defined, try/catch-wrapped, astral-safe emoji     OK")
+    print("  unmatched log pattern is reported, not silently skipped         OK")
+
+print("\nALL TESTS PASSED")
