@@ -1015,6 +1015,15 @@ else:
             f"threshold {_th.get(_b)}m would relaunch it constantly")
     print(f"  {len(_th)} thresholds, all measured from 14d of real log gaps  OK")
     print("  H1 family >=240m, daily bots >=4320m, default no longer 90m    OK")
+    # WLog silently dropped 2 lines per pass to a null $LOGFILE -- and the
+    # dropped lines were exactly the "this bot cannot be checked" warnings
+    _wl = _w[_w.index("function WLog"):]
+    _wl = _wl[:_wl.index("\n# ---")] if "\n# ---" in _wl else _wl[:1800]
+    assert "$script:LOGFILE" in _wl and "try {" in _wl and "} catch {" in _wl, (
+        "WLog still writes to a bare $LOGFILE with no fallback and no catch -- "
+        "a null path drops the line silently, and a throw here aborts the "
+        "watchdog from inside the bot loop")
+    print("  WLog resolves its own path and cannot drop or throw           OK")
     print("  fires on fresh-heartbeat + stale-log (the 18-day blind spot)   OK")
     print("  loop guard: max 2 restarts / 6h, then escalates to a human      OK")
     print("  Send-Telegram defined, try/catch-wrapped, astral-safe emoji     OK")

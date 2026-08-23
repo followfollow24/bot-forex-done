@@ -23,7 +23,25 @@ $LOGFILE = "$DESKTOP\watchdog_h1_$(Get-Date -Format 'yyyy-MM-dd').log"
 function WLog($msg) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
     Write-Host $line
-    Add-Content -Path $LOGFILE -Value $line
+    # [2026-08-23] $LOGFILE came back null on exactly two WLog calls per pass,
+    # so Add-Content threw "Cannot bind argument to parameter 'Path'" and those
+    # two lines never reached the file -- while still printing to a console
+    # nobody reads. The dropped lines were the new "log-freshness check SKIPPED
+    # for this bot" warnings, i.e. the watchdog was silently losing the record
+    # of which bots it cannot check. That is the same class of silent hole this
+    # whole change exists to close, so WLog no longer trusts the script-scope
+    # variable: it resolves the path itself and can fall back.
+    #
+    # A logging failure must also never propagate. WLog is called from inside
+    # the bot loop, and an unhandled terminating error there would abort the
+    # watchdog and leave every bot unsupervised.
+    $target = $script:LOGFILE
+    if (-not $target) {
+        $base = if ($script:DESKTOP) { $script:DESKTOP } else { "$env:USERPROFILE\Desktop" }
+        $target = "$base\watchdog_h1_$(Get-Date -Format 'yyyy-MM-dd').log"
+    }
+    try { Add-Content -Path $target -Value $line -ErrorAction Stop }
+    catch { Write-Host "  (watchdog log write failed: $($_.Exception.Message))" }
 }
 
 # [2026-08-23] The watchdog can now escalate to the operator, which it could
