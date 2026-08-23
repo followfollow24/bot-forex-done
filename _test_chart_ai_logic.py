@@ -1023,6 +1023,19 @@ else:
         "WLog still writes to a bare $LOGFILE with no fallback and no catch -- "
         "a null path drops the line silently, and a throw here aborts the "
         "watchdog from inside the bot loop")
+    # PowerShell variable names are CASE-INSENSITIVE, so a local named
+    # $logFile IS the script's $LOGFILE. The first version of the
+    # log-freshness code did exactly that, and the watchdog spent 50 minutes
+    # appending its own output into each bot's log file -- which would have
+    # made a dead bot's log look freshly written every 5 minutes and silently
+    # disabled the staleness check this feature exists to provide.
+    _body = _w[_w.index("foreach ($bot in $bots)"):]
+    for _clash in _re2.findall(r'\$(\w+)\s*=(?!=)', _body):
+        assert _clash.lower() != "logfile", (
+            f"local variable ${_clash} collides with the script's $LOGFILE "
+            "(PowerShell names are case-insensitive) -- the watchdog would "
+            "write its log into whatever file that variable holds")
+    print("  no local shadows $LOGFILE (case-insensitive collision)        OK")
     print("  WLog resolves its own path and cannot drop or throw           OK")
     print("  fires on fresh-heartbeat + stale-log (the 18-day blind spot)   OK")
     print("  loop guard: max 2 restarts / 6h, then escalates to a human      OK")

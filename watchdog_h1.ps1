@@ -23,18 +23,17 @@ $LOGFILE = "$DESKTOP\watchdog_h1_$(Get-Date -Format 'yyyy-MM-dd').log"
 function WLog($msg) {
     $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
     Write-Host $line
-    # [2026-08-23] $LOGFILE came back null on exactly two WLog calls per pass,
-    # so Add-Content threw "Cannot bind argument to parameter 'Path'" and those
-    # two lines never reached the file -- while still printing to a console
-    # nobody reads. The dropped lines were the new "log-freshness check SKIPPED
-    # for this bot" warnings, i.e. the watchdog was silently losing the record
-    # of which bots it cannot check. That is the same class of silent hole this
-    # whole change exists to close, so WLog no longer trusts the script-scope
-    # variable: it resolves the path itself and can fall back.
+    # [2026-08-23] WLog is defensive because it was, for 50 minutes, writing
+    # the watchdog's output into the BOTS' log files. The log-freshness code
+    # below named its local variable $logFile, and PowerShell variable names
+    # are case-insensitive -- so it was the same variable as $LOGFILE above.
+    # Each bot's FileInfo overwrote the watchdog's own log path in turn.
     #
-    # A logging failure must also never propagate. WLog is called from inside
-    # the bot loop, and an unhandled terminating error there would abort the
-    # watchdog and leave every bot unsupervised.
+    # Root cause is fixed (the local is now $botLog), but this function is
+    # kept hardened anyway: it resolves its own path, and it never lets a
+    # write failure propagate. WLog runs inside the bot loop, where an
+    # unhandled terminating error would abort the watchdog and leave every
+    # bot unsupervised.
     $target = $script:LOGFILE
     if (-not $target) {
         $base = if ($script:DESKTOP) { $script:DESKTOP } else { "$env:USERPROFILE\Desktop" }
@@ -465,18 +464,28 @@ foreach ($bot in $bots) {
     # cannot repair.
     if (-not $needRestart) {
         $logStaleLimit = if ($bot.LogStaleMinutes) { $bot.LogStaleMinutes } else { 240 }
+        # NAME THIS CAREFULLY. The first version called it $logFile, which
+        # PowerShell treats as the SAME variable as the script's $LOGFILE --
+        # names are case-insensitive. Every bot's FileInfo therefore
+        # overwrote the watchdog's own log path, and WLog spent the next
+        # 50 minutes appending the watchdog's output into the BOTS' log
+        # files. That is self-defeating twice over: the watchdog log lost
+        # 11 of its 14 lines per pass, and every bot's log got touched
+        # every 5 minutes -- which would have made a dead bot's log look
+        # permanently fresh and silently disabled the staleness check this
+        # whole feature exists to provide.
         $pats = if ($bot.LogMatch) { @($bot.LogMatch) } else { @("*$($bot.Symbol)*$variant*.log", "*$variant*.log") }
-        $logFile = $null
+        $botLog = $null
         foreach ($pat in $pats) {
-            $logFile = Get-ChildItem "$DESKTOP\$pat" -ErrorAction SilentlyContinue |
+            $botLog = Get-ChildItem "$DESKTOP\$pat" -ErrorAction SilentlyContinue |
                        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($logFile) { break }
+            if ($botLog) { break }
         }
-        if (-not $logFile) {
+        if (-not $botLog) {
             WLog "[$variant] no log file matched ($($pats -join ' | ')) -- log-freshness check SKIPPED for this bot"
         }
-        if ($logFile) {
-            $logAge = ((Get-Date) - $logFile.LastWriteTime).TotalMinutes
+        if ($botLog) {
+            $logAge = ((Get-Date) - $botLog.LastWriteTime).TotalMinutes
             if ($logAge -gt $logStaleLimit) {
                 $guard = "$DESKTOP\LOGSTALE_$($variant.ToUpper()).count"
                 $recent = @()
