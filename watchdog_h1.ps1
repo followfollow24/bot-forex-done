@@ -182,6 +182,7 @@ $bots = @(
         # caps the damage without stopping data collection.
         Symbol       = "btcusdc"
         Variant      = "btc_h1_manual"
+        LogStaleMinutes = 300   # 60.0m median, 96.2m worst -- hourly bar writer
         StaleMinutes = 5
         # [2026-08-16] tp-atr 15.0 -> 5.0. _tp_sweep.py priced every target
         # from 0.5R to 8R on 8000 H1 bars, choosing on the first half and
@@ -216,6 +217,7 @@ $bots = @(
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_h1_manual"
+        LogStaleMinutes = 240   # 60.0m median, 77.2m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_h1_manual --timeframe 1h --sl-atr 2.5 --tp-atr 15.0 --manual-exit --adx-min 10 --touch-tolerance 0.012 --max-positions 1 --risk 0.30 --block-hours 20-01 --allow-real"
     },
@@ -233,12 +235,14 @@ $bots = @(
     @{
         Symbol       = "crypto"
         Variant      = "funding_contrarian"
+        LogStaleMinutes = 4320   # daily bot: writes a burst then sleeps ~1439m
         StaleMinutes = 5
         Args         = "daily_sleeves_bot.py --sleeve funding --variant-tag funding_contrarian --risk 0.3 --allow-real"
     },
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_combo_lb"
+        LogStaleMinutes = 4320   # daily bot: writes a burst then sleeps ~1439m
         StaleMinutes = 5
         Args         = "daily_sleeves_bot.py --sleeve combo --variant-tag btc_combo_lb --alloc 0.10 --allow-real"
     },
@@ -251,36 +255,42 @@ $bots = @(
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_daily_breakout"
+        LogStaleMinutes = 4320   # daily bot: p95 gap 1124m, worst 1440m
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_daily_breakout --timeframe 1d --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
     },
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_breakout"
+        LogStaleMinutes = 240   # 60.0m median, 78.4m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_breakout --timeframe 1h --strategy donchian --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 1.00 --allow-real"
     },
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_amd"
+        LogStaleMinutes = 240   # 60.0m median, 77.9m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_amd --timeframe 1h --strategy tool_amd --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
     },
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_lqsweep"
+        LogStaleMinutes = 240   # 60.0m median, 77.7m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_lqsweep --timeframe 1h --strategy tool_lqsweep --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
     },
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_tpo"
+        LogStaleMinutes = 240   # 60.0m median, 77.9m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_tpo --timeframe 1h --strategy tool_tpo --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
     },
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_momentum_rsi"
+        LogStaleMinutes = 240   # 60.0m median, 77.7m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_momentum_rsi --timeframe 1h --strategy gold_mom_rsi --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
     },
@@ -290,6 +300,7 @@ $bots = @(
         # computed Symbol_Variant name.
         Symbol        = "news"
         Variant       = "news_gemini"
+        LogStaleMinutes = 210   # 45m p95, 71.7m worst -- scan loop
         StaleMinutes  = 5
         StopFile      = "STOP_NEWS_GEMINI"
         HeartbeatFile = "HEARTBEAT_NEWS_GEMINI"
@@ -344,6 +355,7 @@ $bots = @(
         # same override pattern as the other non-cwider bots.
         Symbol        = "chart"
         Variant       = "ai_trader"
+        LogStaleMinutes = 360   # p95 15m; sample max inflated by a past outage
         StaleMinutes  = 5
         StopFile      = "STOP_CHART_AI_TRADER"
         HeartbeatFile = "HEARTBEAT_CHART_AI_TRADER"
@@ -420,10 +432,13 @@ foreach ($bot in $bots) {
     # is doing work. So a stale log with a live heartbeat is now its own
     # restart condition.
     #
-    # Threshold is deliberately loose (default 90 min, override per bot).
-    # These bots write a status line every poll, so 90 minutes of silence is
-    # far outside normal for any of them, while staying well clear of a
-    # slow-timeframe bot that legitimately has little to say.
+    # Thresholds are MEASURED, not guessed. _log_cadence.py read 14 days of
+    # real inter-write gaps out of these logs on 2026-08-23; each bot's
+    # LogStaleMinutes is 3x its own worst observed quiet stretch. The first
+    # draft of this rule used a flat 90 min, which is below btc_h1_manual's
+    # real 96.2m worst gap -- it would have killed and relaunched a perfectly
+    # healthy bot. The H1 family writes once per bar, so 60 min of silence is
+    # normal for them and instantly fatal as a threshold.
     #
     # LOOP GUARD: a restart cannot fix a broken MT5 terminal, so without a
     # cap this would relaunch the same bot forever. At most 2 log-stale
@@ -431,7 +446,7 @@ foreach ($bot in $bots) {
     # for a human, which is the correct escalation for a fault the watchdog
     # cannot repair.
     if (-not $needRestart) {
-        $logStaleLimit = if ($bot.LogStaleMinutes) { $bot.LogStaleMinutes } else { 90 }
+        $logStaleLimit = if ($bot.LogStaleMinutes) { $bot.LogStaleMinutes } else { 240 }
         $pats = if ($bot.LogMatch) { @($bot.LogMatch) } else { @("*$($bot.Symbol)*$variant*.log", "*$variant*.log") }
         $logFile = $null
         foreach ($pat in $pats) {

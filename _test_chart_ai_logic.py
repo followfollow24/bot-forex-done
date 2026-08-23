@@ -994,6 +994,27 @@ else:
         "guard file is cast with [datetime], which throws on a bad line and "
         "aborts the watchdog")
 
+    # thresholds must be MEASURED, not guessed. The first draft used a flat
+    # 90 min; _log_cadence.py then showed the H1 family writes once per bar
+    # (median 60.0m, worst 96.2m on btc_h1_manual), so 90 min would have
+    # killed and relaunched a perfectly healthy bot every hour.
+    assert "else { 90 }" not in _w, (
+        "default log-stale threshold is back to 90 min -- that is BELOW "
+        "btc_h1_manual's real 96.2m worst gap and restarts a healthy bot")
+    _th = dict(_re2.findall(r'Variant\s*=\s*"([a-z0-9_]+)"[^\n]*\n\s*LogStaleMinutes\s*=\s*(\d+)', _w))
+    for _b in ("btc_h1_manual", "gold_h1_manual", "btc_amd", "btc_lqsweep",
+               "btc_tpo", "gold_momentum_rsi"):
+        assert _b in _th, f"{_b} has no measured LogStaleMinutes"
+        assert int(_th[_b]) >= 240, (
+            f"{_b} threshold {_th[_b]}m is too tight for a bot that writes "
+            "once per H1 bar (60m median, ~96m worst)")
+    # daily bots sleep ~24h between bursts; anything under a day restarts them
+    for _b in ("btc_combo_lb", "funding_contrarian", "gold_daily_breakout"):
+        assert _b in _th and int(_th[_b]) >= 4320, (
+            f"{_b} is a DAILY bot with ~1440m between writes -- "
+            f"threshold {_th.get(_b)}m would relaunch it constantly")
+    print(f"  {len(_th)} thresholds, all measured from 14d of real log gaps  OK")
+    print("  H1 family >=240m, daily bots >=4320m, default no longer 90m    OK")
     print("  fires on fresh-heartbeat + stale-log (the 18-day blind spot)   OK")
     print("  loop guard: max 2 restarts / 6h, then escalates to a human      OK")
     print("  Send-Telegram defined, try/catch-wrapped, astral-safe emoji     OK")
