@@ -210,6 +210,7 @@ def main():
             order.append(name)
     seen = set()
     tot_net = tot_n = 0
+    recap = []
     for name in order:
         if name in seen:
             continue
@@ -245,8 +246,19 @@ def main():
               f"{b['net']:>+12,.2f}{s_bst:>9}{s_wst:>9}{s_lst:>12}")
         tot_net += b["net"]
         tot_n += b["n"]
+        recap.append((name, state, b["n"], wr, b["net"]))
     print("-" * 100)
     print(f"{'TOTAL closed':<21}{'':<11}{'':>9}{'':>8}{tot_n:>8}{'':>7}{tot_net:>+12,.2f}")
+
+    # Plain, un-columned recap -- the fixed-width table above reads fine in a
+    # full-size terminal, but a narrow/rewrapped console (RDP window, log
+    # capture) mangles fixed-column output unpredictably. One short line per
+    # bot, natural-width, nothing to misalign.
+    print()
+    print("SIMPLE RECAP (one line per bot, natural width, nothing column-aligned)")
+    for name, state, n, wr, net in recap:
+        print(f"RECAP  {name}  state={state}  trades={n}  WR={wr}  net={net:+,.2f}{cur}")
+    print(f"RECAP  TOTAL  trades={tot_n}  net={tot_net:+,.2f}{cur}")
 
     if floating:
         print()
