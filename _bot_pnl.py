@@ -206,7 +206,13 @@ def main():
 
     order = sorted(per.keys(), key=lambda k: -per[k]["net"])
     for name in list(MAGIC_LABEL.values()):
-        if name not in order and name not in floating:
+        # [2026-08-27] The "and name not in floating" clause that used to be
+        # here DROPPED any bot that has an open position but no CLOSED trade
+        # in the window -- it fell out of both branches and was never printed.
+        # gold_daily_breakout vanished from a 14-day report while running and
+        # holding a -91.10 position, which is exactly the bot you most want to
+        # see. Every known bot gets a row.
+        if name not in order:
             order.append(name)
     seen = set()
     tot_net = tot_n = 0
