@@ -108,6 +108,9 @@ class GoldManualExitBot(GoldCWiderBot):
             if pos.entry_atr <= 0:
                 continue
             direction = 1 if pos.side == "long" else -1
+            # 1R is defined by the ACTUAL configured stop, not a constant: these
+            # bots run --sl-atr 2.5 while the old alert text assumed 3.0.
+            sl_atr = float(getattr(self.strategy, "sl_atr", 0.0) or 0.0)
             last_close = self._live_price(pos.side) or bar_close
             profit_price = (last_close - pos.entry) * direction
             profit_atr = profit_price / pos.entry_atr
@@ -123,22 +126,58 @@ class GoldManualExitBot(GoldCWiderBot):
                 prev_max = self._alerted_atr_level_max.get(pos.trade_id, 0)
                 if level > prev_max:
                     self._alerted_atr_level_max[pos.trade_id] = level
+                    # [2026-08-29] Report R FIRST, xATR second, and only invite a
+                    # close at >= 1R.
+                    #
+                    # This alert was the mechanism behind the account's single
+                    # largest measured leak. The stop is sl_atr x ATR (2.5 live),
+                    # so 1R = 2.5xATR and the FIRST milestone (+1xATR) is only
+                    # +0.40R. The old text announced it and said "close whenever
+                    # you like", and the measured average hand-close on
+                    # btc_h1_manual was +0.35R -- i.e. right at that first alert.
+                    #
+                    # A TP sweep over 591 BTC / 970 gold real filtered entries
+                    # (13.4y gold, 8.9y BTC, real spread + swap) priced that exit
+                    # policy: closing at +0.35R is EV -0.009R train / -0.032R test,
+                    # versus +0.167 / +0.108R for letting the configured target
+                    # run. The gap is 0.14-0.18R per trade with the SAME SIGN in
+                    # all four train/test x market cells. On the 19 live BTC
+                    # trades that is roughly -410 USC actual versus about +400 USC
+                    # had they been left alone.
+                    #
+                    # Gold survives hand-closing because its human happens to
+                    # close near +0.96R; BTC's closes at +0.35R and does not. So
+                    # the guidance below is keyed to R, not to a feeling.
+                    r_mult = profit_atr / sl_atr if sl_atr > 0 else 0.0
+                    if r_mult >= 1.0:
+                        advice = (f"ถึง +{r_mult:.2f}R แล้ว -- เกิน 1R ปิดได้ถ้าต้องการ "
+                                  f"(ค่าเฉลี่ยที่ปิดมือแล้วยังกำไรคือ ~1R ขึ้นไป)")
+                    else:
+                        advice = (f"ยังได้แค่ +{r_mult:.2f}R -- อย่าเพิ่งปิด "
+                                  f"ต้องถึง +1.00R ({sl_atr:.1f}xATR) เป็นอย่างน้อย "
+                                  f"(วัดแล้ว: ปิดที่ ~0.35R ทำให้เสีย 0.14R/ไม้)")
                     self._send_telegram_alert(
                         f"[{tag}] {sym} {pos.side.upper()} magic={self.cfg.magic_number}\n"
                         f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
-                        f"กำไรตอนนี้: +{profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
-                        f"ผ่านจุด +{level}xATR ใหม่ -- ไม่มี TP อัตโนมัติ ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
-                        f"(entry_atr={pos.entry_atr:.3f}, ts={datetime.now(timezone.utc).isoformat()})"
+                        f"กำไรตอนนี้: +{r_mult:.2f}R  (+{profit_atr:.2f}xATR, ~${profit_usd:,.2f})\n"
+                        f"{advice}\n"
+                        f"(SL={sl_atr:.1f}xATR=1R, entry_atr={pos.entry_atr:.3f}, "
+                        f"ts={datetime.now(timezone.utc).isoformat()})"
                     )
             else:
                 prev_min = self._alerted_atr_level_min.get(pos.trade_id, 0)
                 if level < prev_min:
                     self._alerted_atr_level_min[pos.trade_id] = level
+                    # The old text hardcoded "SL 3.0xATR" while the live bots
+                    # run --sl-atr 2.5, so it misreported how much room was left
+                    # on every losing trade. Read the configured value instead.
+                    r_mult = profit_atr / sl_atr if sl_atr > 0 else 0.0
                     self._send_telegram_alert(
                         f"[{tag}] {sym} {pos.side.upper()} magic={self.cfg.magic_number}\n"
                         f"ราคาปัจจุบัน: {last_close:.2f}  entry: {pos.entry:.2f}\n"
-                        f"ขาดทุนตอนนี้: {profit_atr:.2f}xATR (~${profit_usd:,.2f})\n"
-                        f"ผ่านจุด {level}xATR ใหม่ (ขาดทุนเพิ่ม) -- SL อยู่ที่ 3.0xATR, ตัดสินใจปิดเองได้เลยถ้าต้องการ\n"
+                        f"ขาดทุนตอนนี้: {r_mult:.2f}R  ({profit_atr:.2f}xATR, ~${profit_usd:,.2f})\n"
+                        f"SL อยู่ที่ -1.00R ({sl_atr:.1f}xATR) -- ปล่อยให้ SL ทำงาน "
+                        f"การปิดไม้แพ้เร็วไม่ได้ช่วย ถ้าไม้ชนะก็ถูกปิดเร็วเหมือนกัน\n"
                         f"(entry_atr={pos.entry_atr:.3f}, ts={datetime.now(timezone.utc).isoformat()})"
                     )
 
