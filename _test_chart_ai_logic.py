@@ -1001,7 +1001,9 @@ else:
     assert "else { 90 }" not in _w, (
         "default log-stale threshold is back to 90 min -- that is BELOW "
         "btc_h1_manual's real 96.2m worst gap and restarts a healthy bot")
-    _th = dict(_re2.findall(r'Variant\s*=\s*"([a-z0-9_]+)"[^\n]*\n\s*LogStaleMinutes\s*=\s*(\d+)', _w))
+    # tolerate other keys (e.g. Disabled) sitting between Variant and LogStaleMinutes
+    _th = dict(_re2.findall(
+        r'Variant\s*=\s*"([a-z0-9_]+)"[^\n]*\n(?:[^\n]*\n){0,3}?\s*LogStaleMinutes\s*=\s*(\d+)', _w))
     for _b in ("btc_h1_manual", "gold_h1_manual", "btc_amd", "btc_lqsweep",
                "btc_tpo", "gold_momentum_rsi"):
         assert _b in _th, f"{_b} has no measured LogStaleMinutes"
@@ -1041,5 +1043,43 @@ else:
     print("  loop guard: max 2 restarts / 6h, then escalates to a human      OK")
     print("  Send-Telegram defined, try/catch-wrapped, astral-safe emoji     OK")
     print("  unmatched log pattern is reported, not silently skipped         OK")
+
+
+print("=== Case 43: only the live fleet can be started by the watchdog ===")
+# The bot loop runs over EVERY entry in $bots. Until 2026-08-30 the only thing
+# standing between a retired bot and a live relaunch was Test-Path on its STOP_
+# file. Three bots are deliberately live; the rest carry risk settings up to
+# 1.00% and sum to about 3.4% per trade. One deleted file and the watchdog puts
+# them all back on a real account -- which is why eth_h1_manual was deleted from
+# the file outright rather than left with a STOP_ file.
+_wd = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchdog_h1.ps1")
+if not os.path.exists(_wd):
+    print("SKIP -- watchdog_h1.ps1 not beside the test\n")
+else:
+    _w = open(_wd, encoding="utf-8", errors="replace").read()
+    import re as _re3
+
+    # the guard must exist and must run BEFORE the kill-switch check, so a
+    # retired bot is skipped even if its STOP_ file is missing
+    assert "if ($bot.Disabled) {" in _w, "no Disabled guard in the bot loop"
+    _loop = _w[_w.index("foreach ($bot in $bots)"):]
+    assert _loop.index("$bot.Disabled") < _loop.index("Test-Path $stopFile"), (
+        "the Disabled guard runs AFTER the kill-switch check -- a retired bot "
+        "whose STOP_ file went missing would still be relaunched")
+
+    # every entry is either live or explicitly disabled; nothing implicit
+    _entries = _re3.findall(
+        r'Variant\s*=\s*"([a-z0-9_]+)"(.*?)(?=\n\s*\}|\Z)', _loop.join("") if False else _w, _re3.S)
+    _live, _off = [], []
+    for _name, _body in _entries:
+        (_off if "Disabled" in _body.split("Variant")[0] + _body[:400] and
+                 _re3.search(r'Disabled\s*=\s*\$true', _body[:400]) else _live).append(_name)
+    _expect = {"btc_h1_manual", "gold_h1_manual", "btc_combo_lb"}
+    assert set(_live) == _expect, (
+        f"the watchdog can start {sorted(_live)}, expected exactly {sorted(_expect)} -- "
+        "a bot outside the live fleet is one missing STOP_ file away from trading")
+    print(f"  startable: {sorted(_live)}   OK")
+    print(f"  disabled : {len(_off)} retired entries kept for the record   OK")
+    print("  Disabled is checked BEFORE the kill-switch file                OK")
 
 print("\nALL TESTS PASSED")

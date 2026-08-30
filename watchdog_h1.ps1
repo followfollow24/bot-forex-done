@@ -252,6 +252,7 @@ $bots = @(
     @{
         Symbol       = "crypto"
         Variant      = "funding_contrarian"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 4320   # daily bot: writes a burst then sleeps ~1439m
         StaleMinutes = 5
         Args         = "daily_sleeves_bot.py --sleeve funding --variant-tag funding_contrarian --risk 0.3 --allow-real"
@@ -272,6 +273,7 @@ $bots = @(
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_daily_breakout"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 4320   # daily bot: p95 gap 1124m, worst 1440m
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_daily_breakout --timeframe 1d --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
@@ -279,6 +281,7 @@ $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_h1_breakout"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 240   # 60.0m median, 78.4m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_h1_breakout --timeframe 1h --strategy donchian --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 1.00 --allow-real"
@@ -286,6 +289,7 @@ $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_amd"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 240   # 60.0m median, 77.9m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_amd --timeframe 1h --strategy tool_amd --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
@@ -293,6 +297,7 @@ $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_lqsweep"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 240   # 60.0m median, 77.7m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_lqsweep --timeframe 1h --strategy tool_lqsweep --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.50 --allow-real"
@@ -300,6 +305,7 @@ $bots = @(
     @{
         Symbol       = "btcusdc"
         Variant      = "btc_tpo"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 240   # 60.0m median, 77.9m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol BTCUSDc --variant-tag btc_tpo --timeframe 1h --strategy tool_tpo --crypto-killzone --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
@@ -307,6 +313,7 @@ $bots = @(
     @{
         Symbol       = "xauusdc"
         Variant      = "gold_momentum_rsi"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 240   # 60.0m median, 77.7m worst -- hourly bar writer
         StaleMinutes = 5
         Args         = "forex_live_bot_gold_cwider.py --symbol XAUUSDc --variant-tag gold_momentum_rsi --timeframe 1h --strategy gold_mom_rsi --sl-atr 2.0 --tp-atr 5.0 --manual-exit --risk 0.30 --allow-real"
@@ -317,6 +324,7 @@ $bots = @(
         # computed Symbol_Variant name.
         Symbol        = "news"
         Variant       = "news_gemini"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 210   # 45m p95, 71.7m worst -- scan loop
         StaleMinutes  = 5
         StopFile      = "STOP_NEWS_GEMINI"
@@ -337,6 +345,7 @@ $bots = @(
         # an endless loop.
         Symbol        = "portfolio"
         Variant       = "allocator"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         StaleMinutes  = 5
         StopFile      = "STOP_PORTFOLIO_ALLOCATOR"
         HeartbeatFile = "HEARTBEAT_PORTFOLIO_ALLOCATOR"
@@ -353,6 +362,7 @@ $bots = @(
         # override (no --variant-tag).
         Symbol        = "log"
         Variant       = "anomaly_scanner"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         StaleMinutes  = 5
         StopFile      = "STOP_LOG_ANOMALY_SCANNER"
         HeartbeatFile = "HEARTBEAT_LOG_ANOMALY_SCANNER"
@@ -372,6 +382,7 @@ $bots = @(
         # same override pattern as the other non-cwider bots.
         Symbol        = "chart"
         Variant       = "ai_trader"
+        Disabled     = $true   # retired 2026-08-30; not in the live fleet
         LogStaleMinutes = 360   # p95 15m; sample max inflated by a past outage
         StaleMinutes  = 5
         StopFile      = "STOP_CHART_AI_TRADER"
@@ -395,6 +406,28 @@ $bots = @(
 
 foreach ($bot in $bots) {
     $variant = $bot.Variant
+
+    # [2026-08-30] Disabled = a bot that is NOT part of the current fleet.
+    #
+    # This loop runs over every entry in $bots unconditionally, and until now
+    # the ONLY thing standing between a retired bot and a live relaunch was
+    # Test-Path on its STOP_ file. Three bots are deliberately live; the other
+    # eight entries carry risk settings up to 1.00% and sum to ~3.4% per trade.
+    # One deleted file -- a cleanup, a stray Remove-Item, a restored disk --
+    # and the watchdog puts them all back on a real account.
+    #
+    # That failure mode is why eth_h1_manual was DELETED from this file rather
+    # than left with a STOP_ file. Deleting works but throws away the validated
+    # launch args, so a bot cannot be brought back without reconstructing them.
+    # Disabled keeps the record and removes the hazard: the entry stays here,
+    # fully documented, and cannot start until someone edits this line.
+    #
+    # To bring a bot back: set Disabled = $false AND delete its STOP_ file.
+    # Two deliberate acts, neither of which happens by accident.
+    if ($bot.Disabled) {
+        WLog "[$variant] DISABLED in watchdog_h1.ps1 -- not part of the live fleet, skipping"
+        continue
+    }
 
     # A kill-switch means the operator deliberately stopped this bot. Restarting
     # it would override that decision, so skip it entirely -- the STOP_ file only
