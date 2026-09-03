@@ -378,15 +378,33 @@ class MT5Connector:
             self.log.debug(f"list_broker_symbols: {exc}")
             return []
 
+    # [2026-09-04] configured strings from this repo's bots are ALWAYS the
+    # cent-account form ("BTCUSDC", "XAUUSDC", "ETHUSDC" -- post .upper()),
+    # because main()'s SYMBOL_MAGIC / pip_size overrides are keyed on that
+    # EXACT string (see forex_live_bot_gold_cwider.py:186-209 -- changing the
+    # CLI --symbol arg to drop the trailing "C" would silently reassign the
+    # magic number and break the pip_size override, not just rename a
+    # variable). So branch 2 ("+M") can never fire for these: "BTCUSDC"+"M"
+    # is "BTCUSDCM", which no broker symbol equals. Gold survives switching
+    # broker/account type only because of its dedicated keyword branch below;
+    # BTC and ETH had no equivalent, so on a broker whose crypto symbols use
+    # a different suffix (confirmed: Exness-MT5Real15 has "BTCUSDm"/"ETHUSDm",
+    # not "...c") resolve_symbol fell through to branch 5 and returned the
+    # unresolved "BTCUSDC" -- which does not exist as an MT5 symbol, so every
+    # order and every OHLCV fetch (including the --xasset-short-gate's ETH
+    # read) would fail. Generalising the gold branch to a keyword table fixes
+    # both without touching a single CLI arg or magic number.
     def resolve_symbol(self, configured: str) -> str:
         """แปลงชื่อ symbol ที่กำหนดไว้ → ชื่อจริงที่โบรกเกอร์ใช้.
 
-        ปัญหาทอง: XAUUSD อาจถูกตั้งชื่อว่า XAUUSDm (Exness ใช้ suffix 'm')
+        ปัญหาทอง/คริปโต: อาจถูกตั้งชื่อว่า XAUUSDm/BTCUSDm (Exness ใช้ suffix 'm'),
+        หรือคนละ suffix ไปเลยบนโบรก/บัญชีอื่น
         ลำดับการค้นหา:
           1. Exact match
           2. configured + 'm' (เช่น XAUUSD → XAUUSDm)
           3. Prefix match — ต้องขึ้นต้นด้วย configured ทั้งคำ (กัน XAUEURm หลุดมา)
-          4. XAU/GOLD keyword ที่เป็น USD-quoted เท่านั้น (กัน BTCXAUm หลุดมา)
+          4. Keyword match (XAU/GOLD, BTC, ETH) ที่เป็น USD-quoted เท่านั้น
+             (กัน BTCXAUm หลุดมาตอนหา XAU, กัน BTCXAUm หลุดมาตอนหา BTC ฯลฯ)
           5. ถ้าไม่เจอ: คืน configured เดิม + warn
         """
         if not _HAS_MT5:
@@ -411,24 +429,37 @@ class MT5Connector:
                 self.log.info(
                     f"[SymbolResolver] {configured} -> {resolved}"
                     f"  (prefix match, candidates: {prefixes[:5]})")
-            elif "XAU" in upper_cfg or upper_cfg == "GOLD":
-                gold_matches = [
-                    s for s in broker_syms
-                    if ("XAU" in s.upper() or "GOLD" in s.upper()) and "USD" in s.upper()
-                ]
-                if gold_matches:
-                    resolved = sorted(gold_matches, key=len)[0]
+            else:
+                # keyword -> the substrings a real broker symbol for that
+                # asset must contain, checked in this order (first match
+                # wins, mirrors the original gold-only branch's behaviour
+                # exactly when configured contains "XAU"/"GOLD")
+                KEYWORD_TABLE = (
+                    ("XAU",  ("XAU", "GOLD")),
+                    ("GOLD", ("XAU", "GOLD")),
+                    ("BTC",  ("BTC",)),
+                    ("ETH",  ("ETH",)),
+                )
+                needles = None
+                for trigger, kw in KEYWORD_TABLE:
+                    if trigger in upper_cfg:
+                        needles = kw
+                        break
+                matches = []
+                if needles:
+                    matches = [
+                        s for s in broker_syms
+                        if any(k in s.upper() for k in needles) and "USD" in s.upper()
+                    ]
+                if matches:
+                    resolved = sorted(matches, key=len)[0]
                     self.log.info(
                         f"[SymbolResolver] {configured} -> {resolved}"
-                        f"  (gold keyword match, USD-quoted; all: {gold_matches[:8]})")
+                        f"  (keyword match {needles}, USD-quoted; all: {matches[:8]})")
                 else:
                     self.log.warning(
                         f"[SymbolResolver] '{configured}' ไม่พบในรายการ broker!"
                         f"  ตัวอย่างที่มี: {broker_syms[:10]}")
-            else:
-                self.log.warning(
-                    f"[SymbolResolver] '{configured}' ไม่พบในรายการ broker!"
-                    f"  ตัวอย่างที่มี: {broker_syms[:10]}")
 
         if resolved != configured:
             self.log.info(f"[SymbolResolver] {configured} -> {resolved}")

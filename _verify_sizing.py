@@ -27,6 +27,13 @@ outside -- both are silent -- so "the fix is safe" is only half of what
 has to be shown. The other half is that the bot can still trade.
 
 Usage (on the VPS):  python _verify_sizing.py [risk_pct]
+
+[2026-09-04] SYMBOLS used to be the literal "BTCUSDc" -- correct for the
+Exness cent account this was written against, but not an MT5 symbol at
+all on the real USD account (Exness-MT5Real15) this bot was moved to:
+that broker lists "XAUUSDm"/"BTCUSDm". Resolved via connector.resolve_symbol()
+now, same as the live bot does for self.bsym, so this script needs no edit
+to work on the next account either.
 """
 import sys
 import logging
@@ -34,7 +41,7 @@ import logging
 sys.path.insert(0, ".")
 
 RISK = float(sys.argv[1]) if len(sys.argv) > 1 else 0.30
-SYMBOLS = ["BTCUSDc"]
+CANONICAL_SYMBOLS = ["XAUUSDC", "BTCUSDC"]
 SL_ATR = 2.5
 
 try:
@@ -76,12 +83,19 @@ def main():
     print("=" * 76)
     print(" SIZING RE-VERIFICATION -- opens nothing, prices the next order")
     print("=" * 76)
-    print(f"  account {acct.login}   equity {eq:,.2f} {acct.currency}"
+    print(f"  account {acct.login} ({acct.server})   equity {eq:,.2f} {acct.currency}"
           f"   risk {RISK}%")
     print()
 
     bad = 0
-    for sym in SYMBOLS:
+    for canon in CANONICAL_SYMBOLS:
+        sym = conn.resolve_symbol(canon)
+        if sym == canon and mt5.symbol_info(sym) is None:
+            print(f"  {canon}: NOT FOUND on this broker -- skipping")
+            bad += 1
+            continue
+        if sym != canon:
+            print(f"  {canon} -> {sym}")
         atr = atr14_h1(sym)
         if not atr:
             print(f"  {sym}: no bars")

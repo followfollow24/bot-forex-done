@@ -1082,4 +1082,33 @@ else:
     print(f"  disabled : {len(_off)} retired entries kept for the record   OK")
     print("  Disabled is checked BEFORE the kill-switch file                OK")
 
+
+print("=== Case 44: resolve_symbol() must find BTC/ETH on non-cent brokers ===")
+# Found switching to a real USD account (Exness-MT5Real15): its symbols are
+# "XAUUSDm"/"BTCUSDm", not "...c". Gold already had a keyword-match branch
+# and survived; BTC/ETH had none, so a bot configured with --symbol BTCUSDc
+# (canonical "BTCUSDC" post .upper()) fell through unresolved -- not an MT5
+# symbol on that broker -- so every order and the --xasset-short-gate's ETH
+# read would fail. Full behavioural coverage lives in _test_resolve_symbol.py;
+# this just confirms the fix shipped.
+import subprocess as _sp3
+_rs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_test_resolve_symbol.py")
+if not os.path.exists(_rs):
+    print("SKIP -- _test_resolve_symbol.py not beside the test\n")
+else:
+    _r = _sp3.run([sys.executable, _rs], capture_output=True, text=True)
+    assert _r.returncode == 0, f"_test_resolve_symbol.py failed:\n{_r.stdout}\n{_r.stderr}"
+    assert "ALL RESOLVE_SYMBOL TESTS PASSED" in _r.stdout, _r.stdout
+    print("  _test_resolve_symbol.py: all cases passed                      OK")
+
+    # and confirm the xasset-short-gate symbol is actually resolved at
+    # connect() time, not left as the raw CLI string
+    _src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "forex_live_bot_gold_cwider.py"), encoding="utf-8").read()
+    assert "self.xasset_gate = (g_resolved, g_fast, g_slow)" in _src, (
+        "xasset_gate symbol is never re-resolved through connector.resolve_symbol() "
+        "-- on a broker with a different suffix, the cross-asset gate would silently "
+        "fail-open forever (no candles found for the raw, unresolved symbol)")
+    print("  xasset-short-gate symbol is resolved at connect() time           OK")
+
 print("\nALL TESTS PASSED")

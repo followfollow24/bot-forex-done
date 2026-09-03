@@ -729,6 +729,22 @@ class GoldCWiderBot:
             self.cfg.add_symbol_alias(self.symbol, self.bsym)
             self.log.info(f"[SYMBOL] {self.symbol} -> {self.bsym}")
 
+        # [2026-09-04] --xasset-short-gate's symbol is a raw CLI string
+        # ("ETHUSDc") fed straight into fetch_ohlcv() -> mt5.copy_rates_from_pos(),
+        # which does NOT resolve symbols itself (unlike order placement, which
+        # goes through self.bsym above). On a broker/account whose suffix
+        # differs, every gate check silently fails ("no candles" -> fail-open,
+        # see the try/except around gate_r36s_allow_short), so the gate looks
+        # alive in the logs but never actually blocks a short. Resolve once
+        # here, at the same point self.bsym is resolved, so the cached tuple
+        # always holds a real MT5 symbol for the rest of the bot's life.
+        if self.xasset_gate is not None:
+            g_sym, g_fast, g_slow = self.xasset_gate
+            g_resolved = self.connector.resolve_symbol(g_sym)
+            if g_resolved != g_sym:
+                self.log.info(f"[SYMBOL] xasset-gate {g_sym} -> {g_resolved}")
+            self.xasset_gate = (g_resolved, g_fast, g_slow)
+
         if self.cfg.total_capital_usd <= 0:
             self.cfg.total_capital_usd = self.connector.get_balance()
 
