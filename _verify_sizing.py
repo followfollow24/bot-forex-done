@@ -58,7 +58,15 @@ logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
 
 def atr14_h1(sym):
-    r = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 0, 30)
+    # [2026-09-04 FIX] this fetched TIMEFRAME_D1 despite the name -- daily
+    # ATR is roughly a multiple of hourly ATR, so every stop distance this
+    # script priced was far wider than what the live bots (--timeframe 1h)
+    # actually use. On a well-funded account that only made the numbers
+    # conservative; on the $77 real-USD account this bug was caught on, it
+    # was the difference between "prices a real 0.01+ lot" and "every lot
+    # rounds to 0, do not clear the kill switch" -- a false negative that
+    # would have kept a tradeable account blocked indefinitely.
+    r = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 60)
     if r is None or len(r) < 15:
         return None
     trs = []
