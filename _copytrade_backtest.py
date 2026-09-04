@@ -54,12 +54,35 @@ SEED = 12345
 
 
 def load(symbol, years):
-    n = int(years * 365 * 24 * 12)          # M5 bars
-    n = min(n, 400_000)
-    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, n)
-    if rates is None or len(rates) < 5000:
-        return None
-    return rates
+    """Fetch M5 bars, forcing MT5 to pull history it has not cached.
+
+    copy_rates_from_pos only returns what the TERMINAL already holds. For
+    a symbol whose chart has never been opened -- XAUAUDm on a fresh
+    account -- that is often a few hundred bars, so the first attempt at
+    this returned "not enough M5 history". symbol_select() plus an
+    explicit copy_rates_range() makes the terminal go and get it.
+    Falls back to M15 rather than silently testing on a thin sample:
+    a wrong answer from 400 bars is worse than no answer.
+    """
+    mt5.symbol_select(symbol, True)
+    now = datetime.now()
+    frm = now - timedelta(days=int(years * 365))
+    for tf, label, per_day in ((mt5.TIMEFRAME_M5, "M5", 288),
+                               (mt5.TIMEFRAME_M15, "M15", 96)):
+        rates = mt5.copy_rates_range(symbol, tf, frm, now)
+        got = 0 if rates is None else len(rates)
+        print(f"  [data] {label}: {got:,} bars"
+              f"{'' if got else '  (terminal has none cached)'}")
+        if got >= 5000:
+            return rates, label
+        # second chance: from_pos often works after range primed the cache
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0,
+                                        min(int(years * 365 * per_day), 400_000))
+        got = 0 if rates is None else len(rates)
+        print(f"  [data] {label} retry: {got:,} bars")
+        if got >= 5000:
+            return rates, label
+    return None, None
 
 
 def h1_atr_series(rates_m5, n=ATR_N):
@@ -194,9 +217,12 @@ def main():
         print(f"[ERROR] {SYMBOL} not found on this broker")
         mt5.shutdown()
         return 2
-    rates = load(SYMBOL, YEARS)
+    print(f"  loading {SYMBOL} history...")
+    rates, tf_label = load(SYMBOL, YEARS)
     if rates is None:
-        print(f"[ERROR] not enough M5 history for {SYMBOL}")
+        print(f"[ERROR] not enough history for {SYMBOL} on any timeframe.")
+        print("  Open a chart for this symbol in the MT5 terminal once so it")
+        print("  downloads history, then re-run.")
         mt5.shutdown()
         return 2
     atr = h1_atr_series(rates)
@@ -204,12 +230,17 @@ def main():
 
     print("=" * 82)
     print(f" COPY-THE-OPERATOR BACKTEST -- {SYMBOL}   TP {TP_ATR}xATR / SL {SL_ATR}xATR")
-    print(f" {len(rates):,} M5 bars   "
+    print(f" {len(rates):,} {tf_label} bars   "
           f"{datetime.fromtimestamp(rates[0]['time']):%Y-%m-%d} -> "
           f"{datetime.fromtimestamp(rates[-1]['time']):%Y-%m-%d}")
     print(f" live spread now: {info.spread} points = {spread_price:.2f} price")
     print("=" * 82)
 
+    global MAX_HOLD_BARS
+    if tf_label == "M15":
+        MAX_HOLD_BARS = max(4, MAX_HOLD_BARS // 3)   # keep ~2h wall-clock
+        print(f"  [note] using {tf_label} bars; max hold scaled to "
+              f"{MAX_HOLD_BARS} bars (~{MAX_HOLD_BARS*15/60:.1f}h)")
     mid = len(rates) // 2
     defs = [("net", 1), ("net", 3), ("net", 6), ("net", 12),
             ("consec", 2), ("consec", 3), ("ema", 5), ("ema", 12)]
