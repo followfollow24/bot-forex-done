@@ -74,6 +74,8 @@ def main():
         print(f"[ERROR] {SYMBOL} not found"); return 2
     mt5.symbol_select(SYMBOL, True)
     spread = info.spread * info.point
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     tkn = mt5.symbol_info_tick(SYMBOL)
     off = int(round((tkn.time - datetime.now(timezone.utc).timestamp()) / 3600.0))
     per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, SYMBOL, LOT,
@@ -151,7 +153,7 @@ def main():
     print(f" EXIT-TIME CURVE -- {SYMBOL}   entry +{DECIDE}s, SL {SL_ATR}xATR, "
           f"lot {LOT}")
     print(f" {n} days   spread {spread:.2f}   1.0 pt on {LOT} lot = "
-          f"{per_pt:.2f} {info.currency_profit}")
+          f"{per_pt:.2f} {acct_ccy}")
     print("=" * 88)
     if n < 30:
         print(" not enough days"); mt5.shutdown(); return 0

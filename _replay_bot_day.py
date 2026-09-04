@@ -46,6 +46,8 @@ def main():
         print(f"[ERROR] {SYMBOL} not found"); return 2
     mt5.symbol_select(SYMBOL, True)
     spread = info.spread * info.point
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     tkn = mt5.symbol_info_tick(SYMBOL)
     off = int(round((tkn.time - datetime.now(timezone.utc).timestamp()) / 3600.0))
 
@@ -141,7 +143,7 @@ def main():
           f"(19:30:0{int(DECIDE)} Thai)")
     print(f" EXIT   {exit_px:.3f} at {exit_t:%H:%M} Thai   -- {why}")
     print(f" RESULT {pts:+.2f} points = {float(money):+.2f} "
-          f"{info.currency_profit} on {LOT} lot")
+          f"{acct_ccy} on {LOT} lot")
     print("-" * 84)
     mt5.shutdown()
     return 0

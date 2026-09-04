@@ -150,6 +150,8 @@ def main():
         print(f"[ERROR] not enough M1 data ({mt5.last_error()})"); return 2
 
     atr, spread = h1_atr_on(r), info.spread * info.point
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     tick = mt5.symbol_info_tick(SYMBOL)
     offh = int(round((tick.time - datetime.now(timezone.utc).timestamp()) / 3600.0)) if tick else 0
     sh, sm = (TARGET[0] - THAI + offh) % 24, TARGET[1]
@@ -168,7 +170,7 @@ def main():
     print(f" 19:30 -> WAIT FOR IT TO MOVE -> JOIN -> EXIT WHEN IT STOPS -- {SYMBOL}")
     print(f" {datetime.fromtimestamp(r[0]['time']):%Y-%m-%d} -> "
           f"{datetime.fromtimestamp(r[-1]['time']):%Y-%m-%d}   {len(days)} days   "
-          f"spread {spread:.2f}   1.0 pt on {LOT} lot = {per_pt:.2f} {info.currency_profit}")
+          f"spread {spread:.2f}   1.0 pt on {LOT} lot = {per_pt:.2f} {acct_ccy}")
     print(f" {TF} bars; trigger must fire within {WATCH} min of 19:30; "
           f"max {CAP} min in trade; exit after {PATIENCE} bars against")
     print("=" * 96)

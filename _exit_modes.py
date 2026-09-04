@@ -110,6 +110,8 @@ def main():
         print(f"[ERROR] {SYMBOL} not found"); return 2
     mt5.symbol_select(SYMBOL, True)
     spread = info.spread * info.point
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     tkn = mt5.symbol_info_tick(SYMBOL)
     off = int(round((tkn.time - datetime.now(timezone.utc).timestamp()) / 3600.0))
     per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, SYMBOL, LOT,
@@ -160,7 +162,7 @@ def main():
     print(f" {scanned} days had tick history; {len(rows)} produced a trade; "
           f"{sum(1 for r in rows if r[1])} also cleared the {GATE_X}x gate")
     print(f" spread {spread:.2f}   1.0 pt on {LOT} lot = {per_pt:.2f} "
-          f"{info.currency_profit}")
+          f"{acct_ccy}")
     print("=" * 92)
     if len(rows) < 30:
         print(" not enough days"); mt5.shutdown(); return 0

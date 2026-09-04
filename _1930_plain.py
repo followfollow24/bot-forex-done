@@ -102,6 +102,8 @@ def main():
         print(f"[ERROR] not enough M5 data ({mt5.last_error()})"); return 2
 
     o, c, spread = r["open"], r["close"], info.spread * info.point
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     tick = mt5.symbol_info_tick(SYMBOL)
     off = int(round((tick.time - datetime.now(timezone.utc).timestamp()) / 3600.0)) if tick else 0
     sh, sm = (TARGET[0] - THAI + off) % 24, TARGET[1]
@@ -124,7 +126,7 @@ def main():
           f"{len(slot)} days at {TARGET[0]}:{TARGET[1]:02d} Thai "
           f"(= {sh}:{sm:02d} server)")
     print(f" spread {spread:.2f} charged once per trade; 1.0 price point on "
-          f"{LOT} lot = {per_point:.2f} {info.currency_profit}")
+          f"{LOT} lot = {per_point:.2f} {acct_ccy}")
     print("=" * 88)
     print("\n 'went further' = the share of days price was further along in the")
     print(" direction you followed. 50% is a coin flip. Break-even needs more")
