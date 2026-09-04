@@ -293,6 +293,14 @@ def send_order(sym: str, direction: int, lot: float, sl_price: float,
                live: bool):
     tk = mt5.symbol_info_tick(sym)
     info = mt5.symbol_info(sym)
+    if tk is None or info is None:
+        # Refusing here is right: an entry with no quote has no price and
+        # no stop distance. That is the opposite of close_position, which
+        # must proceed regardless -- opening blind risks money, closing
+        # blind protects it.
+        log(f"  no quote/info for {sym} at the moment of entry -- not sending")
+        telegram(f"clock_scalp [{sym}]: no quote at entry, order not sent")
+        return None
     price = tk.ask if direction > 0 else tk.bid
     req = {
         "action": mt5.TRADE_ACTION_DEAL,

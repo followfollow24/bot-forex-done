@@ -22,8 +22,12 @@ ok('p.add_argument("--live", action="store_true"' in src,
    "--live is an opt-in flag, so dry run is the default")
 ok('if not live:' in src and 'DRY RUN -- would send' in src,
    "send_order returns before order_send when not live")
-ok(src.index('if not live:') < src.index('res = mt5.order_send(req)'),
-   "the dry-run branch comes BEFORE any order_send call")
+_so = src[src.index("def send_order("):src.index("def m15_close_after(")]
+ok("if not live:" in _so and "return None" in _so
+   and _so.index("if not live:") < _so.index("res = try_send(req)"),
+   "inside send_order the dry-run branch returns BEFORE anything is sent")
+ok("if tk is None or info is None:" in _so,
+   "send_order refuses to open without a quote rather than crashing")
 
 # 2. the stop must be attached to the order itself, not managed in-process
 ok('"sl": round(sl_price, info.digits)' in src,
