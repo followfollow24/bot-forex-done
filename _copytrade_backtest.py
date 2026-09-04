@@ -37,6 +37,8 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+import numpy as np
+
 try:
     import MetaTrader5 as mt5
 except ImportError:
@@ -54,47 +56,55 @@ SEED = 12345
 
 
 def load(symbol, years):
-    """Fetch M5 bars, forcing MT5 to pull history it has not cached.
+    """Fetch M5 bars in CHUNKS, because MT5 rejects large requests outright.
 
-    copy_rates_from_pos only returns what the TERMINAL already holds. For
-    a symbol whose chart has never been opened -- XAUAUDm on a fresh
-    account -- that is often a few hundred bars, so the first attempt at
-    this returned "not enough M5 history". symbol_select() plus an
-    explicit copy_rates_range() makes the terminal go and get it.
-    Falls back to M15 rather than silently testing on a thin sample:
-    a wrong answer from 400 bars is worse than no answer.
+    [2026-09-04] The first version asked for 3 years in one call --
+    315,360 M5 bars -- and got back an empty result, which the code read
+    as "the terminal has no history" and reported as such. It was wrong,
+    and it sent the operator to open charts in MT5 several times for
+    nothing. Measured on the live terminal:
+
+        from_pos     100 ->     100  Success
+        from_pos  50,000 ->  50,000  Success
+        from_pos 100,000 ->       0  Terminal: Invalid params
+        from_pos 315,360 ->       0  Terminal: Invalid params
+        range     180d   ->  35,300  Success
+        range    1095d   ->       0  Terminal: Invalid params
+
+    So the cap is real and sits below 100,000 bars per call, and an
+    oversized request fails LOUDLY in last_error() while looking exactly
+    like "no data" if you ignore it. Request in 90-day slices and stitch,
+    and always print last_error() on an empty answer.
     """
-    import time
     mt5.symbol_select(symbol, True)
     now = datetime.now()
-    frm = now - timedelta(days=int(years * 365))
-    # MT5 caches history PER TIMEFRAME and downloads it asynchronously: the
-    # first request for a timeframe whose chart has never been opened returns
-    # empty AND kicks off the download in the background. Confirmed live --
-    # an H1 chart was open so H1 returned 562 bars immediately while M5/M15
-    # returned 0. So ask, wait, ask again rather than giving up on the first
-    # empty answer.
-    for tf, label, per_day in ((mt5.TIMEFRAME_M5, "M5", 288),
-                               (mt5.TIMEFRAME_M15, "M15", 96)):
-        best = None
-        for attempt in range(1, 7):
-            rates = mt5.copy_rates_range(symbol, tf, frm, now)
-            got = 0 if rates is None else len(rates)
+    for tf, label in ((mt5.TIMEFRAME_M5, "M5"), (mt5.TIMEFRAME_M15, "M15")):
+        chunks, cursor, empty_runs = [], now, 0
+        while cursor > now - timedelta(days=int(years * 365)):
+            frm = cursor - timedelta(days=90)
+            part = mt5.copy_rates_range(symbol, tf, frm, cursor)
+            got = 0 if part is None else len(part)
             if got:
-                best = rates
-            rates2 = mt5.copy_rates_from_pos(
-                symbol, tf, 0, min(int(years * 365 * per_day), 400_000))
-            got2 = 0 if rates2 is None else len(rates2)
-            if got2 > got:
-                got, best = got2, rates2
-            print(f"  [data] {label} attempt {attempt}: {got:,} bars"
-                  f"{'  (downloading...)' if got < 5000 else ''}")
-            if got >= 5000:
-                return best, label
-            time.sleep(4)
-        if best is not None and len(best) >= 1000:
-            print(f"  [data] {label}: settling for {len(best):,} bars")
-            return best, label
+                chunks.append(part)
+                empty_runs = 0
+            else:
+                empty_runs += 1
+                if empty_runs >= 2:      # two consecutive empty windows
+                    break                # = we have run past the history
+            cursor = frm
+        if chunks:
+            allr = np.concatenate(list(reversed(chunks)))
+            # slices overlap at the seams; de-duplicate on bar time
+            _, keep = np.unique(allr["time"], return_index=True)
+            allr = allr[np.sort(keep)]
+            print(f"  [data] {label}: {len(allr):,} bars "
+                  f"({datetime.fromtimestamp(allr[0]['time']):%Y-%m-%d} -> "
+                  f"{datetime.fromtimestamp(allr[-1]['time']):%Y-%m-%d})")
+            if len(allr) >= 5000:
+                return allr, label
+        else:
+            print(f"  [data] {label}: nothing returned  (last_error="
+                  f"{mt5.last_error()})")
     return None, None
 
 
