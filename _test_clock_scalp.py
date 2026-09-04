@@ -40,14 +40,14 @@ ok('def broker_offset_hours' in src,
 # 4. the operator's 2-5 second window is enforced
 ok('a.max_wait = max(a.decide_after + 1.0, a.max_wait)' in src,
    "max-wait is always later than the minimum wait")
-ok('elapsed >= a.decide_after and px != st["ref"]' in src
-   and 'st["moved"] >= st["gate"]' in src,
-   "decide-after is a MINIMUM wait: watching continues until the gate opens")
-ok('elif elapsed >= a.max_wait:' in src,
+ok('def entry_decision(' in src
+   and 'if elapsed >= min_wait and px != ref and abs(px - ref) >= gate:' in src,
+   "the entry rule is a pure function -- replayed in _test_entry_decision.py")
+ok('if elapsed >= max_wait:' in src and 'return None' in src,
    "the session is abandoned if the gate never opens")
 
 # 5. gate semantics
-ok('elif elapsed >= a.max_wait:' in src and 'st["done"] = (0, elapsed)' in src,
+ok('if d is None:' in src and 'st["done"] = (0, elapsed)' in src,
    "a day that never clears the gate yields no direction")
 
 # 6. safety rails
@@ -63,7 +63,8 @@ ok('a.max_risk_pct > 0 and pct > a.max_risk_pct' in src,
    "risk cap only refuses when it is switched on (0 = off, as instructed)")
 ok('pts_bust < pts_stop' in src,
    "warns when the broker's stop-out comes before the stop-loss")
-ok('"gate": float(gates[s])' in src and 'st["moved"] >= st["gate"]' in src,
+ok('"gate": float(gates[s])' in src
+   and 'entry_decision(elapsed, px, st["ref"], st["gate"],' in src,
    "the gate is set before the decision loop reads it, not after")
 ok('p.add_argument("--lot", default="0.05"' in src,
    "default lot is the 0.05 the operator asked for")

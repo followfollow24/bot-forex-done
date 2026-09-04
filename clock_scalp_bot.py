@@ -406,6 +406,20 @@ def close_position(sym: str, direction: int, live: bool, entry_px: float):
                  f"({'ok' if ok else 'FAILED'})")
 
 
+def entry_decision(elapsed, px, ref, gate, min_wait, max_wait):
+    """The rule itself, with no MT5 in it so it can be tested directly.
+
+    Watching starts the instant 19:30:00 arrives; min_wait is only the
+    earliest moment an entry is PERMITTED, not a period of not looking.
+    Returns +1/-1 to enter now, 0 to keep watching, None to give up.
+    """
+    if elapsed >= min_wait and px != ref and abs(px - ref) >= gate:
+        return 1 if px > ref else -1
+    if elapsed >= max_wait:
+        return None
+    return 0
+
+
 def decide_all(syms, gates, target, a):
     """Poll every symbol from 19:30:00 and read each one's direction at
     +decide_after. One loop, because they all fire on the same second.
@@ -440,16 +454,18 @@ def decide_all(syms, gates, target, a):
             st["last"] = px
             elapsed = (tms - t0_ms) / 1000.0
             st["moved"] = abs(px - st["ref"])
-            # decide-after is a MINIMUM wait, not a verdict -- keep
-            # watching until the move clears the gate. Reading the
-            # direction at a fixed +3s skipped 77-84% of the sessions
-            # that went on to run, because a move covering 11-25 points
-            # over a quarter hour rarely announces itself in 3 seconds.
-            if elapsed >= a.decide_after and px != st["ref"] \
-                    and st["moved"] >= st["gate"]:
-                st["done"] = (1 if px > st["ref"] else -1, elapsed)
-            elif elapsed >= a.max_wait:
+            # decide-after is a MINIMUM wait, not a verdict -- watching
+            # runs continuously from 19:30:00.000 and an entry may fire
+            # on ANY tick from that moment onward. Reading direction at a
+            # fixed +3s instead skipped 77-84% of the sessions that went
+            # on to run, because a move covering 11-25 points over a
+            # quarter hour rarely announces itself in three seconds.
+            d = entry_decision(elapsed, px, st["ref"], st["gate"],
+                               a.decide_after, a.max_wait)
+            if d is None:
                 st["done"] = (0, elapsed)
+            elif d:
+                st["done"] = (d, elapsed)
         if not pending:
             break
         time.sleep(POLL_SEC)
