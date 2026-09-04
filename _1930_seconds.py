@@ -52,7 +52,7 @@ import numpy as np
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 500
 THAI, TARGET = 7, (19, 30)
-SECONDS = [5, 10, 20, 30, 60]
+SECONDS = [1, 2, 3, 5, 10, 20, 30, 60]
 HOLDS = [15, 30, 60]          # minutes
 LOT = 0.05
 N_CTRL = 20
@@ -143,6 +143,32 @@ def main():
     print("=" * 94)
 
     half = len(days) // 2
+
+    print("\nIS THERE ANYTHING TO SEE IN THAT WINDOW?")
+    print("  If the price barely moves in the time you are watching, the")
+    print("  direction you read is quote flicker, not the market picking a")
+    print("  side -- and no exit rule can rescue a coin flip. The spread is")
+    print(f"  {spread:.2f}; a window whose move is under that is not a signal.\n")
+    print(f"  {'watch':>7}{'days':>7}{'ticks':>8}{'median move':>14}"
+          f"{'vs spread':>12}")
+    for sec in SECONDS:
+        mv, nt, ok = [], [], 0
+        for i, t0, tk in days:
+            tt = tk["time_msc"].astype(np.int64)
+            px = np.where(tk["bid"] > 0, tk["bid"], tk["last"]).astype(float)
+            m = tt <= (t0 + sec) * 1000
+            if m.sum() < 2:
+                continue
+            ok += 1
+            nt.append(int(m.sum()))
+            mv.append(abs(float(px[m][-1] - px[m][0])))
+        if not mv:
+            print(f"  {sec:>6}s{0:>7}   -- no ticks in this window --")
+            continue
+        med = float(np.median(mv))
+        print(f"  {sec:>6}s{ok:>7}{float(np.median(nt)):>8.0f}{med:>14.2f}"
+              f"{med/spread:>11.2f}x{'   <-- below the spread' if med < spread else ''}")
+
     print(f"\n{'watch':>7}{'exit':>10}{'half':>7}{'n':>5}{'hit':>7}{'avg pt':>9}"
           f"{'total$':>9}{'maxDD$':>9}{'ctl':>8}{'z':>7}")
     print("-" * 94)
@@ -152,9 +178,9 @@ def main():
                 res, ctl = [], [[] for _ in range(N_CTRL)]
                 rngs = [np.random.default_rng(s) for s in range(1, N_CTRL + 1)]
                 for i, t0, tk in sub:
-                    tt = tk["time"].astype(np.int64)
+                    tt = tk["time_msc"].astype(np.int64)
                     px = np.where(tk["bid"] > 0, tk["bid"], tk["last"]).astype(float)
-                    m = tt <= t0 + sec
+                    m = tt <= (t0 + sec) * 1000
                     if m.sum() < 2 or (~m).sum() < 1:
                         continue
                     d = px[m][-1] - px[m][0]
