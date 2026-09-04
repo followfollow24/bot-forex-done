@@ -64,24 +64,37 @@ def load(symbol, years):
     Falls back to M15 rather than silently testing on a thin sample:
     a wrong answer from 400 bars is worse than no answer.
     """
+    import time
     mt5.symbol_select(symbol, True)
     now = datetime.now()
     frm = now - timedelta(days=int(years * 365))
+    # MT5 caches history PER TIMEFRAME and downloads it asynchronously: the
+    # first request for a timeframe whose chart has never been opened returns
+    # empty AND kicks off the download in the background. Confirmed live --
+    # an H1 chart was open so H1 returned 562 bars immediately while M5/M15
+    # returned 0. So ask, wait, ask again rather than giving up on the first
+    # empty answer.
     for tf, label, per_day in ((mt5.TIMEFRAME_M5, "M5", 288),
                                (mt5.TIMEFRAME_M15, "M15", 96)):
-        rates = mt5.copy_rates_range(symbol, tf, frm, now)
-        got = 0 if rates is None else len(rates)
-        print(f"  [data] {label}: {got:,} bars"
-              f"{'' if got else '  (terminal has none cached)'}")
-        if got >= 5000:
-            return rates, label
-        # second chance: from_pos often works after range primed the cache
-        rates = mt5.copy_rates_from_pos(symbol, tf, 0,
-                                        min(int(years * 365 * per_day), 400_000))
-        got = 0 if rates is None else len(rates)
-        print(f"  [data] {label} retry: {got:,} bars")
-        if got >= 5000:
-            return rates, label
+        best = None
+        for attempt in range(1, 7):
+            rates = mt5.copy_rates_range(symbol, tf, frm, now)
+            got = 0 if rates is None else len(rates)
+            if got:
+                best = rates
+            rates2 = mt5.copy_rates_from_pos(
+                symbol, tf, 0, min(int(years * 365 * per_day), 400_000))
+            got2 = 0 if rates2 is None else len(rates2)
+            if got2 > got:
+                got, best = got2, rates2
+            print(f"  [data] {label} attempt {attempt}: {got:,} bars"
+                  f"{'  (downloading...)' if got < 5000 else ''}")
+            if got >= 5000:
+                return best, label
+            time.sleep(4)
+        if best is not None and len(best) >= 1000:
+            print(f"  [data] {label}: settling for {len(best):,} bars")
+            return best, label
     return None, None
 
 
