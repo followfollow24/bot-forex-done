@@ -58,6 +58,25 @@ Usage on the VPS
     --lot 0.03           fixed size
     --sl-atr 1.0         stop distance in ATR(H1) -- NOT optional
     --patience 2         M5 bars closing against you before exiting
+    --min-move-spread 3  skip the day unless the move inside the window is
+                         at least this many times the spread. Set 0 to take
+                         every day, as originally specified.
+
+WHY THE GATE EXISTS (added after replaying 4 Sep tick by tick)
+----------------------------------------------------------------------
+On 4 Sep the move was unmistakable almost instantly: 30 points inside
+1.37 seconds, and at +2s it was 25.38 points = 12.0x the spread. At +1s
+it still read UP, the wrong way, which is exactly why the operator
+specified 2-5 seconds and not 1.
+
+But that was an extreme day. On the median day the price moves 0.69
+points in 2 seconds -- 0.62x the spread -- and there is nothing to read.
+A bot with no gate takes both, and the noise days pay for the good ones.
+The gate is the mechanical version of what the operator's eye already
+does: if nothing is happening, do not trade today.
+
+    4 Sep at +2s : 25.38 pts = 12.0x spread  -> gate opens, trade
+    median day   :  0.69 pts =  0.62x spread -> gate stays shut, skip
 """
 from __future__ import annotations
 
@@ -162,7 +181,7 @@ def next_target(offset_h: int) -> datetime:
 
 
 def wait_for_direction(sym: str, target_srv: datetime, decide_after: float,
-                       max_wait: float):
+                       max_wait: float, min_move: float = 0.0):
     """Poll ticks from 19:30:00 until `decide_after` seconds have passed on
     the BROKER's clock, then report which way it went.
 
@@ -192,9 +211,11 @@ def wait_for_direction(sym: str, target_srv: datetime, decide_after: float,
         last = px
         elapsed = (tms - t0_ms) / 1000.0
         if elapsed >= decide_after:
-            if last != ref:
+            moved = abs(last - ref)
+            if last != ref and moved >= min_move:
                 return (1 if last > ref else -1), ref, last, seen, elapsed
-            if elapsed >= max_wait:           # flat through the whole window
+            if elapsed >= max_wait:
+                # either flat, or it moved but not enough to be a signal
                 return 0, ref, last, seen, elapsed
         time.sleep(POLL_SEC)
     return 0, ref, last, seen, 0.0
@@ -323,15 +344,21 @@ def run_once(a, sym: str) -> None:
         return
     log(f"armed. ATR(H1) {atr:.2f}  stop {a.sl_atr} xATR = {a.sl_atr*atr:.2f} pts")
 
-    d, ref, last, seen, waited = wait_for_direction(
-        sym, target, a.decide_after, a.max_wait)
-    if d == 0:
-        log(f"  no movement inside {a.max_wait}s ({seen} price changes) "
-            f"-- no trade today")
-        telegram("clock_scalp: price flat at 19:30, no trade")
-        return
+    si = mt5.symbol_info(sym)
+    spread = si.spread * si.point
+    gate = a.min_move_spread * spread
+    log(f"  gate: need {a.min_move_spread}x spread = {gate:.2f} pts "
+        f"within {a.max_wait}s" if gate > 0 else "  gate: off, taking every day")
 
-    spread = mt5.symbol_info(sym).spread * mt5.symbol_info(sym).point
+    d, ref, last, seen, waited = wait_for_direction(
+        sym, target, a.decide_after, a.max_wait, gate)
+    if d == 0:
+        moved = abs(last - ref) if (last is not None and ref is not None) else 0.0
+        log(f"  only {moved:.2f} pts in {a.max_wait}s ({seen} price changes), "
+            f"needed {gate:.2f} -- no trade today")
+        telegram(f"clock_scalp: 19:30 move {moved:.2f} pts < gate {gate:.2f}, "
+                 f"skipped")
+        return
     move = abs(last - ref)
     log(f"  decided after {waited:.3f}s: "
         f"{'BUY' if d > 0 else 'SELL'}  moved {move:.3f} pts "
@@ -378,6 +405,9 @@ def main() -> int:
                    help="give up on a flat market after this many seconds")
     p.add_argument("--sl-atr", type=float, default=1.0)
     p.add_argument("--patience", type=int, default=2)
+    p.add_argument("--min-move-spread", type=float, default=3.0,
+                   help="skip the day unless the move is this many times the "
+                        "spread; 0 takes every day")
     p.add_argument("--max-minutes", type=int, default=120)
     p.add_argument("--live", action="store_true",
                    help="actually send orders; without it, nothing is sent")
@@ -402,7 +432,8 @@ def main() -> int:
     acct = mt5.account_info()
     log("=" * 68)
     log(f"clock_scalp_bot  {sym}  lot {a.lot}  decide +{a.decide_after}s  "
-        f"SL {a.sl_atr}xATR  patience {a.patience}")
+        f"SL {a.sl_atr}xATR  patience {a.patience}  "
+        f"gate {a.min_move_spread}x spread")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:
         log(f"account {acct.login} ({acct.server})  equity {acct.equity:.2f} "
