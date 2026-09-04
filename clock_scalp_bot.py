@@ -429,7 +429,8 @@ def decide_all(syms, gates, target, a):
     below always saw its 0.0 default and the gate filtered nothing."""
     t0_ms = int(target.timestamp() * 1000)
     state = {s: {"ref": None, "last": None, "seen": 0, "done": None,
-                 "moved": 0.0, "gate": float(gates[s])} for s in syms}
+                 "moved": 0.0, "peak": 0.0, "next_log": 0.0,
+                 "gate": float(gates[s])} for s in syms}
     deadline = time.time() + a.max_wait + 30
     while time.time() < deadline:
         pending = False
@@ -447,13 +448,25 @@ def decide_all(syms, gates, target, a):
             px = (tk.bid + tk.ask) / 2.0 if tk.ask else tk.bid
             if st["ref"] is None:
                 st["ref"] = px
-                log(f"  [{sym}] reference {px:.3f} at "
-                    f"+{(tms - t0_ms)/1000.0:.3f}s")
+                log(f"  [{sym}] 19:30:00 reference {px:.3f} "
+                    f"(first tick +{(tms - t0_ms)/1000.0:.3f}s); "
+                    f"needs {st['gate']:.3f} to fire")
             if px != st["last"]:
                 st["seen"] += 1
             st["last"] = px
             elapsed = (tms - t0_ms) / 1000.0
             st["moved"] = abs(px - st["ref"])
+            # Show the journey, not just the verdict: without this the log
+            # says "entered" or "skipped" and there is no way to see how
+            # close a skipped session came, or watch a live one build.
+            if st["moved"] > st["peak"]:
+                st["peak"] = st["moved"]
+            if elapsed >= st["next_log"]:
+                st["next_log"] = elapsed + (5.0 if elapsed < 60 else 30.0)
+                pct = 100.0 * st["moved"] / st["gate"] if st["gate"] else 0.0
+                log(f"  [{sym}] +{elapsed:6.1f}s  {px:.3f}  "
+                    f"{px - st['ref']:+.3f}  {pct:3.0f}% of gate  "
+                    f"(peak {st['peak']:.3f})")
             # decide-after is a MINIMUM wait, not a verdict -- watching
             # runs continuously from 19:30:00.000 and an entry may fire
             # on ANY tick from that moment onward. Reading direction at a
@@ -611,11 +624,14 @@ def run_once(a, syms: list) -> None:
     for sym, c in ctx.items():
         st = state[sym]
         d, waited = st["done"]
-        moved = float(st.get("moved") or 0.0)
+        moved = float(st.get("peak") or 0.0) if state[sym]["done"][0] == 0 \
+            else float(st.get("moved") or 0.0)
         if d == 0:
             log(f"  [{sym}] never cleared {c['gate']:.3f} within "
-                f"{a.max_wait:.0f}s (best {moved:.3f}, {st['seen']} "
-                f"price changes) -- skipped")
+                f"{a.max_wait:.0f}s -- closest it came was "
+                f"{st.get('peak', 0.0):.3f} "
+                f"({100.0*st.get('peak', 0.0)/c['gate']:.0f}% of the gate, "
+                f"{st['seen']} price changes) -- skipped")
             telegram(f"clock_scalp [{sym}]: move {moved:.3f} < gate "
                      f"{c['gate']:.3f}, skipped")
             continue
@@ -626,9 +642,10 @@ def run_once(a, syms: list) -> None:
         tk = mt5.symbol_info_tick(sym)
         entry_px = tk.ask if d > 0 else tk.bid
         sl_px = entry_px - d * a.sl_atr * c["atr"]
-        log(f"  [{sym}] decided after {waited:.3f}s: "
-            f"{'BUY' if d > 0 else 'SELL'}  moved {moved:.3f} "
-            f"({moved/c['spread']:.1f}x spread)")
+        log(f"  [{sym}] GATE CLEARED at +{waited:.3f}s: "
+            f"{'BUY' if d > 0 else 'SELL'}  moved {moved:.3f} from the "
+            f"reference = {moved/c['spread']:.1f}x spread "
+            f"(needed {c['gate']:.3f})")
 
         otype = mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL
         acct = mt5.account_info()
