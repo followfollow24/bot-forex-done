@@ -28,7 +28,12 @@ worth anything, it shows as a stall beating the best fixed time.
 Entry is the live bot's: reference tick at 19:30:00, direction at +3s.
 Only the exit varies.
 
-Usage:  python _exit_curve.py [symbol] [days]
+Usage:  python _exit_curve.py [symbol] [days] [weekends:0|1]
+
+Set weekends=1 for BTC, which trades every day. Leaving it at 0
+for a 24/7 symbol silently throws away two sevenths of the
+sample and, worse, exactly the quiet sessions that would tell
+you whether the entry gate ever opens outside the week.
 """
 import sys
 from datetime import datetime, timedelta, timezone
@@ -42,6 +47,7 @@ import numpy as np
 
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 400
+WEEKENDS = bool(int(sys.argv[3])) if len(sys.argv) > 3 else False
 DECIDE, SL_ATR, LOT, THAI, TARGET = 3.0, 3.0, 0.05, 7, (19, 30)
 WINDOW_MIN = 125
 MINUTES = list(range(1, 31)) + [35, 40, 45, 50, 60, 75, 90, 105, 120]
@@ -73,11 +79,11 @@ def main():
     per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, SYMBOL, LOT,
                                    tkn.ask, tkn.ask + 1.0) or 0.0
 
-    curve, stallres = [], []
+    curve, stallres, moves = [], [], []
     today = (datetime.now(timezone.utc) + timedelta(hours=THAI)).date()
     for back in range(DAYS, 0, -1):
         d = today - timedelta(days=back)
-        if d.weekday() >= 5:
+        if d.weekday() >= 5 and not WEEKENDS:
             continue
         s_utc = datetime(d.year, d.month, d.day, TARGET[0] - THAI, TARGET[1],
                          tzinfo=timezone.utc)
@@ -95,6 +101,7 @@ def main():
         if m.sum() < 2:
             continue
         moved = float(mid[m][-1] - mid[0])
+        moves.append((abs(moved), int(m.sum())))
         if moved == 0:
             continue
         atr = h1_atr_at(SYMBOL, s_srv)
@@ -148,6 +155,21 @@ def main():
     print("=" * 88)
     if n < 30:
         print(" not enough days"); mt5.shutdown(); return 0
+
+    if moves:
+        mv = np.array([x[0] for x in moves], dtype=float)
+        nt = np.array([x[1] for x in moves], dtype=float)
+        print(f"\nCAN THE ENTRY GATE EVER OPEN ON THIS INSTRUMENT?")
+        print(f"  spread {spread:.3f};  move in the first {DECIDE:.0f}s: "
+              f"median {np.median(mv):.3f} ({np.median(mv)/spread:.2f}x spread), "
+              f"mean {mv.mean():.3f}")
+        print(f"  ticks in that window: median {np.median(nt):.0f}")
+        for g in (1.0, 2.0, 3.0, 5.0):
+            print(f"    gate {g:.0f}x spread ({g*spread:.3f}) opens on "
+                  f"{100.0*np.mean(mv >= g*spread):.0f}% of days")
+        if np.median(mv) < spread:
+            print("  the median move is SMALLER than the spread -- at this")
+            print("  timescale the direction read is mostly quote flicker")
 
     A = np.array(curve, dtype=float)
     S = np.array(stallres, dtype=float)
