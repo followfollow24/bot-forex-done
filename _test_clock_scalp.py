@@ -42,10 +42,8 @@ ok('min(5.0, max(2.0, a.decide_after))' in src,
    "decide-after is clamped into the 2-5s the operator specified")
 
 # 5. gate semantics
-ok('moved >= min_move' in src,
-   "direction is only returned once the move clears the gate")
-ok('return 0, ref, last, seen, elapsed' in src,
-   "a day that never clears the gate returns no direction")
+ok('elif elapsed >= a.max_wait:' in src and 'st["done"] = (0, elapsed)' in src,
+   "a day that never clears the gate yields no direction")
 
 # 6. safety rails
 ok('KILL_FILE' in src and 'os.path.exists(KILL_FILE)' in src,
@@ -54,24 +52,32 @@ ok('need > acct.margin_free * (a.max_margin_pct / 100.0)' in src,
    "margin is checked against free margin before sending (default 95%: only "
    "blocks orders the broker would reject anyway)")
 ok('10027' in src, "AutoTrading-disabled retcode is explained, not swallowed")
-ok('mt5.order_calc_profit(otype, sym, a.lot, entry_px, sl_px)' in src,
+ok('mt5.order_calc_profit(otype, sym, lot, entry_px, sl_px)' in src,
    "stop cost comes from the broker's calculator, not hand-rolled pip maths")
 ok('a.max_risk_pct > 0 and pct > a.max_risk_pct' in src,
    "risk cap only refuses when it is switched on (0 = off, as instructed)")
-ok('pts_to_bust < pts_to_stop' in src,
+ok('pts_bust < pts_stop' in src,
    "warns when the broker's stop-out comes before the stop-loss")
-ok('p.add_argument("--lot", type=float, default=0.05)' in src,
+ok('"gate": float(gates[s])' in src and 'moved >= st["gate"]' in src,
+   "the gate is set before the decision loop reads it, not after")
+ok('p.add_argument("--lot", default="0.05"' in src,
    "default lot is the 0.05 the operator asked for")
+ok('def parse_lots' in src and 'if "=" not in spec' in src,
+   "lot can be set per symbol -- 0.05 of gold and of BTC are not the same size")
+ok('p.add_argument("--symbols", default="XAUAUDm,BTCUSDm"' in src,
+   "gold and BTC are both traded by default")
+ok(src.index('def decide_all') < src.index('def run_once'),
+   "one polling loop reads every symbol -- they fire on the same second")
 ok('p.add_argument("--exit-mode", default="m15close"' in src,
    "default exit is the M15 candle close the operator chose")
 ok('return (int(ts_srv) // 900 + 1) * 900' in src,
    "M15 close is the next 900-second boundary, computed from server time")
 ok(src.index('loss = mt5.order_calc_profit') < src.index('res = send_order('),
    "risk is priced and logged BEFORE the order is sent")
+ok(src.count('log(f"  [{sym}] stop {a.sl_atr}xATR') == 1,
+   "the money cost is logged per symbol on every trade")
 ok('p.add_argument("--sl-atr", type=float, default=3.0)' in src,
    "default stop is the 3xATR the operator asked for")
-ok(src.count("log(f\"  stop {a.sl_atr}xATR") == 1,
-   "the money cost is logged on every trade even with the cap off")
 
 # 7. notification failures must never break trade management
 tg = next(n for n in tree.body
@@ -81,8 +87,8 @@ ok(any(isinstance(h, ast.ExceptHandler) for n in ast.walk(tg)
    "telegram() swallows its own exceptions")
 
 # 8. one trade per day maximum
-ok(src.count("send_order(sym, d, a.lot, sl_px, a.live)") == 1,
-   "exactly one entry per session -- it cannot spiral")
+ok(src.count("res = send_order(sym, d, lot, sl_px, a.live)") == 1,
+   "exactly one entry per symbol per session -- it cannot spiral")
 
 print()
 if fails:

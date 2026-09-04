@@ -48,10 +48,30 @@ SAFETY, BY CONSTRUCTION
     partially filled into a margin call.
   - one trade per day, maximum. It cannot spiral.
 
+GOLD AND BTC IN ONE PROCESS -- AND WHAT IS NOT KNOWN ABOUT BTC
+----------------------------------------------------------------------
+Both symbols fire at the same instant, so they share one loop rather
+than running as two processes racing the same second. Each keeps its own
+spread, ATR, gate and lot; nothing is shared but the clock.
+
+EVERY NUMBER QUOTED ABOVE IS XAUAUDm. This rule has never been measured
+on BTC -- not the gate, not the exit, not the direction read. BTC's
+spread, hourly ATR and 19:30 behaviour are a different regime, and it
+trades weekends when gold does not. Run it dry until it has its own
+history, or run _exit_curve.py against BTCUSDm first.
+
+Lot is per symbol because the contracts are not comparable: 0.05 lot of
+XAUAUDm and 0.05 lot of BTCUSDm are wildly different exposures. The stop
+is priced in account currency through the broker's own calculator before
+every send, per symbol, so neither can surprise you.
+
 Usage on the VPS
 ----------------------------------------------------------------------
-    python clock_scalp_bot.py                     # dry run, logs only
-    python clock_scalp_bot.py --live              # sends real orders
+    python clock_scalp_bot.py                            # dry run
+    python clock_scalp_bot.py --live                     # real orders
+    --symbols XAUAUDm,BTCUSDm
+    --lot 0.05                       same size for both
+    --lot XAUAUDm=0.05,BTCUSDm=0.01  per symbol
 
     --decide-after 3.0   seconds after 19:30:00 to read the direction
                          (operator asked for 2-5; clamped to that range)
@@ -172,6 +192,19 @@ def telegram(msg: str) -> None:
         pass
 
 
+def parse_lots(spec: str, symbols: list[str]) -> dict:
+    """'0.05' -> same for all; 'XAUAUDm=0.05,BTCUSDm=0.01' -> per symbol.
+    Sizes are not transferable between contracts, so a per-symbol form has
+    to exist or one of them is silently wrong."""
+    if "=" not in spec:
+        return {s: float(spec) for s in symbols}
+    out = {}
+    for part in spec.split(","):
+        k, _, v = part.partition("=")
+        out[k.strip()] = float(v)
+    return out
+
+
 def resolve_symbol(want: str) -> str | None:
     if mt5.symbol_info(want) is not None:
         return want
@@ -210,47 +243,6 @@ def next_target(offset_h: int) -> datetime:
     if t <= now_utc:
         t += timedelta(days=1)
     return t + timedelta(hours=offset_h)
-
-
-def wait_for_direction(sym: str, target_srv: datetime, decide_after: float,
-                       max_wait: float, min_move: float = 0.0):
-    """Poll ticks from 19:30:00 until `decide_after` seconds have passed on
-    the BROKER's clock, then report which way it went.
-
-    Returns (direction, ref_price, last_price, ticks_seen, waited_s) or
-    (0, ...) when the price never moved inside the window."""
-    t0_ms = int(target_srv.timestamp() * 1000)
-    ref = None
-    last = None
-    seen = 0
-    deadline = time.time() + max_wait + 15
-    while time.time() < deadline:
-        tk = mt5.symbol_info_tick(sym)
-        if tk is None:
-            time.sleep(POLL_SEC)
-            continue
-        tms = int(tk.time_msc)
-        if tms < t0_ms:                       # still before the boundary
-            time.sleep(POLL_SEC)
-            continue
-        px = (tk.bid + tk.ask) / 2.0 if tk.ask else tk.bid
-        if ref is None:
-            ref = px
-            log(f"  19:30:00.000 reference {ref:.3f} "
-                f"(first tick at +{(tms - t0_ms)/1000.0:.3f}s)")
-        if px != last:
-            seen += 1
-        last = px
-        elapsed = (tms - t0_ms) / 1000.0
-        if elapsed >= decide_after:
-            moved = abs(last - ref)
-            if last != ref and moved >= min_move:
-                return (1 if last > ref else -1), ref, last, seen, elapsed
-            if elapsed >= max_wait:
-                # either flat, or it moved but not enough to be a signal
-                return 0, ref, last, seen, elapsed
-        time.sleep(POLL_SEC)
-    return 0, ref, last, seen, 0.0
 
 
 def send_order(sym: str, direction: int, lot: float, sl_price: float,
@@ -402,117 +394,164 @@ def close_position(sym: str, direction: int, live: bool, entry_px: float):
                  f"({'ok' if ok else 'FAILED'})")
 
 
-def run_once(a, sym: str) -> None:
+def decide_all(syms, gates, target, a):
+    """Poll every symbol from 19:30:00 and read each one's direction at
+    +decide_after. One loop, because they all fire on the same second.
+
+    `gates` must arrive here, not be attached afterwards -- an earlier
+    version set them on the state dict after this returned, so the lookup
+    below always saw its 0.0 default and the gate filtered nothing."""
+    t0_ms = int(target.timestamp() * 1000)
+    state = {s: {"ref": None, "last": None, "seen": 0, "done": None,
+                 "gate": float(gates[s])} for s in syms}
+    deadline = time.time() + a.max_wait + 20
+    while time.time() < deadline:
+        pending = False
+        for sym in syms:
+            st = state[sym]
+            if st["done"] is not None:
+                continue
+            pending = True
+            tk = mt5.symbol_info_tick(sym)
+            if tk is None:
+                continue
+            tms = int(tk.time_msc)
+            if tms < t0_ms:
+                continue
+            px = (tk.bid + tk.ask) / 2.0 if tk.ask else tk.bid
+            if st["ref"] is None:
+                st["ref"] = px
+                log(f"  [{sym}] reference {px:.3f} at "
+                    f"+{(tms - t0_ms)/1000.0:.3f}s")
+            if px != st["last"]:
+                st["seen"] += 1
+            st["last"] = px
+            elapsed = (tms - t0_ms) / 1000.0
+            if elapsed >= a.decide_after:
+                moved = abs(px - st["ref"])
+                if px != st["ref"] and moved >= st["gate"]:
+                    st["done"] = (1 if px > st["ref"] else -1, elapsed)
+                elif elapsed >= a.max_wait:
+                    st["done"] = (0, elapsed)
+        if not pending:
+            break
+        time.sleep(POLL_SEC)
+    for sym in syms:
+        if state[sym]["done"] is None:
+            state[sym]["done"] = (0, 0.0)
+    return state
+
+
+def run_once(a, syms: list) -> None:
     if os.path.exists(KILL_FILE):
         log(f"kill switch {KILL_FILE} present -- skipping today")
         return
 
-    off = broker_offset_hours(sym)
+    off = broker_offset_hours(syms[0])
     target = next_target(off)
     log(f"broker clock = UTC{off:+d}; next 19:30:00 Thai is "
         f"{target:%Y-%m-%d %H:%M:%S} server time")
-
-    # server "now" is UTC plus the broker's own offset; compare like with like
     now_srv = datetime.now(timezone.utc) + timedelta(hours=off)
     sleep_for = (target - now_srv).total_seconds() - ARM_LEAD
     if sleep_for > 0:
         log(f"sleeping {sleep_for/3600.0:.2f}h until {ARM_LEAD}s before the bell")
         time.sleep(sleep_for)
 
-    atr = atr_h1(sym)
-    if not atr:
-        log("no ATR available -- skipping today")
+    # per-symbol context: each has its own ATR, spread and gate
+    ctx = {}
+    for sym in syms:
+        atr = atr_h1(sym)
+        si = mt5.symbol_info(sym)
+        if not atr or si is None:
+            log(f"  [{sym}] no ATR/info -- sitting this one out")
+            continue
+        spread = si.spread * si.point
+        ctx[sym] = {"atr": atr, "spread": spread,
+                    "gate": a.min_move_spread * spread}
+        log(f"armed [{sym}] ATR(H1) {atr:.3f}  spread {spread:.3f}  "
+            f"gate {ctx[sym]['gate']:.3f}  stop {a.sl_atr}xATR = "
+            f"{a.sl_atr*atr:.3f}")
+    if not ctx:
         return
-    log(f"armed. ATR(H1) {atr:.2f}  stop {a.sl_atr} xATR = "
-        f"{a.sl_atr*atr:.2f} pts")
 
-    si = mt5.symbol_info(sym)
-    spread = si.spread * si.point
-    gate = a.min_move_spread * spread
-    log(f"  gate: need {a.min_move_spread}x spread = {gate:.2f} pts "
-        f"within {a.max_wait}s" if gate > 0 else "  gate: off, taking every day")
+    state = decide_all(list(ctx), {k: v["gate"] for k, v in ctx.items()},
+                       target, a)
 
-    d, ref, last, seen, waited = wait_for_direction(
-        sym, target, a.decide_after, a.max_wait, gate)
-    if d == 0:
-        moved = abs(last - ref) if (last is not None and ref is not None) else 0.0
-        log(f"  only {moved:.2f} pts in {a.max_wait}s ({seen} price changes), "
-            f"needed {gate:.2f} -- no trade today")
-        telegram(f"clock_scalp: 19:30 move {moved:.2f} pts < gate {gate:.2f}, "
-                 f"skipped")
-        return
-    move = abs(last - ref)
-    log(f"  decided after {waited:.3f}s: "
-        f"{'BUY' if d > 0 else 'SELL'}  moved {move:.3f} pts "
-        f"on {seen} price changes  (spread {spread:.2f} = "
-        f"{spread/move if move else float('inf'):.1f}x the move)")
+    open_trades = []
+    for sym, c in ctx.items():
+        st = state[sym]
+        d, waited = st["done"]
+        moved = abs((st["last"] or 0) - (st["ref"] or 0))
+        if d == 0:
+            log(f"  [{sym}] moved {moved:.3f} in {a.max_wait}s "
+                f"({st['seen']} changes), needed {c['gate']:.3f} -- skipped")
+            telegram(f"clock_scalp [{sym}]: move {moved:.3f} < gate "
+                     f"{c['gate']:.3f}, skipped")
+            continue
+        lot = a.lots.get(sym)
+        if not lot:
+            log(f"  [{sym}] no lot configured -- skipped")
+            continue
+        tk = mt5.symbol_info_tick(sym)
+        entry_px = tk.ask if d > 0 else tk.bid
+        sl_px = entry_px - d * a.sl_atr * c["atr"]
+        log(f"  [{sym}] decided after {waited:.3f}s: "
+            f"{'BUY' if d > 0 else 'SELL'}  moved {moved:.3f} "
+            f"({moved/c['spread']:.1f}x spread)")
 
-    tk = mt5.symbol_info_tick(sym)
-    entry_px = tk.ask if d > 0 else tk.bid
-    sl_px = entry_px - d * a.sl_atr * atr
+        otype = mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL
+        acct = mt5.account_info()
+        loss = mt5.order_calc_profit(otype, sym, lot, entry_px, sl_px)
+        if loss is not None and acct is not None:
+            risk = abs(float(loss)); eq = float(acct.equity)
+            pct = (risk / eq * 100.0) if eq > 0 else float("inf")
+            log(f"  [{sym}] stop {a.sl_atr}xATR = "
+                f"{abs(entry_px-sl_px):.3f} = {risk:.2f} {acct.currency} "
+                f"at {lot} lot"
+                + (f"  ({pct:.1f}% of equity {eq:.2f})" if eq > 0
+                   else "  (equity 0.00)"))
+            if eq > 0 and risk > 0:
+                pts_stop = abs(entry_px - sl_px)
+                pts_bust = pts_stop * (eq / risk)
+                if pts_bust < pts_stop:
+                    log(f"  [{sym}] NOTE: equity runs out after "
+                        f"~{pts_bust:.2f} but the stop is {pts_stop:.2f} "
+                        f"-- the broker closes this before the stop")
+            if a.live and eq > 0 and a.max_risk_pct > 0 and pct > a.max_risk_pct:
+                log(f"  [{sym}] REFUSED: {pct:.1f}% over the "
+                    f"{a.max_risk_pct}% limit")
+                telegram(f"clock_scalp [{sym}]: refused, risk {pct:.1f}%")
+                continue
+        if a.live:
+            need = mt5.order_calc_margin(otype, sym, lot, entry_px)
+            if acct is None or need is None:
+                log(f"  [{sym}] cannot price margin -- refusing"); continue
+            if acct.margin_free <= 0 or need > acct.margin_free * (a.max_margin_pct / 100.0):
+                log(f"  [{sym}] REFUSED: margin {need:.2f} exceeds "
+                    f"{a.max_margin_pct:.0f}% of free {acct.margin_free:.2f}")
+                continue
 
-    # What this stop actually costs, from the broker's own calculator rather
-    # than hand-rolled pip maths -- the 2026-08-10 sizing incident came from
-    # exactly that shortcut, and cost real money.
-    otype = mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL
-    acct = mt5.account_info()
-    loss = mt5.order_calc_profit(otype, sym, a.lot, entry_px, sl_px)
-    if loss is not None:
-        risk = abs(float(loss))
-        eq = float(acct.equity) if acct else 0.0
-        pct = (risk / eq * 100.0) if eq > 0 else float("inf")
-        log(f"  stop {a.sl_atr}xATR = {abs(entry_px-sl_px):.2f} pts "
-            f"= {risk:.2f} {acct.currency if acct else ''} at {a.lot} lot"
-            + (f"  ({pct:.1f}% of equity {eq:.2f})" if eq > 0 else
-               "  (equity is 0.00)"))
-        # Where the broker's stop-out sits relative to the stop we asked for.
-        # If the account is smaller than the stop, liquidation happens FIRST
-        # and the 3xATR stop never fires -- which changes what is actually
-        # being traded, so it is stated rather than discovered.
-        if eq > 0 and risk > 0:
-            pts_to_stop = abs(entry_px - sl_px)
-            pts_to_bust = pts_to_stop * (eq / risk)
-            if pts_to_bust < pts_to_stop:
-                log(f"  NOTE: equity runs out after ~{pts_to_bust:.1f} pts "
-                    f"but the stop is at {pts_to_stop:.1f} pts -- the broker "
-                    f"will close this position before the stop is reached.")
-        if a.live and eq > 0 and a.max_risk_pct > 0 and pct > a.max_risk_pct:
-            log(f"  REFUSED: {pct:.1f}% of equity is over the "
-                f"{a.max_risk_pct}% limit. Lower --lot or --sl-atr, or raise "
-                f"--max-risk-pct if that is really the intent.")
-            telegram(f"clock_scalp: refused, stop risks {risk:.2f} "
-                     f"= {pct:.1f}% of equity")
-            return
+        res = send_order(sym, d, lot, sl_px, a.live)
+        if a.live and res is None:
+            continue
+        if res is not None:
+            entry_px = res.price
+        telegram(f"clock_scalp {'LIVE' if a.live else 'DRY'} [{sym}]: "
+                 f"{'BUY' if d > 0 else 'SELL'} {lot} @ {entry_px:.3f} "
+                 f"SL {sl_px:.3f} (+{waited:.2f}s, moved {moved:.3f})")
+        open_trades.append((sym, d, entry_px))
 
-    if a.live:
-        need = mt5.order_calc_margin(otype, sym, a.lot, entry_px)
-        if acct is None or need is None:
-            log("  cannot price margin -- refusing to send")
-            return
-        if acct.margin_free <= 0 or need > acct.margin_free * (a.max_margin_pct / 100.0):
-            log(f"  REFUSED: margin {need:.2f} exceeds {a.max_margin_pct:.0f}% "
-                f"of free margin {acct.margin_free:.2f} -- the broker would "
-                f"reject this order")
-            telegram(f"clock_scalp: refused, margin {need:.2f} vs free "
-                     f"{acct.margin_free:.2f}")
-            return
-
-    res = send_order(sym, d, a.lot, sl_px, a.live)
-    if a.live and res is None:
-        return
-    if res is not None:
-        entry_px = res.price
-    telegram(f"clock_scalp {'LIVE' if a.live else 'DRY'}: "
-             f"{'BUY' if d > 0 else 'SELL'} {a.lot} {sym} @ {entry_px:.3f} "
-             f"SL {sl_px:.3f} (decided +{waited:.2f}s, moved {move:.3f})")
-    manage_exit(sym, d, a.patience, a.max_minutes, a.live, entry_px,
-                a.exit_mode)
+    for sym, d, entry_px in open_trades:
+        manage_exit(sym, d, a.patience, a.max_minutes, a.live, entry_px,
+                    a.exit_mode)
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--symbol", default="XAUAUDm")
-    p.add_argument("--lot", type=float, default=0.05)
+    p.add_argument("--symbols", default="XAUAUDm,BTCUSDm",
+                   help="comma separated, e.g. XAUAUDm,BTCUSDm")
+    p.add_argument("--lot", default="0.05",
+                   help="0.05 for all, or XAUAUDm=0.05,BTCUSDm=0.01")
     p.add_argument("--decide-after", type=float, default=3.0,
                    help="seconds after 19:30:00 to read the direction (2-5)")
     p.add_argument("--max-wait", type=float, default=5.0,
@@ -545,15 +584,30 @@ def main() -> int:
     if not mt5.initialize():
         log(f"MT5 init failed: {mt5.last_error()}")
         return 2
-    sym = resolve_symbol(a.symbol)
-    if sym is None:
-        log(f"symbol {a.symbol} not found on this broker")
-        return 2
-    mt5.symbol_select(sym, True)
+    syms = []
+    for want in [x.strip() for x in a.symbols.split(",") if x.strip()]:
+        got = resolve_symbol(want)
+        if got is None:
+            log(f"symbol {want} not found on this broker -- skipped")
+            continue
+        mt5.symbol_select(got, True)
+        if got != want:
+            log(f"{want} -> {got}")
+        syms.append(got)
+    if not syms:
+        log("no tradeable symbols"); return 2
+    try:
+        a.lots = parse_lots(a.lot, syms)
+    except ValueError:
+        log(f"cannot parse --lot {a.lot!r}"); return 2
+    missing = [s for s in syms if s not in a.lots]
+    if missing:
+        log(f"no lot given for {missing} -- add it to --lot"); return 2
 
     acct = mt5.account_info()
     log("=" * 68)
-    log(f"clock_scalp_bot  {sym}  lot {a.lot}  decide +{a.decide_after}s  "
+    log(f"clock_scalp_bot  {', '.join(f'{k} {v}' for k, v in a.lots.items())}"
+        f"  decide +{a.decide_after}s  "
         f"SL {a.sl_atr}xATR  patience {a.patience}  "
         f"gate {a.min_move_spread}x spread  exit {a.exit_mode}  "
         f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
@@ -568,7 +622,7 @@ def main() -> int:
 
     try:
         while True:
-            run_once(a, sym)
+            run_once(a, syms)
             if a.once:
                 break
             time.sleep(60)
