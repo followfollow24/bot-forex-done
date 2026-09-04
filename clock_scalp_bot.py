@@ -169,6 +169,7 @@ POLL_SEC = 0.05                 # tick polling interval in the hot window
 ARM_LEAD = 90                   # start paying attention this early
 MAGIC = 668003
 KILL_FILE = "STOP_CLOCK_SCALP"
+STALE_QUOTE_SEC = 300     # older than this at the bell = market shut
 
 
 def log(msg: str) -> None:
@@ -625,6 +626,21 @@ def run_once(a, syms: list) -> None:
         si = mt5.symbol_info(sym)
         if not atr or si is None:
             log(f"  [{sym}] no ATR/info -- sitting this one out")
+            continue
+        # Gold is shut from Friday evening to Monday morning. Without this
+        # the bot would poll a dead market for the full max-wait and then
+        # log "never cleared the gate", which is true but names the wrong
+        # reason -- a log that misreports WHY is worse than a quiet one.
+        tk0 = mt5.symbol_info_tick(sym)
+        age = (target.timestamp() - float(tk0.time)) if tk0 else 1e9
+        if age > STALE_QUOTE_SEC:
+            when = (datetime.fromtimestamp(float(tk0.time), timezone.utc)
+                    if tk0 else None)
+            log(f"  [{sym}] MARKET CLOSED -- last quote "
+                + (f"{when:%a %d %b %H:%M} server, {age/3600.0:.1f}h before "
+                   f"the bell" if when else "unavailable")
+                + " -- no trade today")
+            telegram(f"clock_scalp [{sym}]: market closed, no trade today")
             continue
         spread = si.spread * si.point
         lot = a.lots.get(sym, 0.0)

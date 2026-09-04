@@ -109,6 +109,11 @@ ok('p.add_argument("--gate-money"' in src
 ok('cannot price a money gate -- falling back' in src,
    "a money gate that cannot be priced falls back rather than trading blind")
 
+ok('STALE_QUOTE_SEC' in src and 'MARKET CLOSED' in src,
+   "a shut market is detected and named, not reported as a small move")
+ok(src.index('MARKET CLOSED') < src.index('state = decide_all('),
+   "the closed-market check runs before the polling loop, not after it")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")
