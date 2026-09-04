@@ -50,17 +50,24 @@ ok('return 0, ref, last, seen, elapsed' in src,
 # 6. safety rails
 ok('KILL_FILE' in src and 'os.path.exists(KILL_FILE)' in src,
    "kill-switch file is checked before each session")
-ok('need > acct.margin_free * 0.30' in src,
-   "margin is capped at 30% of free margin before sending")
+ok('need > acct.margin_free * (a.max_margin_pct / 100.0)' in src,
+   "margin is checked against free margin before sending (default 95%: only "
+   "blocks orders the broker would reject anyway)")
 ok('10027' in src, "AutoTrading-disabled retcode is explained, not swallowed")
 ok('mt5.order_calc_profit(otype, sym, a.lot, entry_px, sl_px)' in src,
    "stop cost comes from the broker's calculator, not hand-rolled pip maths")
-ok('pct > a.max_risk_pct' in src,
-   "trade is refused when the stop exceeds the risk limit")
+ok('a.max_risk_pct > 0 and pct > a.max_risk_pct' in src,
+   "risk cap only refuses when it is switched on (0 = off, as instructed)")
+ok('pts_to_bust < pts_to_stop' in src,
+   "warns when the broker's stop-out comes before the stop-loss")
+ok('p.add_argument("--lot", type=float, default=0.05)' in src,
+   "default lot is the 0.05 the operator asked for")
 ok(src.index('loss = mt5.order_calc_profit') < src.index('res = send_order('),
    "risk is priced and logged BEFORE the order is sent")
 ok('p.add_argument("--sl-atr", type=float, default=3.0)' in src,
    "default stop is the 3xATR the operator asked for")
+ok(src.count("log(f\"  stop {a.sl_atr}xATR") == 1,
+   "the money cost is logged on every trade even with the cap off")
 
 # 7. notification failures must never break trade management
 tg = next(n for n in tree.body

@@ -57,8 +57,12 @@ Usage on the VPS
                          (operator asked for 2-5; clamped to that range)
     --lot 0.03           fixed size
     --sl-atr 3.0         stop distance in ATR(H1) -- NOT optional
-    --max-risk-pct 30    refuse the trade if that stop costs more
-                         than this share of equity
+    --max-risk-pct 0     refuse the trade if the stop costs more than this
+                         share of equity. 0 = no limit, which is the
+                         operator's explicit instruction: over-leverage on
+                         purpose, blowing the account is acceptable.
+                         The cost is still PRICED AND LOGGED every time --
+                         no limit is not the same as no visibility.
     --patience 2         M5 bars closing against you before exiting
     --min-move-spread 3  skip the day unless the move inside the window is
                          at least this many times the spread. Set 0 to take
@@ -386,7 +390,18 @@ def run_once(a, sym: str) -> None:
             f"= {risk:.2f} {acct.currency if acct else ''} at {a.lot} lot"
             + (f"  ({pct:.1f}% of equity {eq:.2f})" if eq > 0 else
                "  (equity is 0.00)"))
-        if a.live and eq > 0 and pct > a.max_risk_pct:
+        # Where the broker's stop-out sits relative to the stop we asked for.
+        # If the account is smaller than the stop, liquidation happens FIRST
+        # and the 3xATR stop never fires -- which changes what is actually
+        # being traded, so it is stated rather than discovered.
+        if eq > 0 and risk > 0:
+            pts_to_stop = abs(entry_px - sl_px)
+            pts_to_bust = pts_to_stop * (eq / risk)
+            if pts_to_bust < pts_to_stop:
+                log(f"  NOTE: equity runs out after ~{pts_to_bust:.1f} pts "
+                    f"but the stop is at {pts_to_stop:.1f} pts -- the broker "
+                    f"will close this position before the stop is reached.")
+        if a.live and eq > 0 and a.max_risk_pct > 0 and pct > a.max_risk_pct:
             log(f"  REFUSED: {pct:.1f}% of equity is over the "
                 f"{a.max_risk_pct}% limit. Lower --lot or --sl-atr, or raise "
                 f"--max-risk-pct if that is really the intent.")
@@ -399,9 +414,10 @@ def run_once(a, sym: str) -> None:
         if acct is None or need is None:
             log("  cannot price margin -- refusing to send")
             return
-        if acct.margin_free <= 0 or need > acct.margin_free * 0.30:
-            log(f"  REFUSED: margin {need:.2f} is more than 30% of free "
-                f"margin {acct.margin_free:.2f}")
+        if acct.margin_free <= 0 or need > acct.margin_free * (a.max_margin_pct / 100.0):
+            log(f"  REFUSED: margin {need:.2f} exceeds {a.max_margin_pct:.0f}% "
+                f"of free margin {acct.margin_free:.2f} -- the broker would "
+                f"reject this order")
             telegram(f"clock_scalp: refused, margin {need:.2f} vs free "
                      f"{acct.margin_free:.2f}")
             return
@@ -420,15 +436,18 @@ def run_once(a, sym: str) -> None:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--symbol", default="XAUAUDm")
-    p.add_argument("--lot", type=float, default=0.03)
+    p.add_argument("--lot", type=float, default=0.05)
     p.add_argument("--decide-after", type=float, default=3.0,
                    help="seconds after 19:30:00 to read the direction (2-5)")
     p.add_argument("--max-wait", type=float, default=5.0,
                    help="give up on a flat market after this many seconds")
     p.add_argument("--sl-atr", type=float, default=3.0)
-    p.add_argument("--max-risk-pct", type=float, default=30.0,
+    p.add_argument("--max-risk-pct", type=float, default=0.0,
                    help="refuse to trade if the stop would cost more than "
-                        "this percent of equity")
+                        "this percent of equity; 0 disables the check")
+    p.add_argument("--max-margin-pct", type=float, default=95.0,
+                   help="refuse only if the order needs more than this "
+                        "percent of free margin, i.e. it would be rejected")
     p.add_argument("--patience", type=int, default=2)
     p.add_argument("--min-move-spread", type=float, default=3.0,
                    help="skip the day unless the move is this many times the "
@@ -458,7 +477,8 @@ def main() -> int:
     log("=" * 68)
     log(f"clock_scalp_bot  {sym}  lot {a.lot}  decide +{a.decide_after}s  "
         f"SL {a.sl_atr}xATR  patience {a.patience}  "
-        f"gate {a.min_move_spread}x spread")
+        f"gate {a.min_move_spread}x spread  "
+        f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:
         log(f"account {acct.login} ({acct.server})  equity {acct.equity:.2f} "
