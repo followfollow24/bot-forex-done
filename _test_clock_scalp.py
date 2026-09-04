@@ -53,6 +53,14 @@ ok('KILL_FILE' in src and 'os.path.exists(KILL_FILE)' in src,
 ok('need > acct.margin_free * 0.30' in src,
    "margin is capped at 30% of free margin before sending")
 ok('10027' in src, "AutoTrading-disabled retcode is explained, not swallowed")
+ok('mt5.order_calc_profit(otype, sym, a.lot, entry_px, sl_px)' in src,
+   "stop cost comes from the broker's calculator, not hand-rolled pip maths")
+ok('pct > a.max_risk_pct' in src,
+   "trade is refused when the stop exceeds the risk limit")
+ok(src.index('loss = mt5.order_calc_profit') < src.index('res = send_order('),
+   "risk is priced and logged BEFORE the order is sent")
+ok('p.add_argument("--sl-atr", type=float, default=3.0)' in src,
+   "default stop is the 3xATR the operator asked for")
 
 # 7. notification failures must never break trade management
 tg = next(n for n in tree.body

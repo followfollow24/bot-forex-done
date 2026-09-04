@@ -56,7 +56,9 @@ Usage on the VPS
     --decide-after 3.0   seconds after 19:30:00 to read the direction
                          (operator asked for 2-5; clamped to that range)
     --lot 0.03           fixed size
-    --sl-atr 1.0         stop distance in ATR(H1) -- NOT optional
+    --sl-atr 3.0         stop distance in ATR(H1) -- NOT optional
+    --max-risk-pct 30    refuse the trade if that stop costs more
+                         than this share of equity
     --patience 2         M5 bars closing against you before exiting
     --min-move-spread 3  skip the day unless the move inside the window is
                          at least this many times the spread. Set 0 to take
@@ -342,7 +344,8 @@ def run_once(a, sym: str) -> None:
     if not atr:
         log("no ATR available -- skipping today")
         return
-    log(f"armed. ATR(H1) {atr:.2f}  stop {a.sl_atr} xATR = {a.sl_atr*atr:.2f} pts")
+    log(f"armed. ATR(H1) {atr:.2f}  stop {a.sl_atr} xATR = "
+        f"{a.sl_atr*atr:.2f} pts")
 
     si = mt5.symbol_info(sym)
     spread = si.spread * si.point
@@ -369,11 +372,30 @@ def run_once(a, sym: str) -> None:
     entry_px = tk.ask if d > 0 else tk.bid
     sl_px = entry_px - d * a.sl_atr * atr
 
+    # What this stop actually costs, from the broker's own calculator rather
+    # than hand-rolled pip maths -- the 2026-08-10 sizing incident came from
+    # exactly that shortcut, and cost real money.
+    otype = mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL
+    acct = mt5.account_info()
+    loss = mt5.order_calc_profit(otype, sym, a.lot, entry_px, sl_px)
+    if loss is not None:
+        risk = abs(float(loss))
+        eq = float(acct.equity) if acct else 0.0
+        pct = (risk / eq * 100.0) if eq > 0 else float("inf")
+        log(f"  stop {a.sl_atr}xATR = {abs(entry_px-sl_px):.2f} pts "
+            f"= {risk:.2f} {acct.currency if acct else ''} at {a.lot} lot"
+            + (f"  ({pct:.1f}% of equity {eq:.2f})" if eq > 0 else
+               "  (equity is 0.00)"))
+        if a.live and eq > 0 and pct > a.max_risk_pct:
+            log(f"  REFUSED: {pct:.1f}% of equity is over the "
+                f"{a.max_risk_pct}% limit. Lower --lot or --sl-atr, or raise "
+                f"--max-risk-pct if that is really the intent.")
+            telegram(f"clock_scalp: refused, stop risks {risk:.2f} "
+                     f"= {pct:.1f}% of equity")
+            return
+
     if a.live:
-        acct = mt5.account_info()
-        need = mt5.order_calc_margin(
-            mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL,
-            sym, a.lot, entry_px)
+        need = mt5.order_calc_margin(otype, sym, a.lot, entry_px)
         if acct is None or need is None:
             log("  cannot price margin -- refusing to send")
             return
@@ -403,7 +425,10 @@ def main() -> int:
                    help="seconds after 19:30:00 to read the direction (2-5)")
     p.add_argument("--max-wait", type=float, default=5.0,
                    help="give up on a flat market after this many seconds")
-    p.add_argument("--sl-atr", type=float, default=1.0)
+    p.add_argument("--sl-atr", type=float, default=3.0)
+    p.add_argument("--max-risk-pct", type=float, default=30.0,
+                   help="refuse to trade if the stop would cost more than "
+                        "this percent of equity")
     p.add_argument("--patience", type=int, default=2)
     p.add_argument("--min-move-spread", type=float, default=3.0,
                    help="skip the day unless the move is this many times the "
