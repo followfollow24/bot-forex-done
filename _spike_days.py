@@ -129,8 +129,8 @@ def main():
               f"-- rank {rank} of {len(pct)} "
               f"(top {100.0*rank/len(pct):.0f}%)")
 
-    print(f"\n3. IS {TARGET_H}:{TARGET_M:02d} SPECIAL, OR DOES BTC DO THIS "
-          f"ROUND THE CLOCK?")
+    print(f"\n3. IS {TARGET_H}:{TARGET_M:02d} SPECIAL, OR DOES {SYMBOL} DO "
+          f"THIS ROUND THE CLOCK?")
     print("   Same 30-minute measurement started on every hour.\n")
     print(f"   {'Thai':>7}{'days':>7}{'median':>9}{'mean':>8}{'>=1%':>8}"
           f"{'>=2%':>8}")
@@ -155,8 +155,8 @@ def main():
               f"{len(rows)} hours by mean move -- "
               + ("it is one of the most violent hours"
                  if pos and pos[0] <= 5 else
-                 "it is NOT unusually violent; big moves here are just BTC "
-                 "being BTC"))
+                 f"it is NOT one of the more violent hours; big moves here "
+                 f"are just {SYMBOL} doing what it does"))
     mt5.shutdown()
     return 0
 
