@@ -29,6 +29,12 @@ DESIGN THAT KEEPS IT HONEST
   filtered bars are traded with a random direction. That isolates the
   one thing in question -- whether the direction call adds anything --
   from the filter merely picking calmer or wilder moments.
+- The control is run N_CTRL times on different draws, not once. One
+  random run has its own sampling noise, and on the first version of
+  this script that noise alone swung the "edge" column by +-0.26R --
+  wide enough to manufacture an edge out of nothing. What matters is
+  where the signal sits in the control's DISTRIBUTION, so each row
+  reports a z-score against it.
 - Split-sample: first half and second half reported separately.
 - Real spread charged per trade, in R.
 - A filter this tight cuts the trade count hard; n is printed on every
@@ -54,6 +60,7 @@ TP_ATR, SL_ATR = 0.51, 0.42      # measured from their filled brackets
 LOOKBACK = 3
 MAX_HOLD = 24
 SEED = 4242
+N_CTRL = 20        # control draws per cell
 
 # measured entry profile: momentum 1.418, extension 1.675
 MOM_GRID = [0.15, 0.50, 0.80, 1.00, 1.20, 1.40, 1.60, 2.00]
@@ -117,8 +124,10 @@ def h1_atr_on_m5(r, n=14):
     return out
 
 
-def run(r, atr, e20, lo, hi, mom_t, ext_t, spread, randomise=False):
-    rng = np.random.default_rng(SEED)
+def run(r, atr, e20, lo, hi, mom_t, ext_t, spread, seed=None):
+    """seed=None trades the signal direction; an int trades random ones."""
+    rng = np.random.default_rng(seed)
+    randomise = seed is not None
     c, out = r["close"], []
     i = lo
     while i < hi - MAX_HOLD - 1:
@@ -181,34 +190,34 @@ def main():
     print("=" * 88)
     print(f"{'mom>=':>7}{'ext>=':>7}{'half':>7}"
           f"{'n':>7}{'WR':>7}{'EV(R)':>9}"
-          f"{'n rnd':>7}{'WR rnd':>8}{'EV rnd':>9}{'edge':>8}")
+          f"{'ctl EV':>10}{'ctl sd':>8}{'z':>8}")
     print("-" * 88)
 
     for ext_t in EXT_GRID:
         for mom_t in MOM_GRID:
             for tag, lo, hi in (("train", LOOKBACK + 25, mid),
                                 ("TEST", mid, len(r))):
-                sig = run(r, atr, e20, lo, hi, mom_t, ext_t, spread)
-                ctl = run(r, atr, e20, lo, hi, mom_t, ext_t, spread,
-                          randomise=True)
-                n1, w1, e1 = ev(sig)
-                n2, w2, e2 = ev(ctl)
+                n1, w1, e1 = ev(run(r, atr, e20, lo, hi, mom_t, ext_t, spread))
                 if n1 < 30:
                     print(f"{mom_t:>7.2f}{ext_t:>7.2f}{tag:>7}{n1:>7}"
                           f"      -- too few trades to read --")
                     continue
-                edge = e1 - e2
+                cs = [ev(run(r, atr, e20, lo, hi, mom_t, ext_t, spread, s))[2]
+                      for s in range(1, N_CTRL + 1)]
+                cm, csd = float(np.mean(cs)), float(np.std(cs, ddof=1))
+                z = (e1 - cm) / csd if csd > 0 else 0.0
                 print(f"{mom_t:>7.2f}{ext_t:>7.2f}{tag:>7}"
                       f"{n1:>7}{w1:>6.1f}%{e1:>+9.3f}"
-                      f"{n2:>7}{w2:>7.1f}%{e2:>+9.3f}{edge:>+8.3f}")
+                      f"{cm:>+10.3f}{csd:>8.3f}{z:>+8.2f}")
         print("-" * 88)
 
     print(f"  Break-even WR at this R:R is {100.0/(1.0+TP_ATR/SL_ATR):.1f}% "
           f"before costs.")
-    print("  'edge' = signal EV minus random-direction EV on the SAME filtered")
-    print("  bars. That is the only column that says whether reading the chart")
-    print("  adds anything; a positive EV with edge ~0 just means the filter")
-    print("  found calmer bars, which a coin flip would have enjoyed equally.")
+    print(f"  ctl EV/sd = mean and spread of {N_CTRL} random-direction runs on the")
+    print("  SAME filtered bars. z = how far the signal sits from that cloud.")
+    print("  |z| < 2 means reading the chart did nothing a coin flip would not")
+    print("  have done at those same moments -- and a z that flips sign between")
+    print("  train and TEST is noise however large it is in one half.")
     mt5.shutdown()
     return 0
 
