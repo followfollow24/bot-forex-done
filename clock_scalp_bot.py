@@ -265,6 +265,30 @@ def next_target(offset_h: int) -> datetime:
     return t + timedelta(hours=offset_h)
 
 
+def try_send(req: dict):
+    """order_send with a filling-mode fallback.
+
+    Brokers differ on which filling modes they accept and reject the rest
+    with 10030 (invalid fill). IOC is right for Exness market orders, but
+    a hardcoded single mode is a silent single point of failure on both
+    the open and the close.
+    """
+    for fill in (req.get("type_filling", mt5.ORDER_FILLING_IOC),
+                 mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN):
+        req["type_filling"] = fill
+        try:
+            res = mt5.order_send(req)
+        except Exception as exc:
+            log(f"  order_send raised: {exc!r}")
+            return None
+        if res is None:
+            return None
+        if res.retcode != 10030:                  # not a filling problem
+            return res
+        log(f"  filling mode {fill} rejected (10030) -- trying the next")
+    return res
+
+
 def send_order(sym: str, direction: int, lot: float, sl_price: float,
                live: bool):
     tk = mt5.symbol_info_tick(sym)
@@ -287,7 +311,7 @@ def send_order(sym: str, direction: int, lot: float, sl_price: float,
         log(f"  DRY RUN -- would send: {'BUY' if direction > 0 else 'SELL'} "
             f"{lot} {sym} @ {price:.3f}  SL {req['sl']:.3f}")
         return None
-    res = mt5.order_send(req)
+    res = try_send(req)
     if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
         code = getattr(res, "retcode", "None")
         hint = ""
@@ -301,6 +325,24 @@ def send_order(sym: str, direction: int, lot: float, sl_price: float,
     log(f"  FILLED {'BUY' if direction > 0 else 'SELL'} {lot} @ {res.price:.3f} "
         f"ticket {res.order}")
     return res
+
+
+def positions_of(sym: str):
+    """Our positions on this symbol.
+
+    mt5.positions_get() accepts symbol, group or ticket -- there is NO
+    magic parameter. Passing magic= raises, and this was being called on
+    the exit path, which had never executed: the first real trade would
+    have crashed the bot while holding an open position, or (if the call
+    had merely returned nothing) reported the position as already closed
+    and walked away from it. Filtering happens here in Python instead.
+    """
+    try:
+        return [p for p in (mt5.positions_get(symbol=sym) or [])
+                if getattr(p, "magic", None) == MAGIC]
+    except Exception as exc:                      # never crash the manager
+        log(f"  positions_get failed: {exc!r}")
+        return None                               # unknown, not "none open"
 
 
 def m15_close_after(ts_srv: float) -> float:
@@ -330,10 +372,21 @@ def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
             stall_s = float(arg or 600)
             best, best_t = entry_px, now_srv
             log(f"  exit after {stall_s:.0f}s with no new extreme")
+        # The server clock stops advancing when the market shuts. Judging
+        # the cap on it would spin here forever holding an open position,
+        # so the backstop is wall-clock.
+        hard_deadline = time.time() + max_minutes * 60
         while True:
-            if live and not mt5.positions_get(symbol=sym, magic=MAGIC):
-                log("  position closed elsewhere (stop-loss, or by hand) -- done")
+            if time.time() > hard_deadline:
+                log(f"  {max_minutes} min wall-clock cap reached -- closing")
+                close_position(sym, direction, live, entry_px)
                 return
+            if live:
+                held = positions_of(sym)
+                if held is not None and not held:
+                    log("  position closed elsewhere (stop-loss, or by hand)"
+                        " -- done")
+                    return
             tk = mt5.symbol_info_tick(sym)
             if tk is None:
                 time.sleep(1); continue
@@ -349,20 +402,17 @@ def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
                 elif now_srv - best_t >= stall_s:
                     close_position(sym, direction, live, entry_px)
                     return
-            if now_srv - (target or best_t) > max_minutes * 60:
-                break
             time.sleep(1)
-        log(f"  {max_minutes} min cap reached -- closing")
-        close_position(sym, direction, live, entry_px)
-        return
 
     against = 0
     seen_bar = None
     deadline = time.time() + max_minutes * 60
     while time.time() < deadline:
-        if live and not mt5.positions_get(symbol=sym, magic=MAGIC):
-            log("  position closed elsewhere (stop-loss, or by hand) -- done")
-            return
+        if live:
+            held = positions_of(sym)
+            if held is not None and not held:
+                log("  position closed elsewhere (stop-loss, or by hand) -- done")
+                return
         bars = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M5, 1, 2)
         if bars is None or len(bars) < 1:
             time.sleep(5)
@@ -384,14 +434,28 @@ def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
 
 def close_position(sym: str, direction: int, live: bool, entry_px: float):
     tk = mt5.symbol_info_tick(sym)
-    px = tk.bid if direction > 0 else tk.ask
+    if tk is None:
+        # No quote to price the log line with. Do NOT return -- a missing
+        # tick is not a reason to leave a live position unmanaged.
+        log("  no tick available while closing -- proceeding on the order")
+        px = entry_px
+    else:
+        px = tk.bid if direction > 0 else tk.ask
     pts = (px - entry_px) * direction
     if not live:
         log(f"  DRY RUN -- would close at {px:.3f}  ({pts:+.2f} points)")
         telegram(f"clock_scalp DRY RUN: would close {sym} at {px:.3f} "
                  f"({pts:+.2f} pts)")
         return
-    for p in (mt5.positions_get(symbol=sym, magic=MAGIC) or []):
+    held = positions_of(sym)
+    if held is None:
+        log("  CANNOT READ POSITIONS while closing -- retrying")
+        time.sleep(2)
+        held = positions_of(sym)
+    if not held:
+        log("  nothing of ours open on this symbol -- nothing to close")
+        return
+    for p in held:
         req = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": sym,
@@ -405,13 +469,28 @@ def close_position(sym: str, direction: int, live: bool, entry_px: float):
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
-        res = mt5.order_send(req)
-        ok = res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+        # A rejected close leaves a live position behind, so it is retried
+        # and, if it still will not go, it is escalated rather than logged
+        # once and forgotten.
+        ok, res = False, None
+        for attempt in range(1, 4):
+            res = try_send(req)
+            ok = res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+            if ok:
+                break
+            log(f"  close attempt {attempt}/3 failed: "
+                f"retcode={getattr(res, 'retcode', '?')} "
+                f"{getattr(res, 'comment', '')}")
+            time.sleep(2)
+            t2 = mt5.symbol_info_tick(sym)
+            if t2:
+                req["price"] = t2.bid if direction > 0 else t2.ask
         log(f"  CLOSE ticket {p.ticket}: "
-            f"{'done' if ok else 'FAILED ' + str(getattr(res, 'retcode', '?'))}"
+            f"{'done' if ok else 'STILL OPEN after 3 tries'}"
             f"  ({pts:+.2f} points)")
-        telegram(f"clock_scalp: closed {sym} {pts:+.2f} pts "
-                 f"({'ok' if ok else 'FAILED'})")
+        telegram(f"clock_scalp: {'closed' if ok else 'FAILED TO CLOSE'} {sym} "
+                 f"{pts:+.2f} pts"
+                 + ("" if ok else " -- POSITION IS STILL OPEN, close it by hand"))
 
 
 def entry_decision(elapsed, px, ref, gate, min_wait, max_wait):
