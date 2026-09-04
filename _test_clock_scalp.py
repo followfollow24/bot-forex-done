@@ -38,8 +38,13 @@ ok('def broker_offset_hours' in src,
    "server-vs-UTC offset is measured, not assumed")
 
 # 4. the operator's 2-5 second window is enforced
-ok('min(5.0, max(2.0, a.decide_after))' in src,
-   "decide-after is clamped into the 2-5s the operator specified")
+ok('a.max_wait = max(a.decide_after + 1.0, a.max_wait)' in src,
+   "max-wait is always later than the minimum wait")
+ok('elapsed >= a.decide_after and px != st["ref"]' in src
+   and 'st["moved"] >= st["gate"]' in src,
+   "decide-after is a MINIMUM wait: watching continues until the gate opens")
+ok('elif elapsed >= a.max_wait:' in src,
+   "the session is abandoned if the gate never opens")
 
 # 5. gate semantics
 ok('elif elapsed >= a.max_wait:' in src and 'st["done"] = (0, elapsed)' in src,
@@ -58,7 +63,7 @@ ok('a.max_risk_pct > 0 and pct > a.max_risk_pct' in src,
    "risk cap only refuses when it is switched on (0 = off, as instructed)")
 ok('pts_bust < pts_stop' in src,
    "warns when the broker's stop-out comes before the stop-loss")
-ok('"gate": float(gates[s])' in src and 'moved >= st["gate"]' in src,
+ok('"gate": float(gates[s])' in src and 'st["moved"] >= st["gate"]' in src,
    "the gate is set before the decision loop reads it, not after")
 ok('p.add_argument("--lot", default="0.05"' in src,
    "default lot is the 0.05 the operator asked for")

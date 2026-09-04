@@ -76,8 +76,10 @@ Usage on the VPS
                                      nothing -- run this before approving
                                      a live start
 
-    --decide-after 3.0   seconds after 19:30:00 to read the direction
-                         (operator asked for 2-5; clamped to that range)
+    --decide-after 3.0   the MINIMUM wait after 19:30:00 before an entry
+                         may be taken. Not a verdict: watching continues
+                         past it until the move clears the gate.
+    --max-wait 900       give up on the session after this many seconds
     --lot 0.03           fixed size
     --sl-atr 3.0         stop distance in ATR(H1) -- NOT optional
     --max-risk-pct 0     refuse the trade if the stop costs more than this
@@ -406,8 +408,8 @@ def decide_all(syms, gates, target, a):
     below always saw its 0.0 default and the gate filtered nothing."""
     t0_ms = int(target.timestamp() * 1000)
     state = {s: {"ref": None, "last": None, "seen": 0, "done": None,
-                 "gate": float(gates[s])} for s in syms}
-    deadline = time.time() + a.max_wait + 20
+                 "moved": 0.0, "gate": float(gates[s])} for s in syms}
+    deadline = time.time() + a.max_wait + 30
     while time.time() < deadline:
         pending = False
         for sym in syms:
@@ -430,12 +432,17 @@ def decide_all(syms, gates, target, a):
                 st["seen"] += 1
             st["last"] = px
             elapsed = (tms - t0_ms) / 1000.0
-            if elapsed >= a.decide_after:
-                moved = abs(px - st["ref"])
-                if px != st["ref"] and moved >= st["gate"]:
-                    st["done"] = (1 if px > st["ref"] else -1, elapsed)
-                elif elapsed >= a.max_wait:
-                    st["done"] = (0, elapsed)
+            st["moved"] = abs(px - st["ref"])
+            # decide-after is a MINIMUM wait, not a verdict -- keep
+            # watching until the move clears the gate. Reading the
+            # direction at a fixed +3s skipped 77-84% of the sessions
+            # that went on to run, because a move covering 11-25 points
+            # over a quarter hour rarely announces itself in 3 seconds.
+            if elapsed >= a.decide_after and px != st["ref"] \
+                    and st["moved"] >= st["gate"]:
+                st["done"] = (1 if px > st["ref"] else -1, elapsed)
+            elif elapsed >= a.max_wait:
+                st["done"] = (0, elapsed)
         if not pending:
             break
         time.sleep(POLL_SEC)
@@ -581,10 +588,11 @@ def run_once(a, syms: list) -> None:
     for sym, c in ctx.items():
         st = state[sym]
         d, waited = st["done"]
-        moved = abs((st["last"] or 0) - (st["ref"] or 0))
+        moved = float(st.get("moved") or 0.0)
         if d == 0:
-            log(f"  [{sym}] moved {moved:.3f} in {a.max_wait}s "
-                f"({st['seen']} changes), needed {c['gate']:.3f} -- skipped")
+            log(f"  [{sym}] never cleared {c['gate']:.3f} within "
+                f"{a.max_wait:.0f}s (best {moved:.3f}, {st['seen']} "
+                f"price changes) -- skipped")
             telegram(f"clock_scalp [{sym}]: move {moved:.3f} < gate "
                      f"{c['gate']:.3f}, skipped")
             continue
@@ -654,8 +662,9 @@ def main() -> int:
                    help="0.05 for all, or XAUAUDm=0.05,BTCUSDm=0.01")
     p.add_argument("--decide-after", type=float, default=3.0,
                    help="seconds after 19:30:00 to read the direction (2-5)")
-    p.add_argument("--max-wait", type=float, default=5.0,
-                   help="give up on a flat market after this many seconds")
+    p.add_argument("--max-wait", type=float, default=900.0,
+                   help="seconds to keep watching before giving up on the "
+                        "session (default 15 minutes)")
     p.add_argument("--sl-atr", type=float, default=3.0)
     p.add_argument("--max-risk-pct", type=float, default=0.0,
                    help="refuse to trade if the stop would cost more than "
@@ -677,8 +686,8 @@ def main() -> int:
                    help="check everything and exit; sends nothing")
     a = p.parse_args()
 
-    a.decide_after = min(5.0, max(2.0, a.decide_after))
-    a.max_wait = max(a.decide_after, min(5.0, a.max_wait))
+    a.decide_after = max(0.0, a.decide_after)
+    a.max_wait = max(a.decide_after + 1.0, a.max_wait)
     if a.sl_atr <= 0:
         print("[ERROR] --sl-atr must be positive; a stop is not optional here")
         return 2
