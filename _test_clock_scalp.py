@@ -90,6 +90,13 @@ ok(any(isinstance(h, ast.ExceptHandler) for n in ast.walk(tg)
 ok(src.count("res = send_order(sym, d, lot, sl_px, a.live)") == 1,
    "exactly one entry per symbol per session -- it cannot spiral")
 
+ok('def selftest' in src and 'sends nothing' in src,
+   "a pre-flight check exists that opens and sends nothing")
+ok(src.index('if a.selftest:') < src.index('run_once(a, syms)'),
+   "selftest returns before the trading loop is ever entered")
+ok('term.trade_allowed' in src,
+   "pre-flight checks AutoTrading rather than assuming it")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

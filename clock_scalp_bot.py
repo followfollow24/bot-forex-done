@@ -72,6 +72,9 @@ Usage on the VPS
     --symbols XAUAUDm,BTCUSDm
     --lot 0.05                       same size for both
     --lot XAUAUDm=0.05,BTCUSDm=0.01  per symbol
+    --selftest                       check everything and exit, sending
+                                     nothing -- run this before approving
+                                     a live start
 
     --decide-after 3.0   seconds after 19:30:00 to read the direction
                          (operator asked for 2-5; clamped to that range)
@@ -442,6 +445,103 @@ def decide_all(syms, gates, target, a):
     return state
 
 
+def selftest(a, syms: list) -> int:
+    """Pre-flight. Touches nothing, sends nothing, waits for no bell.
+    Answers the questions that decide whether a live start is safe, and
+    the ones whose answers are usually assumed: is AutoTrading actually
+    on, does the symbol resolve, is there money, what would one order
+    cost, and would the broker accept it."""
+    bad = 0
+    print()
+    log("=" * 68)
+    log(" PRE-FLIGHT CHECK -- opens nothing, sends nothing")
+    log("=" * 68)
+
+    term = mt5.terminal_info()
+    acct = mt5.account_info()
+    if term is None or acct is None:
+        log("  [FAIL] terminal/account unavailable -- MT5 IPC problem")
+        return 1
+    log(f"  terminal: {term.name}  connected={term.connected}  "
+        f"trade_allowed={term.trade_allowed}")
+    if not term.connected:
+        log("  [FAIL] terminal is not connected to the broker"); bad += 1
+    if not term.trade_allowed:
+        log("  [FAIL] AutoTrading is OFF -- the button must be green, or "
+            "every order comes back 10027")
+        bad += 1
+    else:
+        log("  [OK]   AutoTrading is enabled")
+
+    log(f"  account {acct.login} ({acct.server})  equity {acct.equity:,.2f} "
+        f"{acct.currency}  free margin {acct.margin_free:,.2f}")
+    if acct.equity <= 0:
+        log("  [FAIL] equity is 0.00 -- nothing can be traded until funded")
+        bad += 1
+    else:
+        log("  [OK]   the account has money")
+
+    off = broker_offset_hours(syms[0])
+    tgt = next_target(off)
+    log(f"  broker clock UTC{off:+d}; next bell "
+        f"{tgt:%Y-%m-%d %H:%M:%S} server = 19:30 Thai")
+
+    for sym in syms:
+        si = mt5.symbol_info(sym)
+        tk = mt5.symbol_info_tick(sym)
+        atr = atr_h1(sym)
+        lot = a.lots.get(sym)
+        log(f"  --- {sym} ---")
+        if si is None or tk is None or not atr:
+            log(f"  [FAIL] no quote/ATR for {sym}"); bad += 1; continue
+        spread = si.spread * si.point
+        gate = a.min_move_spread * spread
+        log(f"  price {tk.bid:,.3f}/{tk.ask:,.3f}  spread {spread:.3f}  "
+            f"ATR(H1) {atr:,.3f}")
+        log(f"  gate {a.min_move_spread}x spread = {gate:.3f}   "
+            f"stop {a.sl_atr}xATR = {a.sl_atr*atr:,.3f}")
+        if not lot:
+            log(f"  [FAIL] no lot configured for {sym}"); bad += 1; continue
+        if lot < si.volume_min or lot > si.volume_max:
+            log(f"  [FAIL] lot {lot} outside broker range "
+                f"{si.volume_min}-{si.volume_max}"); bad += 1
+        else:
+            log(f"  [OK]   lot {lot} is within {si.volume_min}-{si.volume_max}")
+        entry = tk.ask
+        sl = entry - a.sl_atr * atr
+        margin = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, sym, lot, entry)
+        loss = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot, entry, sl)
+        if margin is None or loss is None:
+            log("  [FAIL] broker could not price this order"); bad += 1; continue
+        risk = abs(float(loss))
+        log(f"  a BUY {lot} now: margin {margin:,.2f}, "
+            f"stop would cost {risk:,.2f} {acct.currency}")
+        if acct.equity > 0:
+            log(f"         = {risk/acct.equity*100:.1f}% of equity"
+                + ("   [risk cap OFF by your instruction]"
+                   if a.max_risk_pct <= 0 else ""))
+            if risk > acct.equity:
+                log(f"  [NOTE] the stop is bigger than the account -- the "
+                    f"broker liquidates before it is reached")
+        if margin > acct.margin_free:
+            log(f"  [FAIL] margin {margin:,.2f} exceeds free "
+                f"{acct.margin_free:,.2f} -- order would be rejected")
+            bad += 1
+        else:
+            log(f"  [OK]   margin fits inside free margin")
+
+    log("-" * 68)
+    if os.path.exists(KILL_FILE):
+        log(f"  [NOTE] kill switch {KILL_FILE} is present -- entries blocked")
+    if bad:
+        log(f"  RESULT: {bad} check(s) FAILED. Do not start live yet.")
+    else:
+        log("  RESULT: all checks passed. The bot is ready for a live start.")
+        log("  Starting it is your decision and your command; this script")
+        log("  has sent nothing and will not start itself.")
+    return 1 if bad else 0
+
+
 def run_once(a, syms: list) -> None:
     if os.path.exists(KILL_FILE):
         log(f"kill switch {KILL_FILE} present -- skipping today")
@@ -573,6 +673,8 @@ def main() -> int:
     p.add_argument("--live", action="store_true",
                    help="actually send orders; without it, nothing is sent")
     p.add_argument("--once", action="store_true", help="one session then exit")
+    p.add_argument("--selftest", action="store_true",
+                   help="check everything and exit; sends nothing")
     a = p.parse_args()
 
     a.decide_after = min(5.0, max(2.0, a.decide_after))
@@ -619,6 +721,11 @@ def main() -> int:
             log("equity is 0.00 -- nothing can be traded until the account "
                 "is funded. Staying up in case it is topped up.")
     log("=" * 68)
+
+    if a.selftest:
+        rc = selftest(a, syms)
+        mt5.shutdown()
+        return rc
 
     try:
         while True:
