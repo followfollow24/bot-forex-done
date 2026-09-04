@@ -76,9 +76,16 @@ Usage on the VPS
                                      nothing -- run this before approving
                                      a live start
 
-    --decide-after 3.0   the MINIMUM wait after 19:30:00 before an entry
+    --decide-after 1.0   the MINIMUM wait after 19:30:00 before an entry
                          may be taken. Not a verdict: watching continues
                          past it until the move clears the gate.
+                         1 second, not 3, because the gate opens inside
+                         3s on only 20% of days and inside 1s on 4%, so
+                         the setting almost never binds -- but on a
+                         session like 4 Sep (30 points in 1.37s) it lets
+                         the bot in earlier at no cost. Below ~0.2s is
+                         unreachable live: 50 ms tick polling plus the
+                         round trip to the broker.
     --max-wait 900       give up on the session after this many seconds
     --lot 0.03           fixed size
     --sl-atr 3.0         stop distance in ATR(H1) -- NOT optional
@@ -660,7 +667,7 @@ def main() -> int:
                    help="comma separated, e.g. XAUAUDm,BTCUSDm")
     p.add_argument("--lot", default="0.05",
                    help="0.05 for all, or XAUAUDm=0.05,BTCUSDm=0.01")
-    p.add_argument("--decide-after", type=float, default=3.0,
+    p.add_argument("--decide-after", type=float, default=1.0,
                    help="seconds after 19:30:00 to read the direction (2-5)")
     p.add_argument("--max-wait", type=float, default=900.0,
                    help="seconds to keep watching before giving up on the "
