@@ -152,6 +152,7 @@ does: if nothing is happening, do not trade today.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import sys
 import time
@@ -170,6 +171,24 @@ ARM_LEAD = 90                   # start paying attention this early
 MAGIC = 668003
 KILL_FILE = "STOP_CLOCK_SCALP"
 STALE_QUOTE_SEC = 300     # older than this at the bell = market shut
+
+
+def claim_single_instance() -> bool:
+    """Refuse to start if this bot is already running.
+
+    Nothing stopped a second copy before, and on 2026-09-04 two were
+    started twenty minutes apart -- which on the next bell would have
+    opened two positions instead of one, doubling the size that was
+    agreed. A named Windows mutex is the right primitive: the kernel
+    releases it when the process dies, so a crash cannot leave a stale
+    lock that blocks every future start.
+    """
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateMutexW(None, False, "Global\\clock_scalp_bot_668003")
+        return k32.GetLastError() != 183          # ERROR_ALREADY_EXISTS
+    except Exception:
+        return True            # not Windows (tests) -- do not block
 
 
 def log(msg: str) -> None:
@@ -704,7 +723,19 @@ def run_once(a, syms: list) -> None:
     sleep_for = (target - now_srv).total_seconds() - ARM_LEAD
     if sleep_for > 0:
         log(f"sleeping {sleep_for/3600.0:.2f}h until {ARM_LEAD}s before the bell")
-        time.sleep(sleep_for)
+    # One sixteen-hour time.sleep() trusts that nothing disturbs the clock
+    # for sixteen hours. Waking every five minutes and recomputing from the
+    # clock survives a VPS suspend, a resume, or an NTP correction, any of
+    # which would otherwise miss the bell outright.
+    while True:
+        now_srv = datetime.now(timezone.utc) + timedelta(hours=off)
+        remaining = (target - now_srv).total_seconds() - ARM_LEAD
+        if remaining <= 0:
+            break
+        if os.path.exists(KILL_FILE):
+            log(f"kill switch appeared while waiting -- skipping today")
+            return
+        time.sleep(min(300.0, remaining))
 
     # per-symbol context: each has its own ATR, spread and gate
     ctx = {}
@@ -757,14 +788,14 @@ def run_once(a, syms: list) -> None:
     for sym, c in ctx.items():
         st = state[sym]
         d, waited = st["done"]
-        moved = float(st.get("peak") or 0.0) if state[sym]["done"][0] == 0 \
-            else float(st.get("moved") or 0.0)
+        peak = float(st.get("peak") or 0.0)
+        moved = peak if d == 0 else float(st.get("moved") or 0.0)
         if d == 0:
+            pct = (100.0 * peak / c["gate"]) if c["gate"] > 0 else 0.0
             log(f"  [{sym}] never cleared {c['gate']:.3f} within "
-                f"{a.max_wait:.0f}s -- closest it came was "
-                f"{st.get('peak', 0.0):.3f} "
-                f"({100.0*st.get('peak', 0.0)/c['gate']:.0f}% of the gate, "
-                f"{st['seen']} price changes) -- skipped")
+                f"{a.max_wait:.0f}s -- closest it came was {peak:.3f} "
+                f"({pct:.0f}% of the gate, {st['seen']} price changes)"
+                f" -- skipped")
             telegram(f"clock_scalp [{sym}]: move {moved:.3f} < gate "
                      f"{c['gate']:.3f}, skipped")
             continue
@@ -773,11 +804,15 @@ def run_once(a, syms: list) -> None:
             log(f"  [{sym}] no lot configured -- skipped")
             continue
         tk = mt5.symbol_info_tick(sym)
+        if tk is None:
+            log(f"  [{sym}] gate cleared but the quote vanished -- not trading")
+            telegram(f"clock_scalp [{sym}]: quote vanished at entry, skipped")
+            continue
         entry_px = tk.ask if d > 0 else tk.bid
         sl_px = entry_px - d * a.sl_atr * c["atr"]
         log(f"  [{sym}] GATE CLEARED at +{waited:.3f}s: "
             f"{'BUY' if d > 0 else 'SELL'}  moved {moved:.3f} from the "
-            f"reference = {moved/c['spread']:.1f}x spread "
+            f"reference = {moved/c['spread'] if c['spread'] else 0:.1f}x spread "
             f"(needed {c['gate']:.3f})")
 
         otype = mt5.ORDER_TYPE_BUY if d > 0 else mt5.ORDER_TYPE_SELL
@@ -867,6 +902,12 @@ def main() -> int:
     if a.sl_atr <= 0:
         print("[ERROR] --sl-atr must be positive; a stop is not optional here")
         return 2
+
+    if not claim_single_instance():
+        print("[REFUSED] clock_scalp_bot is ALREADY RUNNING.\n"
+              "          Two copies would open two positions at the bell.\n"
+              "          Stop the other one first:  Stop-Process -Name python -Force")
+        return 3
 
     if not mt5.initialize():
         log(f"MT5 init failed: {mt5.last_error()}")

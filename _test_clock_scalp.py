@@ -118,6 +118,17 @@ ok('STALE_QUOTE_SEC' in src and 'MARKET CLOSED' in src,
 ok(src.index('MARKET CLOSED') < src.index('state = decide_all('),
    "the closed-market check runs before the polling loop, not after it")
 
+ok('def claim_single_instance' in src and 'ERROR_ALREADY_EXISTS' in src,
+   "a second copy is refused -- two bots would double the position size")
+ok(src.index('if not claim_single_instance():') < src.index('mt5.initialize()'),
+   "the single-instance check runs before MT5 is even touched")
+ok('if tk is None:' in src and 'quote vanished' in src,
+   "a vanished quote after the gate clears skips the trade instead of crashing")
+ok('time.sleep(min(300.0, remaining))' in src,
+   "the long wait is chunked and recomputed from the clock, not one 16h sleep")
+ok('if c["gate"] > 0 else 0.0' in src,
+   "the gate percentage cannot divide by zero")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")
