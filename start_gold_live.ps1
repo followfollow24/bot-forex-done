@@ -8,6 +8,12 @@
 # BEFORE running it, run the pre-flight check, which sends nothing:
 #     .\start_gold_live.ps1 -Check
 #
+# To go live it asks you to type LIVE. If that prompt will not accept
+# input (RDP turns a Ctrl+V paste into a ^V control character, which
+# reads as "not LIVE" and aborts), the same confirmation can be given on
+# the command line instead:
+#     .\start_gold_live.ps1 -IUnderstandRealMoney
+#
 # Configuration is the operator's, recorded here so it is never a guess:
 #   XAUAUDm only  -- BTC was measured and dropped: 19:30 ranks 16th of 24
 #                    hours for BTC, and 4 Sep was rank 2 of 348 sessions,
@@ -29,7 +35,7 @@
 # +3.06, so it is NOT established. It is the best-defined candidate
 # tested, not a proven edge.
 
-param([switch]$Check, [switch]$Dry)
+param([switch]$Check, [switch]$Dry, [switch]$IUnderstandRealMoney)
 
 $ErrorActionPreference = "Stop"
 $repo = Join-Path $env:USERPROFILE "Desktop\bot_repo"
@@ -62,9 +68,22 @@ Write-Host "  THIS WILL TRADE REAL MONEY ON ACCOUNT " -NoNewline -ForegroundColo
 Write-Host "XAUAUDm 0.05 lot, SL 3xATR, no risk cap." -ForegroundColor Yellow
 Write-Host "  One trade per day at 19:30 Thai, closed at 19:45." -ForegroundColor Yellow
 Write-Host ""
-$answer = Read-Host "  Type LIVE to start, anything else to abort"
-if ($answer -cne "LIVE") {
-    Write-Host "  aborted -- nothing started." -ForegroundColor Green
-    exit 0
+# The interactive prompt is the normal path. Over RDP a Ctrl+V at a
+# Read-Host arrives as a literal ^V control character rather than the
+# pasted word, which reads as "not LIVE" and aborts -- that happened on
+# the first attempt here. -IUnderstandRealMoney is the same decision made
+# on the command line instead, for when the prompt cannot be typed into.
+# It is deliberately long: nobody types it by accident, and it is legible
+# in shell history months later.
+if (-not $IUnderstandRealMoney) {
+    $answer = Read-Host "  Type LIVE to start, anything else to abort"
+    if ($answer -cne "LIVE") {
+        Write-Host "  aborted -- nothing started." -ForegroundColor Green
+        Write-Host "  (if you pasted with Ctrl+V, it arrives as ^V here --" -ForegroundColor DarkGray
+        Write-Host "   type the four letters, or use -IUnderstandRealMoney)" -ForegroundColor DarkGray
+        exit 0
+    }
+} else {
+    Write-Host "  confirmed on the command line." -ForegroundColor Yellow
 }
 & python clock_scalp_bot.py @common --live
