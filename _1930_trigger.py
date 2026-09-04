@@ -34,7 +34,7 @@ ALSO REPORTED, because it is what the picture is really claiming:
   - the last few days individually, including 4 Sep, so the example can
     be checked against the rule rather than remembered.
 
-Usage (VPS):  python _1930_trigger.py [symbol] [months]
+Usage (VPS):  python _1930_trigger.py [symbol] [months] [M5|M1]
 """
 import sys
 from datetime import datetime, timedelta, timezone
@@ -49,20 +49,28 @@ import numpy as np
 
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 MONTHS = float(sys.argv[2]) if len(sys.argv) > 2 else 14.0
+TF = (sys.argv[3] if len(sys.argv) > 3 else "M5").upper()
+STEP = 1 if TF == "M1" else 5          # minutes per bar
 THAI, TARGET = 7, (19, 30)
 WATCH = 30            # minutes after 19:30 in which the trigger may fire
+PATIENCE = 2          # bars closing against you before you call it stopped
 TRIGGERS = [0.10, 0.20, 0.35, 0.50, 0.80]      # xATR(H1) from the 19:30 open
 CAP = 120             # minutes max in a trade
 LOT = 0.05
 N_CTRL = 20
 
 
-def load_m1(symbol, months):
+def load_bars(symbol, months):
+    """M1 history on this terminal is short (~72 trading days), which is
+    not enough to split a daily rule in half. M5 reaches 364 days and,
+    on a 5-minute clock, 'the first bar that closes against you' stops
+    firing three minutes into every trade."""
     mt5.symbol_select(symbol, True)
     chunks, cursor = [], datetime.now()
     stop = datetime.now() - timedelta(days=int(months * 30.5))
     while cursor > stop:
-        p = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M1,
+        tfc = mt5.TIMEFRAME_M1 if TF == "M1" else mt5.TIMEFRAME_M5
+        p = mt5.copy_rates_range(symbol, tfc,
                                  cursor - timedelta(days=30), cursor)
         if p is not None and len(p):
             chunks.append(p)
@@ -106,7 +114,7 @@ def find_trigger(r, i0, ref, thresh):
     """First minute within WATCH where price is `thresh` away from ref.
     Entry is the NEXT bar's open -- you cannot fill on the bar that is
     still forming when the level is touched."""
-    for j in range(i0, min(i0 + WATCH, len(r) - 2)):
+    for j in range(i0, min(i0 + WATCH // STEP, len(r) - 2)):
         if r["high"][j] - ref >= thresh:
             return j + 1, 1
         if ref - r["low"][j] >= thresh:
@@ -115,17 +123,20 @@ def find_trigger(r, i0, ref, thresh):
 
 
 def ride(r, e, s, spread):
-    """Hold while it runs; out at the first minute that closes against.
-    Returns (net points, minutes held, best excursion seen)."""
+    """Hold while it runs; out once PATIENCE bars have closed against it,
+    so one pullback bar does not end the trade. Returns (net points,
+    minutes held, best excursion seen)."""
     o, c = r["open"], r["close"]
-    entry, mfe = o[e], 0.0
-    for j in range(e, min(e + CAP, len(r))):
+    entry, mfe, opp = o[e], 0.0, 0
+    for j in range(e, min(e + CAP // STEP, len(r))):
         best = (r["high"][j] if s > 0 else r["low"][j])
         mfe = max(mfe, (best - entry) * s)
-        if j > e and (c[j] - o[j]) * s < 0:
-            return (c[j] - entry) * s - spread, j - e + 1, mfe
-    j = min(e + CAP, len(r)) - 1
-    return (c[j] - entry) * s - spread, j - e + 1, mfe
+        if j > e:
+            opp = opp + 1 if (c[j] - o[j]) * s < 0 else 0
+            if opp >= PATIENCE:
+                return (c[j] - entry) * s - spread, (j - e + 1) * STEP, mfe
+    j = min(e + CAP // STEP, len(r)) - 1
+    return (c[j] - entry) * s - spread, (j - e + 1) * STEP, mfe
 
 
 def main():
@@ -134,8 +145,8 @@ def main():
     info = mt5.symbol_info(SYMBOL)
     if info is None:
         print(f"[ERROR] {SYMBOL} not found"); return 2
-    r = load_m1(SYMBOL, MONTHS)
-    if r is None or len(r) < 50000:
+    r = load_bars(SYMBOL, MONTHS)
+    if r is None or len(r) < 15000:
         print(f"[ERROR] not enough M1 data ({mt5.last_error()})"); return 2
 
     atr, spread = h1_atr_on(r), info.spread * info.point
@@ -150,7 +161,7 @@ def main():
 
     tod = r["time"] % 86400
     days = [int(i) for i in np.where(tod == sh * 3600 + sm * 60)[0]
-            if i > 2 and i < len(r) - CAP - WATCH - 2 and np.isfinite(atr[i]) and atr[i] > 0]
+            if i > 2 and i < len(r) - (CAP + WATCH) // STEP - 2 and np.isfinite(atr[i]) and atr[i] > 0]
     half = len(days) // 2
 
     print("=" * 96)
@@ -158,7 +169,8 @@ def main():
     print(f" {datetime.fromtimestamp(r[0]['time']):%Y-%m-%d} -> "
           f"{datetime.fromtimestamp(r[-1]['time']):%Y-%m-%d}   {len(days)} days   "
           f"spread {spread:.2f}   1.0 pt on {LOT} lot = {per_pt:.2f} {info.currency_profit}")
-    print(f" trigger must fire within {WATCH} min of 19:30; max {CAP} min in trade")
+    print(f" {TF} bars; trigger must fire within {WATCH} min of 19:30; "
+          f"max {CAP} min in trade; exit after {PATIENCE} bars against")
     print("=" * 96)
     print(f"\n{'trig':>6}{'half':>7}{'fired':>8}{'n':>5}{'held':>7}{'hit':>7}"
           f"{'avg pt':>8}{'total$':>9}{'maxDD$':>9}{'MFE med':>9}{'MFE avg':>9}"
