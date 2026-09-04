@@ -134,6 +134,7 @@ from btc_donchian_breakout_strategy import BTCH1DonchianBreakout
 from amd_sweep_tpo_strategy import AMDSweepTPO
 from ict_tools_strategies import ToolAMD, ToolLQSweep, ToolTPOProfile
 from gold_momentum_rsi_strategy import GoldMomentumRSI
+from momentum_scalp_strategy import MomentumScalp
 # NOTE: GoldManualExitBot is imported lazily inside main() (not here at module
 # top-level) because gold_manual_exit_bot.py itself does
 # `from forex_live_bot_gold_cwider import GoldCWiderBot` -- importing it here
@@ -483,9 +484,12 @@ class GoldCWiderBot:
                  heartbeat_file: Optional[str] = None,
                  block_hours: Optional[str] = None,
                  xasset_short_gate: Optional[str] = None,
+                 fixed_lot: Optional[float] = None,
                  history_bars: Optional[int] = None):
         self.cfg = cfg
         self.max_positions = max(1, int(max_positions))
+        # constant lot size instead of risk-based sizing; see _open_position
+        self.fixed_lot = float(fixed_lot) if fixed_lot else None
 
         # ── Entry gates (validated 2026-08-07 — see the gate_* functions'
         #    docblock above for the numbers). Parse early so a malformed flag
@@ -1130,8 +1134,22 @@ class GoldCWiderBot:
             return
 
         equity    = self.connector.get_equity()
-        risk_cash = equity * self.cfg.risk_per_trade_pct / 100.0
-        lot = max(self.cfg.min_lot, round(risk_cash / (sl_pips * pip_value), 2))
+        # [2026-09-04] --fixed-lot: trade a constant size instead of sizing
+        # from risk%. Added to copy the operator's own manual trades, which
+        # were a fixed 0.01-0.05 lot -- on a small account, risk-based
+        # sizing rounds to 0.00 and the bot silently never trades (measured:
+        # 0.3% of a 77 USD equity against a 2.5xATR gold stop = 0.00004 lot).
+        #
+        # The risk CAP below still applies. A fixed lot is a fixed size, not
+        # a licence to exceed --max-risk: if the constant lot implies more
+        # risk than the cap, the trade is skipped exactly as before. That
+        # ordering matters -- it is what stops "copy my lot size" from
+        # quietly becoming "ignore the risk limit".
+        if getattr(self, "fixed_lot", None):
+            lot = round(float(self.fixed_lot), 2)
+        else:
+            risk_cash = equity * self.cfg.risk_per_trade_pct / 100.0
+            lot = max(self.cfg.min_lot, round(risk_cash / (sl_pips * pip_value), 2))
         lot = min(lot, self.cfg.max_lot)
 
         actual_risk_pct = (sl_pips * pip_value * lot) / equity * 100.0 if equity > 0 else float("inf")
@@ -1774,7 +1792,15 @@ def main():
                          "Do not enable this without rerunning "
                          "_revalidate_fixed_engine.py-style validation first. See "
                          "FreshTrendFilterMixin in forex_hybrid_strategy.py.")
-    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd", "tool_amd", "tool_lqsweep", "tool_tpo", "gold_mom_rsi"],
+    ap.add_argument("--fixed-lot", type=float, default=None,
+                    help="Trade a constant lot size instead of risk-based "
+                         "sizing. The operator's own profitable manual trades "
+                         "were a fixed 0.01-0.05 lot, so copying them means "
+                         "copying that too. Still passes the risk cap check, "
+                         "which will SKIP the trade if the fixed lot implies "
+                         "more than --max-risk -- a fixed lot does not mean "
+                         "an unbounded one.")
+    ap.add_argument("--strategy", type=str, default="auto", choices=["auto", "donchian", "amd", "tool_amd", "tool_lqsweep", "tool_tpo", "gold_mom_rsi", "mom_scalp"],
                     help="'auto' (default): pick strategy_cls from --timeframe/--regime-filter/"
                          "--fresh-maturity as usual. 'donchian': force "
                          "GoldDailyDonchianBreakout regardless of --timeframe (works on any "
@@ -1977,6 +2003,17 @@ def main():
                   file=sys.stderr)
         strategy_cls = GoldMomentumRSI
 
+    if args.strategy == "mom_scalp":
+        # Copies the operator's own manual entries -- see
+        # momentum_scalp_strategy.py for where the rule came from and,
+        # more importantly, for what has NOT been established about it
+        # (it has never been backtested; n=29).
+        if args.regime_filter or args.fresh_maturity > 0:
+            print("[WARN] --strategy mom_scalp ignores --regime-filter/"
+                  "--fresh-maturity/--adx-min -- proceeding without them.",
+                  file=sys.stderr)
+        strategy_cls = MomentumScalp
+
     if args.risk > 0:
         RISK_PER_TRADE_PCT = args.risk
 
@@ -2065,6 +2102,7 @@ def main():
             heartbeat_file=HEARTBEAT_FILE,
             block_hours=args.block_hours,
             xasset_short_gate=args.xasset_short_gate,
+            fixed_lot=args.fixed_lot,
             history_bars=HISTORY_BARS).run()
 
 
