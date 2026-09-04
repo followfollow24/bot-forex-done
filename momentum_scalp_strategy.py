@@ -4,8 +4,8 @@
 momentum_scalp_strategy.py -- LIVE strategy class that reproduces the
 operator's own discretionary scalp (variant tag: manual_copy).
 
->>> VALIDATION STATUS: NOT BACKTESTED.  Derived from 29 live trades and  <<<
->>> deployed by explicit user decision. See "WHAT IS AND IS NOT KNOWN".  <<<
+>>> VALIDATION STATUS: BACKTESTED 2026-09-04 -- NO EDGE FOUND.          <<<
+>>> Do not run this on money. See "THE TEST THAT WAS PENDING" below.    <<<
 
 WHERE THIS CAME FROM
 ----------------------------------------------------------------------
@@ -55,11 +55,54 @@ NOT KNOWN -- and this is the part that matters:
     scalp usually dies.
   - 33% of the observed profit came from a single trade (+71.11).
 
-_copytrade_backtest.py exists to answer the first and third of those on
-years of bars. At the time this was written it could not run: the MT5
-terminal had no M5 history cached for XAUAUDm and would not download it
-on API request alone. THIS CLASS HAS THEREFORE NEVER BEEN TESTED ON
-ANYTHING EXCEPT THE 29 TRADES THAT INSPIRED IT.
+THE TEST THAT WAS PENDING -- IT HAS NOW RUN
+----------------------------------------------------------------------
+[2026-09-04] The history problem above was my own error, not a broker
+limitation: copy_rates_range was being asked for >100,000 bars, which
+MT5 refuses with "Terminal: Invalid params" and an EMPTY array -- and I
+read that empty array as "no history". Chunked, the bars were there all
+along.
+
+Two things were then measured.
+
+_entry_fingerprint.py compared the 29 entry bars against 4,000 bars the
+operator passed over. Their rule is real and specific:
+
+    momentum at entry   1.418 xATR   vs   0.879   d=0.76  p<0.001
+    extension (EMA20)   1.675 xATR   vs   1.059   d=0.74  p<0.001
+    direction matched the recent move on 25/29 = 86%
+
+which also showed MIN_MOVE_ATR = 0.15 below is roughly 10x too low --
+it fires on nearly every bar, which is not what they do.
+
+_copytrade_calibrated.py then swept the threshold from 0.15 to 2.00,
+with and without the extension filter, on 101,415 M5 XAUAUDm bars
+(2025-04-01..2026-09-04), train/TEST split, each cell controlled against
+20 random-direction runs on the SAME filtered bars:
+
+    ALL 32 CELLS NEGATIVE. Largest |z| was 1.94 and it was NEGATIVE
+    (signal worse than the coin flip). Nothing reached 2 sigma and no
+    cell held its sign across the two halves.
+    At the operator's own thresholds (mom>=1.4, ext>=1.6):
+        train  n=91   WR 41.8%   EV -0.235 R   z -0.48
+        TEST   n=123  WR 43.1%   EV -0.161 R   z +0.27
+
+WHY, precisely: break-even WR at 0.51/0.42 is 45.2% before costs, and
+the measured WR is 42-45% -- a coin flip. Spread then takes
+1.14 / (0.42 * 23.06) = 0.118 R per trade. The random control loses the
+same amount, and that is the whole finding: the loss is COST, not a bad
+direction call. Widening the stop to 2.5 xATR would cut the cost to
+0.020 R, but there is no edge underneath for the cheaper geometry to
+protect.
+
+The +216 USD over 29 trades is consistent with luck -- 58% on n=29 at
+this R:R happens about one time in eight -- and 33% of it was a single
++71.11 trade. Nothing separated their winning entries from their losing
+ones (every feature p > 0.12).
+
+THIS CLASS IS KEPT AS THE RECORD OF A TESTED AND REJECTED IDEA. It is
+still registered in --strategy so the result stays reproducible, and it
+must not be given an account.
 
 CALIBRATION -- read before setting --sl-atr / --tp-atr
 ----------------------------------------------------------------------
@@ -109,11 +152,13 @@ class MomentumScalp:
 
     # --- entry ---
     LOOKBACK = 3          # bars of net movement that define "it is moving"
-    MIN_MOVE_ATR = 0.15   # ignore drift below this: without it, every bar
-                          # is a signal and the bot trades pure noise into
-                          # the spread. 0.15 is a starting guess, NOT a
-                          # measured value -- it is the first thing to
-                          # sweep once a backtest can run.
+    MIN_MOVE_ATR = 0.15   # a guess, and measured wrong: the operator's own
+                          # entries sit at 1.418 xATR, ~10x higher, so this
+                          # fires on nearly every bar. Left at the tested
+                          # value on purpose -- raising it does not help
+                          # (the sweep to 2.00 is negative at every step),
+                          # and changing it now would only make the
+                          # rejected result harder to reproduce.
 
     # --- exits: overridden from the CLI (--sl-atr / --tp-atr) ---
     # Defaults are the operator's measured H1 multipliers, so an
