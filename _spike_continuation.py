@@ -160,7 +160,8 @@ def main():
     off = int(round((tick.time - datetime.now(timezone.utc).timestamp()) / 3600.0)) if tick else 0
 
     def thai(ts):
-        return datetime.utcfromtimestamp(int(ts) - off * 3600 + THAI * 3600)
+        return datetime.fromtimestamp(int(ts) - off * 3600 + THAI * 3600,
+                                      timezone.utc)
 
     print("=" * 86)
     print(f" SPIKE CONTINUATION -- {SYMBOL}   {len(r):,} M1 bars   "
