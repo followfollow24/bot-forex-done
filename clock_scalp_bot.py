@@ -63,10 +63,36 @@ Usage on the VPS
                          purpose, blowing the account is acceptable.
                          The cost is still PRICED AND LOGGED every time --
                          no limit is not the same as no visibility.
-    --patience 2         M5 bars closing against you before exiting
+    --exit-mode m15close  how to leave. m15close: out when the M15 candle
+                          that contains the entry closes -- 19:45:00 on a
+                          19:30 entry. Deterministic: no judgement about
+                          whether the move "has stopped".
+                          stall:N  out after N seconds with no new
+                          favourable extreme.  fixed:N  out after N
+                          minutes.  bars  the old 2-M5-closes-against.
+    --patience 2         M5 bars closing against you, for --exit-mode bars
     --min-move-spread 3  skip the day unless the move inside the window is
                          at least this many times the spread. Set 0 to take
                          every day, as originally specified.
+
+WHAT THE EXIT SWEEP FOUND (_exit_curve.py, 106 days, tick resolution)
+----------------------------------------------------------------------
+Every holding time from 1 to 120 minutes was priced, plus nine stall
+rules. Two things came out of it and both are worth carrying here:
+
+  - THERE IS NO BEST EXIT TIME. The curve never turns over inside two
+    hours, and the halves peak 30 minutes apart (train 120 min, TEST 90
+    min), so the peak is noise rather than an optimum.
+  - FAST EXITS ARE CONSISTENTLY THE WORST. Every stall under two minutes
+    loses in both halves, winning only 25-31% of the time. Waiting is
+    not what costs money here; leaving early is.
+
+The operator then chose the M15 candle close, which is the cleanest rule
+anyone has proposed for this: it needs no judgement about whether the
+move has ended, and it lands at 19:45:00 every day. Measured over the
+same 106 days it returns +0.88 points a trade, 43% winners, +337 AUD at
+0.05 lot -- train -1.29 and TEST +3.06, so it is NOT established, only
+the best-defined of the candidates.
 
 WHY THE GATE EXISTS (added after replaying 4 Sep tick by tick)
 ----------------------------------------------------------------------
@@ -265,10 +291,59 @@ def send_order(sym: str, direction: int, lot: float, sl_price: float,
     return res
 
 
+def m15_close_after(ts_srv: float) -> float:
+    """Server timestamp of the close of the M15 candle containing ts_srv."""
+    return (int(ts_srv) // 900 + 1) * 900
+
+
 def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
-                live: bool, entry_px: float):
-    """Hold while it runs. Leave once `patience` M5 bars have closed
-    against the position -- one pullback bar must not end the trade."""
+                live: bool, entry_px: float, mode: str = "m15close"):
+    """Leave according to --exit-mode. m15close is deterministic and needs
+    no view on whether the move has ended; the others are judgement rules
+    and the sweep found none of them better."""
+    kind, _, arg = mode.partition(":")
+    if kind in ("m15close", "fixed", "stall"):
+        tk = mt5.symbol_info_tick(sym)
+        now_srv = float(tk.time) if tk else time.time()
+        if kind == "m15close":
+            target = m15_close_after(now_srv)
+            log(f"  exit at the M15 close, "
+                f"{datetime.fromtimestamp(target, timezone.utc):%H:%M:%S} server "
+                f"({(target - now_srv)/60.0:.1f} min away)")
+        elif kind == "fixed":
+            target = now_srv + float(arg or 15) * 60
+            log(f"  exit after {arg or 15} minutes")
+        else:
+            target = None
+            stall_s = float(arg or 600)
+            best, best_t = entry_px, now_srv
+            log(f"  exit after {stall_s:.0f}s with no new extreme")
+        while True:
+            if live and not mt5.positions_get(symbol=sym, magic=MAGIC):
+                log("  position closed elsewhere (stop-loss, or by hand) -- done")
+                return
+            tk = mt5.symbol_info_tick(sym)
+            if tk is None:
+                time.sleep(1); continue
+            now_srv = float(tk.time)
+            px = tk.bid if direction > 0 else tk.ask
+            if target is not None:
+                if now_srv >= target:
+                    close_position(sym, direction, live, entry_px)
+                    return
+            else:
+                if (px > best) if direction > 0 else (px < best):
+                    best, best_t = px, now_srv
+                elif now_srv - best_t >= stall_s:
+                    close_position(sym, direction, live, entry_px)
+                    return
+            if now_srv - (target or best_t) > max_minutes * 60:
+                break
+            time.sleep(1)
+        log(f"  {max_minutes} min cap reached -- closing")
+        close_position(sym, direction, live, entry_px)
+        return
+
     against = 0
     seen_bar = None
     deadline = time.time() + max_minutes * 60
@@ -430,7 +505,8 @@ def run_once(a, sym: str) -> None:
     telegram(f"clock_scalp {'LIVE' if a.live else 'DRY'}: "
              f"{'BUY' if d > 0 else 'SELL'} {a.lot} {sym} @ {entry_px:.3f} "
              f"SL {sl_px:.3f} (decided +{waited:.2f}s, moved {move:.3f})")
-    manage_exit(sym, d, a.patience, a.max_minutes, a.live, entry_px)
+    manage_exit(sym, d, a.patience, a.max_minutes, a.live, entry_px,
+                a.exit_mode)
 
 
 def main() -> int:
@@ -449,6 +525,8 @@ def main() -> int:
                    help="refuse only if the order needs more than this "
                         "percent of free margin, i.e. it would be rejected")
     p.add_argument("--patience", type=int, default=2)
+    p.add_argument("--exit-mode", default="m15close",
+                   help="m15close | fixed:MIN | stall:SEC | bars")
     p.add_argument("--min-move-spread", type=float, default=3.0,
                    help="skip the day unless the move is this many times the "
                         "spread; 0 takes every day")
@@ -477,7 +555,7 @@ def main() -> int:
     log("=" * 68)
     log(f"clock_scalp_bot  {sym}  lot {a.lot}  decide +{a.decide_after}s  "
         f"SL {a.sl_atr}xATR  patience {a.patience}  "
-        f"gate {a.min_move_spread}x spread  "
+        f"gate {a.min_move_spread}x spread  exit {a.exit_mode}  "
         f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:

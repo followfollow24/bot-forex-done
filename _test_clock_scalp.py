@@ -62,6 +62,10 @@ ok('pts_to_bust < pts_to_stop' in src,
    "warns when the broker's stop-out comes before the stop-loss")
 ok('p.add_argument("--lot", type=float, default=0.05)' in src,
    "default lot is the 0.05 the operator asked for")
+ok('p.add_argument("--exit-mode", default="m15close"' in src,
+   "default exit is the M15 candle close the operator chose")
+ok('return (int(ts_srv) // 900 + 1) * 900' in src,
+   "M15 close is the next 900-second boundary, computed from server time")
 ok(src.index('loss = mt5.order_calc_profit') < src.index('res = send_order('),
    "risk is priced and logged BEFORE the order is sent")
 ok('p.add_argument("--sl-atr", type=float, default=3.0)' in src,
