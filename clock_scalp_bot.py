@@ -103,9 +103,16 @@ Usage on the VPS
                           favourable extreme.  fixed:N  out after N
                           minutes.  bars  the old 2-M5-closes-against.
     --patience 2         M5 bars closing against you, for --exit-mode bars
-    --min-move-spread 3  skip the day unless the move inside the window is
+    --min-move-spread 2  skip the day unless the move inside the window is
                          at least this many times the spread. Set 0 to take
                          every day, as originally specified.
+    --gate-money 10      set the gate in ACCOUNT CURRENCY instead: the move
+                         must be worth this much at the configured lot.
+                         Overrides --min-move-spread when given. Priced
+                         through the broker's own calculator at the bell,
+                         because the points that equal 10 USD drift with
+                         AUD/USD -- a fixed point count would quietly mean
+                         a different amount of money every week.
 
 WHAT THE EXIT SWEEP FOUND (_exit_curve.py, 106 days, tick resolution)
 ----------------------------------------------------------------------
@@ -539,10 +546,19 @@ def selftest(a, syms: list) -> int:
             log(f"  [FAIL] no quote/ATR for {sym}"); bad += 1; continue
         spread = si.spread * si.point
         gate = a.min_move_spread * spread
+        gate_note = f"{a.min_move_spread}x spread"
+        if a.gate_money > 0 and lot:
+            pp = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot,
+                                       tk.ask, tk.ask + 1.0)
+            if pp and float(pp) > 0:
+                gate = a.gate_money / float(pp)
+                gate_note = f"{a.gate_money:.2f} {acct.currency} at {lot} lot"
+            else:
+                log("  [FAIL] cannot price the money gate"); bad += 1
         log(f"  price {tk.bid:,.3f}/{tk.ask:,.3f}  spread {spread:.3f}  "
             f"ATR(H1) {atr:,.3f}")
-        log(f"  gate {a.min_move_spread}x spread = {gate:.3f}   "
-            f"stop {a.sl_atr}xATR = {a.sl_atr*atr:,.3f}")
+        log(f"  gate {gate:.3f} pts ({gate_note} = {gate/spread:.2f}x spread)"
+            f"   stop {a.sl_atr}xATR = {a.sl_atr*atr:,.3f}")
         if not lot:
             log(f"  [FAIL] no lot configured for {sym}"); bad += 1; continue
         if lot < si.volume_min or lot > si.volume_max:
@@ -590,6 +606,8 @@ def run_once(a, syms: list) -> None:
         log(f"kill switch {KILL_FILE} present -- skipping today")
         return
 
+    _acct = mt5.account_info()
+    acct_ccy = _acct.currency if _acct else "?"
     off = broker_offset_hours(syms[0])
     target = next_target(off)
     log(f"broker clock = UTC{off:+d}; next 19:30:00 Thai is "
@@ -609,11 +627,23 @@ def run_once(a, syms: list) -> None:
             log(f"  [{sym}] no ATR/info -- sitting this one out")
             continue
         spread = si.spread * si.point
-        ctx[sym] = {"atr": atr, "spread": spread,
-                    "gate": a.min_move_spread * spread}
+        lot = a.lots.get(sym, 0.0)
+        gate = a.min_move_spread * spread
+        gate_note = f"{a.min_move_spread}x spread"
+        if a.gate_money > 0 and lot > 0:
+            tk = mt5.symbol_info_tick(sym)
+            per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot,
+                                           tk.ask, tk.ask + 1.0) if tk else None
+            if per_pt and float(per_pt) > 0:
+                gate = a.gate_money / float(per_pt)
+                gate_note = (f"{a.gate_money:.2f} {acct_ccy} at {lot} lot")
+            else:
+                log(f"  [{sym}] cannot price a money gate -- falling back to "
+                    f"{a.min_move_spread}x spread")
+        ctx[sym] = {"atr": atr, "spread": spread, "gate": gate}
         log(f"armed [{sym}] ATR(H1) {atr:.3f}  spread {spread:.3f}  "
-            f"gate {ctx[sym]['gate']:.3f}  stop {a.sl_atr}xATR = "
-            f"{a.sl_atr*atr:.3f}")
+            f"gate {gate:.3f} pts ({gate_note} = {gate/spread:.2f}x spread)  "
+            f"stop {a.sl_atr}xATR = {a.sl_atr*atr:.3f}")
     if not ctx:
         return
 
@@ -715,7 +745,10 @@ def main() -> int:
     p.add_argument("--patience", type=int, default=2)
     p.add_argument("--exit-mode", default="m15close",
                    help="m15close | fixed:MIN | stall:SEC | bars")
-    p.add_argument("--min-move-spread", type=float, default=3.0,
+    p.add_argument("--gate-money", type=float, default=0.0,
+                   help="gate expressed in account currency at the "
+                        "configured lot; overrides --min-move-spread")
+    p.add_argument("--min-move-spread", type=float, default=2.0,
                    help="skip the day unless the move is this many times the "
                         "spread; 0 takes every day")
     p.add_argument("--max-minutes", type=int, default=120)
@@ -756,11 +789,13 @@ def main() -> int:
         log(f"no lot given for {missing} -- add it to --lot"); return 2
 
     acct = mt5.account_info()
+    ccy = acct.currency if acct else ""
+    gate_desc = (f"{a.gate_money:.2f} {ccy}/trade" if a.gate_money > 0
+                 else f"{a.min_move_spread}x spread")
     log("=" * 68)
     log(f"clock_scalp_bot  {', '.join(f'{k} {v}' for k, v in a.lots.items())}"
         f"  decide +{a.decide_after}s  "
-        f"SL {a.sl_atr}xATR  patience {a.patience}  "
-        f"gate {a.min_move_spread}x spread  exit {a.exit_mode}  "
+        f"SL {a.sl_atr}xATR  gate {gate_desc}  exit {a.exit_mode}  "
         f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:

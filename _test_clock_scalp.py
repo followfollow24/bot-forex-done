@@ -103,6 +103,12 @@ ok(src.index('if a.selftest:') < src.index('run_once(a, syms)'),
 ok('term.trade_allowed' in src,
    "pre-flight checks AutoTrading rather than assuming it")
 
+ok('p.add_argument("--gate-money"' in src
+   and 'gate = a.gate_money / float(per_pt)' in src,
+   "the gate can be set in account currency, priced by the broker")
+ok('cannot price a money gate -- falling back' in src,
+   "a money gate that cannot be priced falls back rather than trading blind")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

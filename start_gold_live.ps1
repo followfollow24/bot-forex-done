@@ -14,8 +14,12 @@
 #                    a top-1% event rather than a pattern.
 #   0.05 lot      -- their choice
 #   SL 3xATR      -- their choice; ~69 points, ~249 AUD at 0.05 lot
-#   decide +3s    -- direction read 3 seconds after 19:30:00
-#   gate 3x spread-- skip the day unless the move clears 3.39 points
+#   decide +1s    -- earliest an entry may fire; watching runs from
+#                    19:30:00.000 and continues until the gate clears or
+#                    --max-wait expires
+#   gate 10 USD   -- the move must be worth 10 in account currency at
+#                    0.05 lot, about 2.8 points, priced by the broker at
+#                    the bell so it stays 10 USD as AUD/USD drifts
 #   exit m15close -- out when the M15 candle closes, 19:45:00
 #   risk cap OFF  -- their explicit instruction
 #
@@ -35,8 +39,9 @@ $common = @(
     "--symbols", "XAUAUDm",
     "--lot", "0.05",
     "--sl-atr", "3",
-    "--decide-after", "3",
-    "--min-move-spread", "3",
+    "--decide-after", "1",
+    "--max-wait", "900",
+    "--gate-money", "10",
     "--exit-mode", "m15close"
 )
 
