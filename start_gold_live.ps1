@@ -23,9 +23,27 @@
 #   decide +1s    -- earliest an entry may fire; watching runs from
 #                    19:30:00.000 and continues until the gate clears or
 #                    --max-wait expires
-#   gate 10 USD   -- the move must be worth 10 in account currency at
-#                    0.05 lot, about 2.8 points, priced by the broker at
-#                    the bell so it stays 10 USD as AUD/USD drifts
+#   gate 50 USD   -- the move must be worth 50 in account currency at
+#                    0.05 lot, about 13.9 points, priced by the broker at
+#                    the bell so it stays 50 USD as AUD/USD drifts
+#   pyramid       -- one more 0.05 lot each time price runs a further 3
+#                    points in favour, up to 2 extra (3 positions max),
+#                    and only while the trade is winning
+#
+# WHAT THIS CONFIGURATION WAS MEASURED TO DO, over 63 sessions at this
+# gate (_pyramid_test.py XAUAUDm 400 50 0.05):
+#
+#   +23.12 USD average per session, +1456 total, 30% winners
+#   worst single session -448 USD
+#   THIRTY-ONE OF SIXTY-THREE SESSIONS (49%) reached a moment that cost
+#   more than the whole 51.46 USD account. At 0.05 lot the account is
+#   gone after 14.3 points against on one position, 7.1 on two, 4.8 on
+#   three -- so the broker closes it long before the 3xATR stop is
+#   touched, and every later session in that total never happens.
+#
+# The operator was shown that figure and chose this configuration. It is
+# recorded here so the number travels with the command rather than
+# living in a chat log.
 #   exit m15close -- out when the M15 candle closes, 19:45:00
 #   risk cap OFF  -- their explicit instruction
 #
@@ -47,7 +65,9 @@ $common = @(
     "--sl-atr", "3",
     "--decide-after", "1",
     "--max-wait", "900",
-    "--gate-money", "10",
+    "--gate-money", "50",
+    "--add-step-pts", "3",
+    "--max-adds", "2",
     "--exit-mode", "m15close"
 )
 
