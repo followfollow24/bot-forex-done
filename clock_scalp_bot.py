@@ -95,6 +95,17 @@ Usage on the VPS
                          purpose, blowing the account is acceptable.
                          The cost is still PRICED AND LOGGED every time --
                          no limit is not the same as no visibility.
+    --add-step-pts 0     add another lot each time price runs this many
+                         points further in your favour, while the trade is
+                         winning. 0 disables it. Measured at 0.01 lot with
+                         a 13.9-point gate over 63 sessions: one position
+                         +0.94/session and 0 blow-ups; three fired at once
+                         +2.81 and 5 blow-ups; adding every 3 points up to
+                         three +4.62 and 1 blow-up. Adding only while
+                         right beats firing together on BOTH counts,
+                         because a losing day stays a single lot.
+    --max-adds 2         most extra positions a session may take.
+
     --exit-mode m15close  how to leave. m15close: out when the M15 candle
                           that contains the entry closes -- 19:45:00 on a
                           19:30 entry. Deterministic: no judgement about
@@ -399,8 +410,41 @@ def m15_close_after(ts_srv: float) -> float:
     return (int(ts_srv) // 900 + 1) * 900
 
 
+def try_add(sym, direction, lot, sl_price, live, a, filled):
+    """Place one more lot in the same direction, while winning.
+
+    Deliberately NOT routed through the entry path: that one refuses to
+    open when a position already exists, which is exactly the protection
+    that must not apply here. Every other guard still does -- margin is
+    checked, the count is capped, and a rejection stops the pyramid for
+    the session rather than being retried into a hole.
+    """
+    if a.live:
+        acct = mt5.account_info()
+        otype = mt5.ORDER_TYPE_BUY if direction > 0 else mt5.ORDER_TYPE_SELL
+        tk = mt5.symbol_info_tick(sym)
+        if acct is None or tk is None:
+            log("  add skipped: no account/quote")
+            return False
+        need = mt5.order_calc_margin(otype, sym, lot,
+                                     tk.ask if direction > 0 else tk.bid)
+        if need is None or need > acct.margin_free * (a.max_margin_pct / 100.0):
+            log(f"  add skipped: margin {need} vs free {acct.margin_free:.2f}")
+            return False
+    log(f"  ADD #{filled}: price ran {a.add_step_pts:.2f} pts further -- "
+        f"adding {lot} lot")
+    res = send_order(sym, direction, lot, sl_price, live)
+    if res is None and live:
+        log("  add REJECTED -- no more adds this session")
+        return False
+    telegram(f"clock_scalp [{sym}]: ADD #{filled} {lot} lot "
+             f"({'BUY' if direction > 0 else 'SELL'})")
+    return True
+
+
 def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
-                live: bool, entry_px: float, mode: str = "m15close"):
+                live: bool, entry_px: float, mode: str = "m15close",
+                a=None, lot: float = 0.0, sl_price: float = 0.0):
     """Leave according to --exit-mode. m15close is deterministic and needs
     no view on whether the move has ended; the others are judgement rules
     and the sweep found none of them better."""
@@ -425,6 +469,11 @@ def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
         # the cap on it would spin here forever holding an open position,
         # so the backstop is wall-clock.
         hard_deadline = time.time() + max_minutes * 60
+        adds_done = 0
+        step = float(getattr(a, "add_step_pts", 0.0) or 0.0) if a else 0.0
+        max_adds = int(getattr(a, "max_adds", 0) or 0) if a else 0
+        if step > 0 and max_adds > 0:
+            log(f"  pyramid armed: +{step:.2f} pts per add, up to {max_adds}")
         while True:
             if time.time() > hard_deadline:
                 log(f"  {max_minutes} min wall-clock cap reached -- closing")
@@ -441,6 +490,16 @@ def manage_exit(sym: str, direction: int, patience: int, max_minutes: int,
                 time.sleep(1); continue
             now_srv = float(tk.time)
             px = tk.bid if direction > 0 else tk.ask
+            # Pyramid: only while the trade is winning, and only when it
+            # has run a further full step since the last fill.
+            if step > 0 and adds_done < max_adds:
+                run = (px - entry_px) * direction
+                if run >= step * (adds_done + 1):
+                    if try_add(sym, direction, lot, sl_price, live, a,
+                               adds_done + 1):
+                        adds_done += 1
+                    else:
+                        max_adds = adds_done      # stop trying this session
             if target is not None:
                 if now_srv >= target:
                     close_position(sym, direction, live, entry_px)
@@ -930,6 +989,11 @@ def main() -> int:
                    help="refuse only if the order needs more than this "
                         "percent of free margin, i.e. it would be rejected")
     p.add_argument("--patience", type=int, default=2)
+    p.add_argument("--add-step-pts", type=float, default=0.0,
+                   help="add a lot each time price runs this far further "
+                        "in your favour; 0 disables pyramiding")
+    p.add_argument("--max-adds", type=int, default=2,
+                   help="most EXTRA positions per session")
     p.add_argument("--exit-mode", default="m15close",
                    help="m15close | fixed:MIN | stall:SEC | bars")
     p.add_argument("--gate-money", type=float, default=0.0,
@@ -989,6 +1053,7 @@ def main() -> int:
     log(f"clock_scalp_bot  {', '.join(f'{k} {v}' for k, v in a.lots.items())}"
         f"  decide +{a.decide_after}s  "
         f"SL {a.sl_atr}xATR  gate {gate_desc}  exit {a.exit_mode}  "
+        f"pyramid {('+' + str(a.add_step_pts) + 'pts x' + str(a.max_adds)) if a.add_step_pts > 0 else 'OFF'}  "
         f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:

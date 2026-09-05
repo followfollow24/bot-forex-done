@@ -82,8 +82,9 @@ ok('p.add_argument("--exit-mode", default="m15close"' in src,
    "default exit is the M15 candle close the operator chose")
 ok('return (int(ts_srv) // 900 + 1) * 900' in src,
    "M15 close is the next 900-second boundary, computed from server time")
-ok(src.index('loss = mt5.order_calc_profit') < src.index('res = send_order('),
-   "risk is priced and logged BEFORE the order is sent")
+_ro = src[src.index("def run_once(a, syms: list)"):src.index("def main() -> int:")]
+ok(_ro.index('loss = mt5.order_calc_profit') < _ro.index('res = send_order('),
+   "inside run_once the risk is priced and logged BEFORE the order is sent")
 ok(src.count('log(f"  [{sym}] stop {a.sl_atr}xATR') == 1,
    "the money cost is logged per symbol on every trade")
 ok('p.add_argument("--sl-atr", type=float, default=3.0)' in src,
@@ -146,10 +147,19 @@ ok('run_once(a, syms)' in _main
    "inside main() the catch wraps run_once, not something outside the loop")
 ok('ALREADY HOLDING' in src and 'not opening another' in src,
    "it refuses to open a second position on a symbol it already holds")
-ok(src.index('existing = positions_of(sym)') < src.index('res = send_order('),
-   "that check runs BEFORE the order is sent")
+ok(_ro.index('existing = positions_of(sym)') < _ro.index('res = send_order('),
+   "that check runs BEFORE the entry order is sent")
 ok('deadline = target.timestamp() + a.max_wait + 30' in src,
    "the watch deadline is measured from the bell, not from arming time")
+
+ok('p.add_argument("--add-step-pts", type=float, default=0.0' in src,
+   "pyramiding is OFF by default -- existing behaviour is unchanged")
+ok('if step > 0 and adds_done < max_adds:' in src
+   and 'run = (px - entry_px) * direction' in src
+   and 'if run >= step * (adds_done + 1):' in src,
+   "adds fire only while the trade is in profit, one per full step")
+ok('max_adds = adds_done      # stop trying this session' in src,
+   "a refused add stops the pyramid instead of retrying into a hole")
 
 print()
 if fails:
