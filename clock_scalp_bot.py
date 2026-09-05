@@ -265,23 +265,44 @@ def atr_h1(sym: str, n: int = 14) -> float | None:
     return sum(trs[-n:]) / n
 
 
-def broker_offset_hours(sym: str) -> int:
-    """Server clock minus UTC, from a live tick. Assuming this is zero is
-    how a session study ends up studying the wrong session."""
-    t = mt5.symbol_info_tick(sym)
-    if t is None:
+def broker_offset_hours(syms) -> int:
+    """Server clock minus UTC, for DISPLAY ONLY.
+
+    Derived from the FRESHEST tick across every symbol, because a symbol
+    whose market is shut carries a stale timestamp: on Saturday
+    2026-09-05 the gold tick was still Friday's close and this returned
+    -9 instead of 0. Nothing functional may depend on this value -- see
+    next_bell_utc.
+    """
+    if isinstance(syms, str):
+        syms = [syms]
+    newest = None
+    for sym in syms:
+        t = mt5.symbol_info_tick(sym)
+        if t is not None and (newest is None or t.time > newest):
+            newest = float(t.time)
+    if newest is None:
         return 0
-    return int(round((t.time - datetime.now(timezone.utc).timestamp()) / 3600.0))
+    off = int(round((newest - datetime.now(timezone.utc).timestamp()) / 3600.0))
+    return off if -12 <= off <= 14 else 0        # outside that, distrust it
 
 
-def next_target(offset_h: int) -> datetime:
-    """Next 19:30:00 Thai, expressed in BROKER server time."""
+def next_bell_utc() -> datetime:
+    """Next 19:30 Thai as a UTC instant.
+
+    Thailand has no daylight saving, so 19:30 Thai is 12:30 UTC every day
+    of the year. Scheduling on UTC removes the broker clock from the one
+    place it could do damage: an offset read from a stale weekend quote
+    used to shift the reference instant by nine hours, which made every
+    tick look thousands of seconds late and would have skipped every
+    session forever.
+    """
     now_utc = datetime.now(timezone.utc)
-    tgt_utc_h = (TARGET_H - THAI_OFFSET) % 24
-    t = now_utc.replace(hour=tgt_utc_h, minute=TARGET_M, second=0, microsecond=0)
+    t = now_utc.replace(hour=(TARGET_H - THAI_OFFSET) % 24, minute=TARGET_M,
+                        second=0, microsecond=0)
     if t <= now_utc:
         t += timedelta(days=1)
-    return t + timedelta(hours=offset_h)
+    return t
 
 
 def try_send(req: dict):
@@ -638,10 +659,10 @@ def selftest(a, syms: list) -> int:
     else:
         log("  [OK]   the account has money")
 
-    off = broker_offset_hours(syms[0])
-    tgt = next_target(off)
-    log(f"  broker clock UTC{off:+d}; next bell "
-        f"{tgt:%Y-%m-%d %H:%M:%S} server = 19:30 Thai")
+    off = broker_offset_hours(syms)
+    tgt = next_bell_utc()
+    log(f"  next bell {tgt:%Y-%m-%d %H:%M:%S} UTC = 19:30 Thai "
+        f"(server reads UTC{off:+d}, display only)")
 
     for sym in syms:
         si = mt5.symbol_info(sym)
@@ -715,12 +736,11 @@ def run_once(a, syms: list) -> None:
 
     _acct = mt5.account_info()
     acct_ccy = _acct.currency if _acct else "?"
-    off = broker_offset_hours(syms[0])
-    target = next_target(off)
-    log(f"broker clock = UTC{off:+d}; next 19:30:00 Thai is "
-        f"{target:%Y-%m-%d %H:%M:%S} server time")
-    now_srv = datetime.now(timezone.utc) + timedelta(hours=off)
-    sleep_for = (target - now_srv).total_seconds() - ARM_LEAD
+    off = broker_offset_hours(syms)
+    target = next_bell_utc()
+    log(f"next 19:30:00 Thai is {target:%Y-%m-%d %H:%M:%S} UTC "
+        f"(= {target + timedelta(hours=off):%H:%M:%S} on a UTC{off:+d} server)")
+    sleep_for = (target - datetime.now(timezone.utc)).total_seconds() - ARM_LEAD
     if sleep_for > 0:
         log(f"sleeping {sleep_for/3600.0:.2f}h until {ARM_LEAD}s before the bell")
     # One sixteen-hour time.sleep() trusts that nothing disturbs the clock
@@ -728,8 +748,7 @@ def run_once(a, syms: list) -> None:
     # clock survives a VPS suspend, a resume, or an NTP correction, any of
     # which would otherwise miss the bell outright.
     while True:
-        now_srv = datetime.now(timezone.utc) + timedelta(hours=off)
-        remaining = (target - now_srv).total_seconds() - ARM_LEAD
+        remaining = (target - datetime.now(timezone.utc)).total_seconds() - ARM_LEAD
         if remaining <= 0:
             break
         if os.path.exists(KILL_FILE):
@@ -772,8 +791,15 @@ def run_once(a, syms: list) -> None:
                 gate = a.gate_money / float(per_pt)
                 gate_note = (f"{a.gate_money:.2f} {acct_ccy} at {lot} lot")
             else:
-                log(f"  [{sym}] cannot price a money gate -- falling back to "
-                    f"{a.min_move_spread}x spread")
+                # Falling back quietly means the startup banner keeps
+                # advertising a 10 USD gate while a different one is armed.
+                log(f"  [{sym}] CANNOT PRICE THE MONEY GATE "
+                    f"({a.gate_money:.2f}) -- the broker would not quote a "
+                    f"profit for {lot} lot, which usually means this market "
+                    f"is shut. Falling back to {a.min_move_spread}x spread "
+                    f"= {gate:.3f} pts, which is NOT what was configured.")
+                telegram(f"clock_scalp [{sym}]: money gate unpriceable, "
+                         f"using {a.min_move_spread}x spread instead")
         ctx[sym] = {"atr": atr, "spread": spread, "gate": gate}
         log(f"armed [{sym}] ATR(H1) {atr:.3f}  spread {spread:.3f}  "
             f"gate {gate:.3f} pts ({gate_note} = {gate/spread:.2f}x spread)  "

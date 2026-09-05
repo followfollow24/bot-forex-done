@@ -110,7 +110,8 @@ ok('term.trade_allowed' in src,
 ok('p.add_argument("--gate-money"' in src
    and 'gate = a.gate_money / float(per_pt)' in src,
    "the gate can be set in account currency, priced by the broker")
-ok('cannot price a money gate -- falling back' in src,
+ok('CANNOT PRICE THE MONEY GATE' in src
+   and 'Falling back to' in src,
    "a money gate that cannot be priced falls back rather than trading blind")
 
 ok('STALE_QUOTE_SEC' in src and 'MARKET CLOSED' in src,
@@ -128,6 +129,14 @@ ok('time.sleep(min(300.0, remaining))' in src,
    "the long wait is chunked and recomputed from the clock, not one 16h sleep")
 ok('if c["gate"] > 0 else 0.0' in src,
    "the gate percentage cannot divide by zero")
+
+ok('def next_bell_utc' in src and 'target = next_bell_utc()' in src,
+   "the bell is scheduled on UTC, not on the broker offset")
+ok('for DISPLAY ONLY' in src and 'if -12 <= off <= 14 else 0' in src,
+   "the broker offset is display-only and rejects absurd values")
+ok('CANNOT PRICE THE MONEY GATE' in src and 'NOT what was configured' in src,
+   "a money gate that cannot be priced says so loudly instead of quietly "
+   "arming a different number")
 
 print()
 if fails:
