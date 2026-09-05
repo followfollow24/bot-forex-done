@@ -28,7 +28,13 @@ profit:
 Entry, gate and exit are the live bot's. The only thing added is the
 pyramid.
 
-Usage:  python _pyramid_test.py [symbol] [days] [gate_usd]
+Usage:  python _pyramid_test.py [symbol] [days] [gate_usd] [lot]
+
+An add step of 0 means every entry fills at the same price, which is what
+"fire three in the moment it is running" actually is -- three positions
+within a few points of each other behave as one position of three times
+the size, and the only thing that changes is how far the account can move
+against them before the broker closes it.
 """
 import sys
 from datetime import datetime, timedelta, timezone
@@ -43,9 +49,10 @@ import numpy as np
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 400
 GATE_USD = float(sys.argv[3]) if len(sys.argv) > 3 else 10.0
-LOT, SL_ATR, MIN_WAIT, MAXWAIT = 0.05, 3.0, 1.0, 900
+LOT = float(sys.argv[4]) if len(sys.argv) > 4 else 0.05
+SL_ATR, MIN_WAIT, MAXWAIT = 3.0, 1.0, 900
 EQUITY = 51.46
-ADD_STEPS = [3.0, 5.0, 10.0]        # points of favourable move per add
+ADD_STEPS = [0.0, 3.0, 10.0]        # 0 = all at once, in the moment
 MAX_ADDS = [0, 1, 2, 3]
 
 
@@ -87,7 +94,9 @@ def session(bars, srv_entry, s, entry, sl, step, max_adds, per_pt):
             return pts * per_pt, worst, len(fills) * LOT
         while len(fills) - 1 < max_adds:
             nxt = entry + s * step * len(fills)
-            if (favour >= nxt) if s > 0 else (favour <= nxt):
+            # step 0 puts every entry at the same price: "three in the
+            # moment", which is one position of three times the size.
+            if step <= 0 or ((favour >= nxt) if s > 0 else (favour <= nxt)):
                 fills.append(nxt)
             else:
                 break
@@ -152,6 +161,8 @@ def main():
     if n < 30:
         print(" not enough sessions"); mt5.shutdown(); return 0
 
+    print(f"  account dies at {EQUITY/per_pt:.1f} pts on one {LOT} lot, "
+          f"{EQUITY/per_pt/2:.1f} on two, {EQUITY/per_pt/3:.1f} on three")
     print(f"\n{'add every':>11}{'max adds':>10}{'trades':>8}{'avg lots':>10}"
           f"{'win':>6}{'avg $':>9}{'total $':>10}{'worst day $':>13}"
           f"{'BLEW UP':>9}")
