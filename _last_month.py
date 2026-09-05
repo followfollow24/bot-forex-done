@@ -17,7 +17,11 @@ run stops, because every row after that is a trade that could never have
 been placed. An average over sessions that happen after the account is
 gone is not a result.
 
-Usage:  python _last_month.py [symbol] [days] [equity] [keepgoing] [gate_usd]
+Usage:  python _last_month.py [symbol] [days] [equity] [keepgoing] [gate_usd] [lot]
+
+Note the gate is denominated in MONEY, so it moves with the lot: 40 USD is
+11.1 points at 0.05 lot but 55.6 at 0.01. To hold the same POINT gate while
+changing size, scale the money with the lot -- 40 at 0.05 is 8 at 0.01.
 
 keepgoing=1 carries on past the point where the account would have been
 closed out, marking every such session. That is not what would really
@@ -40,8 +44,9 @@ SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 EQUITY0 = float(sys.argv[3]) if len(sys.argv) > 3 else 43.38
 KEEPGOING = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
-LOT, SL_ATR = 0.05, 3.0
+SL_ATR = 3.0
 GATE_USD = float(sys.argv[5]) if len(sys.argv) > 5 else 10.0
+LOT = float(sys.argv[6]) if len(sys.argv) > 6 else 0.05
 MIN_WAIT, MAX_WAIT, THAI = 1.0, 900, 7
 
 
