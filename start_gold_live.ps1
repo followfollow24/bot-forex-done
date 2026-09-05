@@ -23,28 +23,37 @@
 #   decide +1s    -- earliest an entry may fire; watching runs from
 #                    19:30:00.000 and continues until the gate clears or
 #                    --max-wait expires
-#   gate 10 USD   -- the move must be worth 10 in account currency at
-#                    0.05 lot, about 2.8 points, priced by the broker at
-#                    the bell so it stays 10 USD as AUD/USD drifts
+#   gate 8 USD    -- 11.1 points at 0.01 lot. The gate must be LARGER
+#                    than the day's counter-move or it fires on the wrong
+#                    side: on 4 Sep price ticked +8.5 up before falling
+#                    132, so every gate under 8.5 bought the top. At 2
+#                    points that day cost -96.6; at 11 it made +81.3.
+#   exit fixed:30 -- hold thirty minutes rather than to the M15 close.
+#                    Checked over the month, not just 4 Sep: it wins on
+#                    trending days and gives a little back on choppy
+#                    ones, +117.95 against +83.76 over the same 11 trades.
 #   ONE position  -- pyramiding is off. --add-step-pts exists and is
 #                    tested, but is not passed here.
 #
-# WHAT THIS CONFIGURATION WAS MEASURED TO DO, over 166 sessions at this
-# gate (_pyramid_test.py XAUAUDm 400 10 0.05, the max-adds 0 row):
+# WHAT THIS CONFIGURATION WAS MEASURED TO DO
+# (_last_month.py XAUAUDm 30 43.38 1 8 0.01 30):
 #
-#   -2.91 USD average per session, -483 total, 46% winners
-#   worst single session -408 USD
-#   THIRTY OF ONE HUNDRED AND SIXTY-SIX SESSIONS (18%) reached a moment
-#   that cost more than the whole 51.46 USD account. At 0.05 lot the
-#   account is gone after 14.3 points against, so the broker closes the
-#   position long before the 3xATR stop is touched.
+#   21 sessions, the gate opened on 11 of them (52%), 6 winners
+#   equity 43.38 -> 161.33 USD over the month
+#   worst any trade went against it: -24.05 USD, against 43.38 of room
+#   ZERO sessions reached a point that would have closed the account
 #
-# For comparison, the same single position at a 50 USD gate (13.9 points)
-# measured +4.69 a session over 63 sessions, with 29 of them reaching the
-# same account-ending point. Neither figure is split train/TEST and a
-# split test at a comparable gate had its first half negative, so none of
-# this is established -- it is recorded so the numbers travel with the
-# command rather than living in a chat log.
+# WHY 0.01 AND NOT THE 0.05 THE OPERATOR ASKED FOR. At 0.05 the account
+# survives 12.0 points against; every one of these trades went 13 to 38
+# points against at some moment, so the first one ends it. Selecting only
+# the big days makes that worse, not better -- a 25-point gate fires on
+# the five biggest days of the month and all five swung past 43 USD
+# before paying. 0.05 needs roughly 140 USD of equity to survive last
+# month at all, 200 with any margin for error.
+#
+# NONE OF THIS IS ESTABLISHED. One month, 11 trades, no train/TEST split,
+# and 4 Sep alone is over half the profit. It is recorded here so the
+# numbers travel with the command rather than living in a chat log.
 #   exit m15close -- out when the M15 candle closes, 19:45:00
 #   risk cap OFF  -- their explicit instruction
 #
@@ -62,12 +71,12 @@ Set-Location $repo
 
 $common = @(
     "--symbols", "XAUAUDm",
-    "--lot", "0.05",
+    "--lot", "0.01",
     "--sl-atr", "3",
     "--decide-after", "1",
     "--max-wait", "900",
-    "--gate-money", "10",
-    "--exit-mode", "m15close"
+    "--gate-money", "8",
+    "--exit-mode", "fixed:30"
 )
 
 if ($Check) {
