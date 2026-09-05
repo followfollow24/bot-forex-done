@@ -17,7 +17,12 @@ run stops, because every row after that is a trade that could never have
 been placed. An average over sessions that happen after the account is
 gone is not a result.
 
-Usage:  python _last_month.py [symbol] [days] [equity] [keepgoing] [gate_usd] [lot]
+Usage:  python _last_month.py [symbol] [days] [equity] [keepgoing] [gate_usd] [lot] [hold_min]
+
+hold_min 0 keeps the bot's M15-close exit; any other number holds for that
+many minutes instead. The 30-minute hold beat the M15 close on every entry
+row of 4 Sep, but that is one day -- this is how it gets checked against a
+month before it goes into the live configuration.
 
 Note the gate is denominated in MONEY, so it moves with the lot: 40 USD is
 11.1 points at 0.05 lot but 55.6 at 0.01. To hold the same POINT gate while
@@ -47,6 +52,7 @@ KEEPGOING = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
 SL_ATR = 3.0
 GATE_USD = float(sys.argv[5]) if len(sys.argv) > 5 else 10.0
 LOT = float(sys.argv[6]) if len(sys.argv) > 6 else 0.05
+HOLD_MIN = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0
 MIN_WAIT, MAX_WAIT, THAI = 1.0, 900, 7
 
 
@@ -81,7 +87,8 @@ def main():
     print(f" LAST {DAYS} DAYS AT 19:30 THAI -- exactly what the live bot is "
           f"configured to do")
     print(f" {SYMBOL}  {LOT} lot  gate {GATE_USD:.0f} {ccy} = {gate:.3f} pts  "
-          f"SL {SL_ATR}xATR  exit at the M15 close")
+          f"SL {SL_ATR}xATR  exit "
+          + (f"after {HOLD_MIN:.0f} min" if HOLD_MIN > 0 else "at the M15 close"))
     print(f" 1 pt = {per_pt:.3f} {ccy}   starting equity {EQUITY0:.2f}   "
           f"account ends at {EQUITY0/per_pt:.1f} pts against")
     print("=" * 94)
@@ -128,7 +135,8 @@ def main():
         entry = float(ask[i]) if s > 0 else float(bid[i])
         sl = entry - s * SL_ATR * atr
         srv_e = t0 + float(sec[i])
-        end = (int(srv_e) // 900 + 1) * 900
+        end = (srv_e + HOLD_MIN * 60 if HOLD_MIN > 0
+               else (int(srv_e) // 900 + 1) * 900)
         exit_px, worst = None, 0.0
         for b in bars:
             bt = int(b["time"])
