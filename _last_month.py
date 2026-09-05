@@ -17,7 +17,14 @@ run stops, because every row after that is a trade that could never have
 been placed. An average over sessions that happen after the account is
 gone is not a result.
 
-Usage:  python _last_month.py [symbol] [days] [equity]
+Usage:  python _last_month.py [symbol] [days] [equity] [keepgoing]
+
+keepgoing=1 carries on past the point where the account would have been
+closed out, marking every such session. That is not what would really
+have happened -- there is no account left to trade -- but it shows the
+whole month rather than only the part before the first liquidation, which
+is what you want when the question is "how do these sessions look" rather
+than "what would I have".
 """
 import sys
 from datetime import datetime, timedelta, timezone
@@ -32,6 +39,7 @@ import numpy as np
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 30
 EQUITY0 = float(sys.argv[3]) if len(sys.argv) > 3 else 43.38
+KEEPGOING = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
 LOT, GATE_USD, SL_ATR = 0.05, 10.0, 3.0
 MIN_WAIT, MAX_WAIT, THAI = 1.0, 900, 7
 
@@ -77,7 +85,7 @@ def main():
     print("-" * 94)
 
     eq = EQUITY0
-    rows = wins = fired = 0
+    rows = wins = fired = blown = 0
     today = (datetime.now(timezone.utc) + timedelta(hours=THAI)).date()
     dead = None
     for back in range(DAYS, 0, -1):
@@ -140,15 +148,22 @@ def main():
         print(f"{label:>16}{'YES':>7}{'BUY' if s > 0 else 'SELL':>6}"
               f"{sec[i]:>7.0f}s{entry:>10.2f}{exit_px:>10.2f}{pts:>+8.2f}"
               f"{pl:>+9.2f}{worst*per_pt:>+9.2f}{eq:>9.2f}{flag}")
-        if dead:
+        if dead and not KEEPGOING:
             print(f"\n  STOPPED: the account was closed out on {dead}. "
                   f"Nothing after this could have been traded.")
             break
+        if dead:
+            blown += 1
+            dead = None
 
     print("-" * 94)
     if rows:
         print(f"  {rows} sessions with data, gate opened on {fired} "
               f"({100.0*fired/rows:.0f}%), {wins} winners")
+        if KEEPGOING:
+            print(f"  {blown} of {fired} trades reached a moment that would "
+                  f"have closed the account "
+                  f"({100.0*blown/fired if fired else 0:.0f}%)")
         print(f"  equity {EQUITY0:.2f} -> {eq:.2f} {ccy} "
               f"({eq - EQUITY0:+.2f})")
     print("  'worst' is the deepest the trade went against you during the")
