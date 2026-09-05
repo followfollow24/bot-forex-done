@@ -138,6 +138,19 @@ ok('CANNOT PRICE THE MONEY GATE' in src and 'NOT what was configured' in src,
    "a money gate that cannot be priced says so loudly instead of quietly "
    "arming a different number")
 
+ok('except Exception as exc:' in src and 'UNHANDLED ERROR in session' in src,
+   "a failed session shouts and the bot survives to trade the next day")
+_main = src[src.index("def main() -> int:"):]
+ok('run_once(a, syms)' in _main
+   and _main.index('run_once(a, syms)') < _main.index('except Exception as exc:'),
+   "inside main() the catch wraps run_once, not something outside the loop")
+ok('ALREADY HOLDING' in src and 'not opening another' in src,
+   "it refuses to open a second position on a symbol it already holds")
+ok(src.index('existing = positions_of(sym)') < src.index('res = send_order('),
+   "that check runs BEFORE the order is sent")
+ok('deadline = target.timestamp() + a.max_wait + 30' in src,
+   "the watch deadline is measured from the bell, not from arming time")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

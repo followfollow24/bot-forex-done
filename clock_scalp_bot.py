@@ -156,6 +156,7 @@ import ctypes
 import os
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 
 try:
@@ -566,7 +567,11 @@ def decide_all(syms, gates, target, a):
     state = {s: {"ref": None, "last": None, "seen": 0, "done": None,
                  "moved": 0.0, "peak": 0.0, "next_log": 0.0,
                  "gate": float(gates[s])} for s in syms}
-    deadline = time.time() + a.max_wait + 30
+    # Measured from the BELL, not from when this was called: it is
+    # called ARM_LEAD seconds early, so a wall-clock deadline cut the
+    # watch window short by exactly that lead and could miss a gate that
+    # cleared in the last minute.
+    deadline = target.timestamp() + a.max_wait + 30
     while time.time() < deadline:
         pending = False
         for sym in syms:
@@ -873,6 +878,23 @@ def run_once(a, syms: list) -> None:
                     f"{a.max_margin_pct:.0f}% of free {acct.margin_free:.2f}")
                 continue
 
+        # Last line of defence against stacking: a crash-and-restart, a
+        # second instance that somehow got past the mutex, or a position
+        # left from yesterday would otherwise each add another 0.05 lot.
+        if a.live:
+            existing = positions_of(sym)
+            if existing is None:
+                log(f"  [{sym}] cannot read open positions -- refusing to "
+                    f"open blind")
+                telegram(f"clock_scalp [{sym}]: positions unreadable, no trade")
+                continue
+            if existing:
+                log(f"  [{sym}] ALREADY HOLDING {[p.ticket for p in existing]}"
+                    f" -- not opening another")
+                telegram(f"clock_scalp [{sym}]: already holding a position, "
+                         f"skipped to avoid doubling up")
+                continue
+
         res = send_order(sym, d, lot, sl_px, a.live)
         if a.live and res is None:
             continue
@@ -895,7 +917,8 @@ def main() -> int:
     p.add_argument("--lot", default="0.05",
                    help="0.05 for all, or XAUAUDm=0.05,BTCUSDm=0.01")
     p.add_argument("--decide-after", type=float, default=1.0,
-                   help="seconds after 19:30:00 to read the direction (2-5)")
+                   help="MINIMUM seconds after 19:30:00 before an entry may "
+                        "fire; watching continues until the gate clears")
     p.add_argument("--max-wait", type=float, default=900.0,
                    help="seconds to keep watching before giving up on the "
                         "session (default 15 minutes)")
@@ -981,9 +1004,41 @@ def main() -> int:
         mt5.shutdown()
         return rc
 
+    # Report anything of ours already open before the first session -- a
+    # previous run that died holding a position leaves one behind, and the
+    # bot must not discover that by opening a second one.
+    for sym in syms:
+        held = positions_of(sym)
+        if held:
+            log(f"[{sym}] ALREADY HOLDING {len(held)} position(s) of ours from "
+                f"an earlier run: {[p.ticket for p in held]}")
+            telegram(f"clock_scalp [{sym}]: {len(held)} position(s) already "
+                     f"open at startup -- the bot will NOT open another")
+
     try:
         while True:
-            run_once(a, syms)
+            # Only KeyboardInterrupt was caught here, so any other error --
+            # an MT5 IPC blip, an unexpected None -- ended the loop, ran
+            # shutdown and killed the bot silently. That is the failure that
+            # left four bots dead for seven days earlier in this project, and
+            # on this one it could also strand an open position with nobody
+            # managing it. A session that fails now shouts and the bot lives
+            # to trade the next day.
+            try:
+                run_once(a, syms)
+            except Exception as exc:
+                log(f"UNHANDLED ERROR in session: {exc!r}")
+                for line in traceback.format_exc().splitlines():
+                    log("    " + line)
+                telegram(f"clock_scalp: session CRASHED -- {exc!r}. The bot is "
+                         f"still running; check for an open position.")
+                for sym in syms:
+                    held = positions_of(sym)
+                    if held:
+                        log(f"  [{sym}] STILL OPEN after the crash: "
+                            f"{[p.ticket for p in held]}")
+                        telegram(f"clock_scalp [{sym}]: position still open "
+                                 f"after a crash -- close it by hand if needed")
             if a.once:
                 break
             time.sleep(60)
