@@ -243,6 +243,34 @@ def telegram(msg: str) -> None:
         pass
 
 
+def size_for(waited: float, base_lot: float, fast_lot, fast_sec: float,
+             equity=None, min_equity: float = 0.0):
+    """Pick the size from how long the gate took to fall.
+
+    Returns (lot, tier) with tier one of "fast", "ordinary", "held-back".
+    The boundary is inclusive: a gate falling at exactly fast_sec is fast,
+    because the threshold reads as "within N seconds" everywhere it is
+    written down.
+
+    min_equity is the guard this whole size exists to need. The fast
+    sessions are the violent ones, and over three months every one of them
+    went 20-33 points against the entry before it paid; at the fast size
+    that is 71 to 121 in account currency. Below min_equity the bot takes
+    the day at the ordinary size instead of at one the account cannot
+    survive. Unknown equity counts as too little -- a broker that will not
+    answer is not permission to size up.
+
+    A missing or zero fast_lot means the tier was never configured, and the
+    ordinary size stands whatever the clock said: the bot never invents a
+    size it was not given.
+    """
+    if fast_sec > 0 and fast_lot and waited <= fast_sec:
+        if min_equity > 0 and (equity is None or equity < min_equity):
+            return base_lot, "held-back"
+        return fast_lot, "fast"
+    return base_lot, "ordinary"
+
+
 def parse_lots(spec: str, symbols: list[str]) -> dict:
     """'0.05' -> same for all; 'XAUAUDm=0.05,BTCUSDm=0.01' -> per symbol.
     Sizes are not transferable between contracts, so a per-symbol form has
@@ -739,7 +767,9 @@ def selftest(a, syms: list) -> int:
         spread = si.spread * si.point
         gate = a.min_move_spread * spread
         gate_note = f"{a.min_move_spread}x spread"
-        if a.gate_money > 0 and lot:
+        if a.gate_pts > 0:
+            gate, gate_note = a.gate_pts, f"{a.gate_pts:g} pts, fixed"
+        elif a.gate_money > 0 and lot:
             pp = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot,
                                        tk.ask, tk.ask + 1.0)
             if pp and float(pp) > 0:
@@ -780,6 +810,39 @@ def selftest(a, syms: list) -> int:
             bad += 1
         else:
             log(f"  [OK]   margin fits inside free margin")
+
+        flot = (getattr(a, "fast_lots", None) or {}).get(sym) \
+            if a.fast_sec > 0 else None
+        if flot:
+            log(f"  fast tier: {flot} lot on a gate that falls inside "
+                f"{a.fast_sec:g}s")
+            if flot < si.volume_min or flot > si.volume_max:
+                log(f"  [FAIL] fast lot {flot} outside broker range "
+                    f"{si.volume_min}-{si.volume_max}"); bad += 1
+            fpt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, flot,
+                                        entry, entry + 1.0)
+            fmg = mt5.order_calc_margin(mt5.ORDER_TYPE_BUY, sym, flot, entry)
+            if not fpt or fmg is None:
+                log("  [FAIL] broker could not price the fast lot"); bad += 1
+            else:
+                per_pt = abs(float(fpt))
+                room = acct.equity / per_pt if per_pt > 0 else 0.0
+                log(f"         1 pt = {per_pt:,.2f} {acct.currency}, margin "
+                    f"{fmg:,.2f}, so equity {acct.equity:,.2f} runs out "
+                    f"{room:.1f} pts against the entry")
+                # This is the number that decides whether the tier is
+                # affordable at all. Measured over three months, the six
+                # fast sessions went 20-33 pts against the entry before
+                # they paid; the largest run of the period, 4 Sep, went 33.
+                if room < 35.0:
+                    log(f"  [NOTE] every fast session measured over three "
+                        f"months went 20-33 pts against the entry before "
+                        f"paying. With {room:.1f} pts of room the account "
+                        f"is the stop, and the biggest days are the ones "
+                        f"it cannot hold.")
+                if fmg > acct.margin_free:
+                    log(f"  [FAIL] fast-lot margin {fmg:,.2f} exceeds free "
+                        f"{acct.margin_free:,.2f}"); bad += 1
 
     log("-" * 68)
     if os.path.exists(KILL_FILE):
@@ -847,7 +910,9 @@ def run_once(a, syms: list) -> None:
         lot = a.lots.get(sym, 0.0)
         gate = a.min_move_spread * spread
         gate_note = f"{a.min_move_spread}x spread"
-        if a.gate_money > 0 and lot > 0:
+        if a.gate_pts > 0:
+            gate, gate_note = a.gate_pts, f"{a.gate_pts:g} pts, fixed"
+        elif a.gate_money > 0 and lot > 0:
             tk = mt5.symbol_info_tick(sym)
             per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot,
                                            tk.ask, tk.ask + 1.0) if tk else None
@@ -893,6 +958,35 @@ def run_once(a, syms: list) -> None:
         if not lot:
             log(f"  [{sym}] no lot configured -- skipped")
             continue
+        # The size is picked AFTER the gate falls, from how long it took.
+        # A gate crossed in a second or two is a violent move, and over the
+        # three months measured those days carried much the largest runs.
+        # The gate itself was priced above at the ordinary lot -- it has to
+        # be, since it decides the entry, and a distance that moved with the
+        # size would mean the fast tier tripped on a nearer gate than the
+        # one in the banner. Everything downstream -- the stop cost, the
+        # risk cap, the margin test -- re-reads this lot, so sizing up is
+        # checked against equity exactly as the ordinary size is.
+        eq_now = mt5.account_info()
+        eq_now = float(eq_now.equity) if eq_now else None
+        lot, tier = size_for(waited, lot,
+                             (getattr(a, "fast_lots", None) or {}).get(sym),
+                             a.fast_sec, eq_now, a.fast_min_equity)
+        if tier == "fast":
+            log(f"  [{sym}] FAST SESSION: gate fell in {waited:.2f}s "
+                f"(<= {a.fast_sec:g}s) -- sizing {a.lots[sym]} -> {lot}")
+        elif tier == "held-back":
+            log(f"  [{sym}] FAST SESSION ({waited:.2f}s) but equity "
+                + (f"{eq_now:.2f}" if eq_now is not None else "unreadable")
+                + f" is under the {a.fast_min_equity:.2f} floor -- taking it "
+                f"at {lot}, not {(a.fast_lots or {}).get(sym)}. The fast days "
+                f"are the ones that swing hardest against the entry; this "
+                f"account cannot hold that size yet.")
+            telegram(f"clock_scalp [{sym}]: fast day but equity under floor, "
+                     f"sized down to {lot}")
+        elif a.fast_sec > 0:
+            log(f"  [{sym}] ordinary session: gate took {waited:.2f}s "
+                f"(> {a.fast_sec:g}s) -- staying at {lot}")
         tk = mt5.symbol_info_tick(sym)
         if tk is None:
             log(f"  [{sym}] gate cleared but the quote vanished -- not trading")
@@ -999,6 +1093,24 @@ def main() -> int:
     p.add_argument("--gate-money", type=float, default=0.0,
                    help="gate expressed in account currency at the "
                         "configured lot; overrides --min-move-spread")
+    p.add_argument("--gate-pts", type=float, default=0.0,
+                   help="gate as a fixed distance in points; overrides "
+                        "--gate-money. Prefer this when two lot sizes are "
+                        "in play -- a money gate silently changes distance "
+                        "when the lot changes")
+    p.add_argument("--fast-sec", type=float, default=0.0,
+                   help="a session whose gate clears within this many "
+                        "seconds is sized with --fast-lot instead. 0 "
+                        "disables the second tier entirely")
+    p.add_argument("--fast-lot", default="",
+                   help="lot for those fast sessions, same per-symbol "
+                        "spec as --lot")
+    p.add_argument("--fast-min-equity", type=float, default=0.0,
+                   help="refuse the bigger size below this equity and take "
+                        "the day at the ordinary lot instead. The fast days "
+                        "swing hardest against the entry, so this is the "
+                        "floor that keeps the tier from arming on an "
+                        "account too small to hold it")
     p.add_argument("--min-move-spread", type=float, default=2.0,
                    help="skip the day unless the move is this many times the "
                         "spread; 0 takes every day")
@@ -1044,6 +1156,23 @@ def main() -> int:
     missing = [s for s in syms if s not in a.lots]
     if missing:
         log(f"no lot given for {missing} -- add it to --lot"); return 2
+    a.fast_lots = {}
+    if a.fast_sec > 0:
+        if not a.fast_lot:
+            log("--fast-sec given without --fast-lot -- nothing to size up "
+                "to"); return 2
+        try:
+            a.fast_lots = parse_lots(a.fast_lot, syms)
+        except ValueError:
+            log(f"cannot parse --fast-lot {a.fast_lot!r}"); return 2
+        small = [s for s, v in a.fast_lots.items() if v < a.lots.get(s, 0.0)]
+        if small:
+            log(f"--fast-lot is SMALLER than --lot for {small}. That is the "
+                f"tier the other way round; if you meant it, swap the two "
+                f"arguments so the log reads honestly."); return 2
+    elif a.fast_lot:
+        log("--fast-lot given without --fast-sec -- the second tier is off, "
+            "so this size would never be used"); return 2
 
     acct = mt5.account_info()
     ccy = acct.currency if acct else ""
@@ -1055,6 +1184,15 @@ def main() -> int:
         f"SL {a.sl_atr}xATR  gate {gate_desc}  exit {a.exit_mode}  "
         f"pyramid {('+' + str(a.add_step_pts) + 'pts x' + str(a.max_adds)) if a.add_step_pts > 0 else 'OFF'}  "
         f"risk cap {'OFF' if a.max_risk_pct <= 0 else str(a.max_risk_pct)+'%'}")
+    if a.fast_sec > 0 and a.fast_lots:
+        log(f"  second tier: "
+            f"{', '.join(f'{k} {v}' for k, v in a.fast_lots.items())} "
+            f"when the gate clears inside {a.fast_sec:g}s -- the gate is "
+            f"priced at the ordinary lot and does not move with the size")
+        log(f"  second tier arms only above equity {a.fast_min_equity:.2f}"
+            if a.fast_min_equity > 0 else
+            "  second tier has NO equity floor -- it will size up on any "
+            "account, including one too small to hold the position")
     log(f"MODE: {'LIVE -- REAL ORDERS' if a.live else 'DRY RUN -- sends nothing'}")
     if acct:
         log(f"account {acct.login} ({acct.server})  equity {acct.equity:.2f} "

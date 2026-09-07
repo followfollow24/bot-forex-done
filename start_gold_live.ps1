@@ -14,54 +14,60 @@
 # the command line instead:
 #     .\start_gold_live.ps1 -IUnderstandRealMoney
 #
-# Configuration is the operator's, recorded here so it is never a guess:
+# ---------------------------------------------------------------------
+# THE CONFIGURATION, and what each number was measured to do
+# ---------------------------------------------------------------------
 #   XAUAUDm only  -- BTC was measured and dropped: 19:30 ranks 16th of 24
 #                    hours for BTC, and 4 Sep was rank 2 of 348 sessions,
 #                    a top-1% event rather than a pattern.
-#   0.05 lot      -- their choice
-#   SL 3xATR      -- their choice; ~69 points, ~249 AUD at 0.05 lot
+#   gate 14 pts   -- fixed distance, not a money gate. The gate must be
+#                    LARGER than the day's counter-move or it fires on the
+#                    wrong side: on 4 Sep price ticked +8.5 up before
+#                    falling 132, so every gate under 8.5 bought the top.
+#                    Swept over 67 sessions at 0.01 lot: 11 pts won 45% of
+#                    the time, 14 pts 60%, 17 pts 67%, 20 pts 71%, 25 pts
+#                    75%. 14 had the best total (+194) with the win rate
+#                    already above a coin flip.
+#                    It is --gate-pts and not --gate-money deliberately.
+#                    A money gate is a distance divided by the lot, so
+#                    with two lot sizes in play the same 10 USD would mean
+#                    14 points on one day and 2.8 on another.
+#   0.01 ordinary -- the size on a normal day.
+#   0.05 fast     -- the size when the gate falls within 10 seconds.
+#                    Over three months six sessions did: 2 Jul (2.9s),
+#                    14 Jul (1.3s), 7 Aug (1.6s), 12 Aug (6.3s), 3 Sep
+#                    (1.7s), 4 Sep (1.4s). Those were much the largest
+#                    runs of the period -- +84, +38 and +31 points against
+#                    a typical day's single figures. Five of the six won.
+#   floor 180     -- and this is the number that makes the tier survivable
+#                    rather than fatal. Every one of those six sessions
+#                    went 20 to 33 points AGAINST the entry before it
+#                    paid: 71 to 121 USD at 0.05 lot. On the 43.38 the
+#                    account held while this was written, all six ended
+#                    it. Below 180 the bot takes the fast day at 0.01
+#                    instead and says so in the log. It re-reads equity at
+#                    every entry, so one bad fast day disarms the next.
+#   SL 3xATR      -- operator's choice; ~69 points.
 #   decide +1s    -- earliest an entry may fire; watching runs from
-#                    19:30:00.000 and continues until the gate clears or
-#                    --max-wait expires
-#   gate 8 USD    -- 11.1 points at 0.01 lot. The gate must be LARGER
-#                    than the day's counter-move or it fires on the wrong
-#                    side: on 4 Sep price ticked +8.5 up before falling
-#                    132, so every gate under 8.5 bought the top. At 2
-#                    points that day cost -96.6; at 11 it made +81.3.
+#                    19:30:00.000 until the gate clears or --max-wait.
 #   exit fixed:30 -- hold thirty minutes rather than to the M15 close.
-#                    Checked over the month, not just 4 Sep: it wins on
-#                    trending days and gives a little back on choppy
-#                    ones, +117.95 against +83.76 over the same 11 trades.
+#                    Checked over a month: +117.95 against +83.76 on the
+#                    same 11 trades.
 #   ONE position  -- pyramiding is off. --add-step-pts exists and is
 #                    tested, but is not passed here.
+#   risk cap OFF  -- operator's explicit instruction.
 #
-# WHAT THIS CONFIGURATION WAS MEASURED TO DO
-# (_last_month.py XAUAUDm 30 43.38 1 8 0.01 30):
+# WHY 10 SECONDS AND NOT 5. Five measured better (+685 against +644) for
+# one reason only: it excludes 12 Aug, at 6.3s the single fast session
+# that lost. Picking the threshold that dodges the one loser in six is
+# fitting to n=1. Ten seconds also matches the operator's own reading --
+# their examples were 1, 1, 2 and 6 seconds.
 #
-#   21 sessions, the gate opened on 11 of them (52%), 6 winners
-#   equity 43.38 -> 161.33 USD over the month
-#   worst any trade went against it: -24.05 USD, against 43.38 of room
-#   ZERO sessions reached a point that would have closed the account
-#
-# WHY 0.01 AND NOT THE 0.05 THE OPERATOR ASKED FOR. At 0.05 the account
-# survives 12.0 points against; every one of these trades went 13 to 38
-# points against at some moment, so the first one ends it. Selecting only
-# the big days makes that worse, not better -- a 25-point gate fires on
-# the five biggest days of the month and all five swung past 43 USD
-# before paying. 0.05 needs roughly 140 USD of equity to survive last
-# month at all, 200 with any margin for error.
-#
-# NONE OF THIS IS ESTABLISHED. One month, 11 trades, no train/TEST split,
-# and 4 Sep alone is over half the profit. It is recorded here so the
-# numbers travel with the command rather than living in a chat log.
-#   exit m15close -- out when the M15 candle closes, 19:45:00
-#   risk cap OFF  -- their explicit instruction
-#
-# WHAT THE MEASUREMENTS SAY, so it travels with the command: over 106
-# tick-days this configuration averaged +0.88 points a trade, 43%
-# winners, +337 AUD at 0.05 lot -- but train was -1.29 against TEST
-# +3.06, so it is NOT established. It is the best-defined candidate
-# tested, not a proven edge.
+# NONE OF THIS IS ESTABLISHED. Three months, 25 trades, six fast days, no
+# train/TEST split, and 4 Sep alone is over half the profit of the fast
+# tier. The ordinary-lot baseline is +194 over the same 67 sessions with
+# no reliance on that day. Recorded here so the numbers travel with the
+# command rather than living in a chat log.
 
 param([switch]$Check, [switch]$Dry, [switch]$IUnderstandRealMoney)
 
@@ -72,10 +78,13 @@ Set-Location $repo
 $common = @(
     "--symbols", "XAUAUDm",
     "--lot", "0.01",
+    "--fast-sec", "10",
+    "--fast-lot", "0.05",
+    "--fast-min-equity", "180",
+    "--gate-pts", "14",
     "--sl-atr", "3",
     "--decide-after", "1",
     "--max-wait", "900",
-    "--gate-money", "8",
     "--exit-mode", "fixed:30"
 )
 
@@ -92,9 +101,10 @@ if ($Dry) {
 }
 
 Write-Host ""
-Write-Host "  THIS WILL TRADE REAL MONEY ON ACCOUNT " -NoNewline -ForegroundColor Yellow
-Write-Host "XAUAUDm 0.05 lot, SL 3xATR, no risk cap." -ForegroundColor Yellow
-Write-Host "  One trade per day at 19:30 Thai, closed at 19:45." -ForegroundColor Yellow
+Write-Host "  THIS WILL TRADE REAL MONEY." -ForegroundColor Yellow
+Write-Host "  XAUAUDm, one trade a day at 19:30 Thai, held 30 minutes." -ForegroundColor Yellow
+Write-Host "  0.01 lot normally; 0.05 when the gate falls inside 10s AND" -ForegroundColor Yellow
+Write-Host "  equity is at least 180. SL 3xATR. No risk cap." -ForegroundColor Yellow
 Write-Host ""
 # The interactive prompt is the normal path. Over RDP a Ctrl+V at a
 # Read-Host arrives as a literal ^V control character rather than the
