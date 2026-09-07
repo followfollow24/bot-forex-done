@@ -133,7 +133,7 @@ def main():
 
     print(f"\nTHE FAST DAYS (gate cleared inside 10s) AT {BIG} LOT\n")
     print(f"  {'date':>13}{'at':>8}{'side':>6}{'pts':>9}{'P/L':>10}"
-          f"{'went against':>14}{'vs 43.38':>10}")
+          f"{'went against':>14}{'vs ' + format(EQUITY0, '.2f'):>12}")
     for (d, sc, s, pts, wp) in trades:
         if sc > 10:
             continue
