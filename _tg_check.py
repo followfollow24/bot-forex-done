@@ -23,11 +23,20 @@ import urllib.request
 
 KEYS = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
+# Must stay identical to ENV_PATHS in clock_scalp_bot.py, or this checks
+# somewhere the bot does not read. _test_env_paths.py enforces that.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ENV_PATHS = (
+    os.path.join(_HERE, ".env"),                        # beside the bot
+    os.path.join(os.path.dirname(_HERE), ".env"),       # the Desktop
+    os.path.expanduser("~/.env"),                       # the home directory
+)
+
 
 def read_env():
     """Same search order the bot uses, so this tests what it will read."""
     found, where = {}, {}
-    for path in (".env", os.path.expanduser("~/.env")):
+    for path in ENV_PATHS:
         if not os.path.exists(path):
             continue
         with open(path, encoding="utf-8") as fh:

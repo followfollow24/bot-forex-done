@@ -184,6 +184,24 @@ MAGIC = 668003
 KILL_FILE = "STOP_CLOCK_SCALP"
 STALE_QUOTE_SEC = 300     # older than this at the bell = market shut
 
+# Where the Telegram credentials are looked for, in order. Resolved from
+# THIS FILE's location rather than the working directory, so the list does
+# not change meaning depending on where the bot was launched from.
+#
+# The middle entry is the one that matters here: on this VPS the shared
+# .env lives on the Desktop, next to bot_repo rather than inside it, and
+# the earlier list checked only the repo and the home directory. So the
+# keys existed, the bot could not see them, and telegram() swallowed the
+# miss exactly as designed -- nineteen alert points wired to nothing, with
+# a log that looked completely normal. _test_env_paths.py keeps this list
+# and _tg_check.py's copy in step.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ENV_PATHS = (
+    os.path.join(_HERE, ".env"),                        # beside the bot
+    os.path.join(os.path.dirname(_HERE), ".env"),       # the Desktop
+    os.path.expanduser("~/.env"),                       # the home directory
+)
+
 
 def claim_single_instance() -> bool:
     """Refuse to start if this bot is already running.
@@ -221,7 +239,7 @@ def telegram(msg: str) -> None:
         import urllib.parse
         import urllib.request
         token = chat = None
-        for path in (".env", os.path.expanduser("~/.env")):
+        for path in ENV_PATHS:
             if not os.path.exists(path):
                 continue
             with open(path, encoding="utf-8") as fh:
