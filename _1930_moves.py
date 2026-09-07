@@ -14,7 +14,12 @@ because that is the gate that came out best in the signal comparison --
 so the table also shows, session by session, how often that gate would
 even have had something to fire on.
 
-Usage:  python _1930_moves.py [symbol] [days]
+Usage:  python _1930_moves.py [symbol] [days] [only_above_pts]
+
+only_above_pts prints just the sessions that reached that far, so three
+months can be read without scrolling past sixty quiet days. The summary
+below it always covers EVERY session, including the ones not printed --
+otherwise the filter would quietly become the answer.
 """
 import sys
 from datetime import datetime, timedelta, timezone
@@ -28,6 +33,7 @@ import numpy as np
 
 SYMBOL = sys.argv[1] if len(sys.argv) > 1 else "XAUAUDm"
 DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+ONLY_ABOVE = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
 GATE_PTS = 11.1
 THAI = 7
 
@@ -63,7 +69,7 @@ def main():
             b = mt5.copy_rates_range(SYMBOL, mt5.TIMEFRAME_M5, s_utc,
                                      s_utc + timedelta(minutes=35))
             if b is None or len(b) < 4:
-                print(f"{d:%Y-%m-%d %a':>16}  -- market shut --")
+                print(f"{d:%Y-%m-%d %a}".rjust(16) + "  -- market shut --")
                 continue
             step = 5
         else:
@@ -88,9 +94,10 @@ def main():
         if max(up, -dn) >= 40:
             big += 1
         mark = f"YES  {first}" if reached else "no"
-        print(f"{d:%Y-%m-%d %a}"[:16].rjust(16)
-              + f"{at(1):>+9.1f}{at(5):>+9.1f}{at(15):>+9.1f}{at(30):>+9.1f}"
-              f"{up:>+9.1f}{dn:>+9.1f}   {mark}")
+        if max(up, -dn) >= ONLY_ABOVE:
+            print(f"{d:%Y-%m-%d %a}"[:16].rjust(16)
+                  + f"{at(1):>+9.1f}{at(5):>+9.1f}{at(15):>+9.1f}{at(30):>+9.1f}"
+                  f"{up:>+9.1f}{dn:>+9.1f}   {mark}")
 
     n = len(rows)
     print("-" * 92)
@@ -106,6 +113,15 @@ def main():
             k = int(np.sum(rng >= lim))
             print(f"    >= {lim:>5} pts : {k:>3} days ({100.0*k/n:>3.0f}%)")
         print(f"  median furthest move in 30 min: {np.median(rng):.1f} pts")
+        print(f"\n  BY MONTH -- is the rate steady, or was one month carrying it?")
+        print(f"    {'month':>9}{'sessions':>10}{'>=11pt':>9}{'>=17pt':>9}"
+              f"{'>=25pt':>9}{'>=40pt':>9}")
+        months = sorted({r[0].strftime("%Y-%m") for r in rows})
+        for mo in months:
+            sub = [r for r in rows if r[0].strftime("%Y-%m") == mo]
+            g = np.array([max(r[5], -r[6]) for r in sub])
+            print(f"    {mo:>9}{len(sub):>10}"
+                  + "".join(f"{int(np.sum(g >= x)):>9}" for x in (11, 17, 25, 40)))
     mt5.shutdown()
     return 0
 
