@@ -1225,7 +1225,15 @@ def main() -> int:
 
     acct = mt5.account_info()
     ccy = acct.currency if acct else ""
-    gate_desc = (f"{a.gate_money:.2f} {ccy}/trade" if a.gate_money > 0
+    # The banner is the line the operator reads to confirm what is
+    # actually armed, so it has to follow the SAME precedence the session
+    # uses. It knew about --gate-money and --min-move-spread but not
+    # --gate-pts, so a bot correctly trading a fixed 14-point gate
+    # announced itself as "gate 2.0x spread" -- the trade was right and
+    # the banner was a lie, which is worse than a wrong number nobody
+    # trusts. _test_gate_banner.py holds the three sites in step.
+    gate_desc = (f"{a.gate_pts:g} pts, fixed" if a.gate_pts > 0
+                 else f"{a.gate_money:.2f} {ccy}/trade" if a.gate_money > 0
                  else f"{a.min_move_spread}x spread")
     log("=" * 68)
     log(f"clock_scalp_bot  {', '.join(f'{k} {v}' for k, v in a.lots.items())}"
