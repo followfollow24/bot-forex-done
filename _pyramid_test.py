@@ -118,6 +118,13 @@ def main():
     tkn = mt5.symbol_info_tick(SYMBOL)
     per_pt = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, SYMBOL, LOT,
                                    tkn.ask, tkn.ask + 1.0) or 0.0
+    if not per_pt:
+        print("[ERROR] the broker would not price a {} lot of {} "
+              "-- order_calc_profit returned nothing. That usually\n"
+              "means the MT5 terminal has lost its connection, or the\n"
+              "market for this symbol is shut. Check MT5 before trusting\n"
+              "anything else.".format(LOT if "LOT" in dir() else "?", SYMBOL))
+        mt5.shutdown(); return 2
     _a = mt5.account_info()
     ccy = _a.currency if _a else "?"
     gate = GATE_USD / per_pt if per_pt else 2.0 * spread
