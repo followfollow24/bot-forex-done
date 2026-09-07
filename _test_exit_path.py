@@ -118,4 +118,78 @@ ok(len(sent) == 1, "a missing tick does not stop the close from being sent")
 print()
 if fails:
     print(f"{len(fails)} FAILED"); sys.exit(1)
+# --- MT5 signals an error by RETURNING None, not only by raising ----------
+# Every guard in this bot is built on positions_of distinguishing "unknown"
+# from "flat". Only the raising case was covered, and `or []` turned a
+# plain None straight into an empty list -- so the distinction never
+# existed on the path MT5 actually uses.
+print("\npositions_get returning None is unknown, not flat")
+fake.positions_get = lambda **kw: None
+fake.last_error = lambda: (-10004, "no IPC connection")
+ok(bot.positions_of("XAUAUDm") is None,
+   "a None from positions_get reads as UNKNOWN, not as an empty account")
+fake.positions_get = lambda **kw: ()
+ok(bot.positions_of("XAUAUDm") == [],
+   "an empty tuple still reads as genuinely flat")
+fake.positions_get = lambda **kw: (P(4, bot.MAGIC), P(5, 111))
+ok([p.ticket for p in bot.positions_of("XAUAUDm")] == [4],
+   "and a real list is still filtered to our own magic")
+
+# --- close_position must not read "cannot tell" as "nothing to close" -----
+# The retry used `if not held`, and None is falsy, so a broker that would
+# not answer twice was reported as flat and a live position was abandoned.
+print("\nclose_position when the broker will not answer")
+
+fake.symbol_info_tick = lambda s: types.SimpleNamespace(bid=100.0, ask=100.2,
+                                                        time=1_700_000_000)
+sent = []
+fake.order_send = lambda req: (sent.append(req),
+                               types.SimpleNamespace(retcode=10009,
+                                                     order=1, price=100.0))[1]
+notes = []
+bot.log = lambda m: notes.append(m)
+bot.telegram = lambda m: notes.append("TG " + m)
+bot.time.sleep = lambda s: None
+
+fake.positions_get = lambda **kw: None            # never answers
+del sent[:], notes[:]
+bot.close_position("XAUAUDm", 1, True, 100.0)
+ok(not sent, "no close order is invented when positions cannot be read")
+ok(any("STILL CANNOT READ" in n for n in notes),
+   "it says plainly that it could not tell, instead of 'nothing to close'")
+ok(any(n.startswith("TG ") and "may still be open" in n for n in notes),
+   "and it escalates to Telegram rather than logging once and stopping")
+
+fake.positions_get = lambda **kw: ()              # genuinely flat
+del sent[:], notes[:]
+bot.close_position("XAUAUDm", 1, True, 100.0)
+ok(not sent, "a genuinely empty account still sends nothing")
+ok(any("nothing of ours open" in n for n in notes),
+   "and an empty list is still reported as empty, not as an error")
+
+calls = {"n": 0}
+def flaky(**kw):
+    calls["n"] += 1
+    return None if calls["n"] < 3 else (P(7, bot.MAGIC),)
+fake.positions_get = flaky
+del sent[:], notes[:]
+bot.close_position("XAUAUDm", 1, True, 100.0)
+ok(len(sent) == 1 and sent[0]["position"] == 7,
+   "a read that recovers on the third try still closes the position")
+
+# --- the pyramid was wired to nothing -------------------------------------
+print("\nmanage_exit gets what it needs to pyramid")
+src = open("clock_scalp_bot.py", encoding="utf-8").read()
+i0 = src.index("def run_once(")
+body = src[i0:src.index("\ndef ", i0 + 1)]
+call = body[body.index("manage_exit("):]
+ok("a.exit_mode, a, lot_used, sl_used" in call,
+   "run_once passes a, lot and sl_price -- without them --add-step-pts "
+   "could never fire")
+ok("lot_used, sl_used in open_trades" in body,
+   "the size actually sent is carried to the exit, not re-derived")
+ok("WARNING" in body and "managed in sequence" in body,
+   "two open positions are called out, since the second runs unwatched")
+
+
 print("ALL EXIT-PATH TESTS PASSED")

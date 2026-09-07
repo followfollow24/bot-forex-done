@@ -426,11 +426,26 @@ def positions_of(sym: str):
     and walked away from it. Filtering happens here in Python instead.
     """
     try:
-        return [p for p in (mt5.positions_get(symbol=sym) or [])
-                if getattr(p, "magic", None) == MAGIC]
+        res = mt5.positions_get(symbol=sym)
     except Exception as exc:                      # never crash the manager
         log(f"  positions_get failed: {exc!r}")
         return None                               # unknown, not "none open"
+    if res is None:
+        # MT5 returns None on ERROR and an empty tuple when the account is
+        # genuinely flat. The old `or []` collapsed those two into "flat",
+        # which quietly defeated all three guards built on this function:
+        # the entry check would have opened a second position while one was
+        # already running, the manager would have read a live trade as
+        # "closed elsewhere" and abandoned it, and the close would have
+        # reported nothing to close. Only a raised exception was ever
+        # treated as unknown -- a plain None never was.
+        try:
+            why = mt5.last_error()
+        except Exception:
+            why = "reason unavailable"
+        log(f"  positions_get returned None ({why}) -- treating as UNKNOWN")
+        return None
+    return [p for p in res if getattr(p, "magic", None) == MAGIC]
 
 
 def m15_close_after(ts_srv: float) -> float:
@@ -465,8 +480,8 @@ def try_add(sym, direction, lot, sl_price, live, a, filled):
     if res is None and live:
         log("  add REJECTED -- no more adds this session")
         return False
-    telegram(f"clock_scalp [{sym}]: ADD #{filled} {lot} lot "
-             f"({'BUY' if direction > 0 else 'SELL'})")
+    telegram(f"clock_scalp {'LIVE' if live else 'DRY'} [{sym}]: ADD #{filled} "
+             f"{lot} lot ({'BUY' if direction > 0 else 'SELL'})")
     return True
 
 
@@ -584,10 +599,23 @@ def close_position(sym: str, direction: int, live: bool, entry_px: float):
                  f"({pts:+.2f} pts)")
         return
     held = positions_of(sym)
-    if held is None:
+    for _ in range(3):
+        if held is not None:
+            break
         log("  CANNOT READ POSITIONS while closing -- retrying")
         time.sleep(2)
         held = positions_of(sym)
+    if held is None:
+        # None means the broker would not answer, [] means nothing is
+        # open. Collapsing the two with `if not held` reported an
+        # unreadable account as "nothing to close" and walked away from a
+        # live position -- the same confusion that made positions_get take
+        # a magic argument it does not have.
+        log("  STILL CANNOT READ POSITIONS after 3 tries. NOT treating this "
+            "as flat -- a position may be open and unmanaged.")
+        telegram(f"clock_scalp [{sym}]: cannot read positions while closing. "
+                 f"CHECK THE TERMINAL -- a position may still be open.")
+        return
     if not held:
         log("  nothing of ours open on this symbol -- nothing to close")
         return
@@ -834,6 +862,15 @@ def selftest(a, syms: list) -> int:
                 # affordable at all. Measured over three months, the six
                 # fast sessions went 20-33 pts against the entry before
                 # they paid; the largest run of the period, 4 Sep, went 33.
+                floor = getattr(a, "fast_min_equity", 0.0)
+                if floor > 0:
+                    armed = acct.equity >= floor
+                    log(f"         equity {acct.equity:,.2f} vs floor "
+                        f"{floor:,.2f} -> the fast tier is "
+                        + ("ARMED: a fast session today trades at "
+                           f"{flot}" if armed else
+                           f"HELD BACK: a fast session today trades at "
+                           f"{lot}, not {flot}"))
                 if room < 35.0:
                     log(f"  [NOTE] every fast session measured over three "
                         f"months went 20-33 pts against the entry before "
@@ -1056,11 +1093,23 @@ def run_once(a, syms: list) -> None:
         telegram(f"clock_scalp {'LIVE' if a.live else 'DRY'} [{sym}]: "
                  f"{'BUY' if d > 0 else 'SELL'} {lot} @ {entry_px:.3f} "
                  f"SL {sl_px:.3f} (+{waited:.2f}s, moved {moved:.3f})")
-        open_trades.append((sym, d, entry_px))
+        open_trades.append((sym, d, entry_px, lot, sl_px))
 
-    for sym, d, entry_px in open_trades:
+    if len(open_trades) > 1:
+        # Positions are managed one after another, so with two symbols the
+        # second is unwatched until the first closes. Gold-only makes this
+        # unreachable today; it must not become silent if a symbol is added.
+        log(f"  WARNING: {len(open_trades)} positions opened this session. "
+            f"They are managed in sequence, so the later ones run unwatched "
+            f"until the earlier one closes.")
+        telegram(f"clock_scalp: {len(open_trades)} positions open at once -- "
+                 f"they are managed in sequence, not in parallel")
+    for sym, d, entry_px, lot_used, sl_used in open_trades:
+        # a, lot and sl_price were not passed here, so manage_exit read
+        # a=None and disabled the pyramid every time: --add-step-pts was
+        # documented, tested in isolation, and could never fire.
         manage_exit(sym, d, a.patience, a.max_minutes, a.live, entry_px,
-                    a.exit_mode)
+                    a.exit_mode, a, lot_used, sl_used)
 
 
 def main() -> int:
