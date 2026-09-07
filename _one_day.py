@@ -53,8 +53,12 @@ def main():
     s_utc = datetime(d.year, d.month, d.day, 12, 30, tzinfo=timezone.utc)
     b = mt5.copy_rates_range(SYMBOL, mt5.TIMEFRAME_M1, s_utc,
                              s_utc + timedelta(hours=HOURS))
-    if b is None or len(b) < 20:
+    if b is None or len(b) < 3:
         print(f"[ERROR] no M1 data ({mt5.last_error()})"); return 2
+    if len(b) < 35:
+        print(f"\n  NOTE: only {len(b)} minutes since the bell -- this session\n"
+              f"  is still running, so anything past +{len(b)} min is not yet\n"
+              f"  knowable and those columns simply hold to the last price.\n")
     t0 = int(s_utc.timestamp())
     mins = (b["time"].astype(np.int64) - t0) / 60.0
     o = float(b[0]["open"])
