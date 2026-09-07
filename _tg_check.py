@@ -53,7 +53,44 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--send", action="store_true",
                     help="actually put a test message in the chat")
+    ap.add_argument("--find", action="store_true",
+                    help="hunt for .env files elsewhere on this machine and "
+                         "say which hold the keys")
     a = ap.parse_args()
+
+    if a.find:
+        # Long shell one-liners get characters eaten over RDP -- this
+        # search belongs in a file for the same reason the deploy scripts
+        # do. Only paths and key names are printed, never a value.
+        roots = [os.path.expanduser("~"), "C:\\"]
+        seen = set()
+        hits = 0
+        for root in roots:
+            for dirpath, dirnames, files in os.walk(root):
+                dirnames[:] = [d for d in dirnames
+                               if d.lower() not in ("windows", "$recycle.bin",
+                                                    "appdata", "node_modules",
+                                                    ".git", "programdata")]
+                for name in files:
+                    if not (name == ".env" or name.endswith(".env")):
+                        continue
+                    fp = os.path.join(dirpath, name)
+                    if fp in seen:
+                        continue
+                    seen.add(fp)
+                    try:
+                        with open(fp, encoding="utf-8", errors="replace") as fh:
+                            txt = fh.read()
+                    except OSError:
+                        continue
+                    got = [k for k in KEYS if k in txt]
+                    hits += 1
+                    print(f"  {fp}")
+                    print(f"      {'holds ' + ', '.join(got) if got else 'no Telegram keys'}")
+        if not hits:
+            print("  no .env file anywhere -- the keys have never been set on "
+                  "this machine")
+        return 0
 
     found, where = read_env()
     for k in KEYS:
