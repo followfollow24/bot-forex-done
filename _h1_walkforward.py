@@ -54,6 +54,11 @@ from _all_paths import START
 
 GOLD_M15 = "download/xauusd-m15-bid-2013-01-01-2026-06-10.csv"
 FOLDS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+# --manual-exit means the operator closes by hand; the configured target is
+# a backstop the trade usually never reaches. Their measured average close
+# on gold is +0.96R, and 1R = sl_atr = 2.5xATR, so pass 2.4 to model what
+# actually happens rather than what the config says.
+TP_OVERRIDE = float(sys.argv[2]) if len(sys.argv) > 2 else None
 SPREADS = [0.24, 1.00, 2.85]
 ADX_GRID = [6, 10, 14, 18, 22, 26]
 # Read straight off the watchdog's live Args line for gold_h1_manual:
@@ -103,7 +108,8 @@ def make_strategy(d, adx):
     # H1-spaced bars need H4 buckets; the class default (900s) would make
     # one bar per bucket and silently disable the H4 trend filter.
     s.TIMEFRAME_SECONDS = 3600
-    s.sl_atr, s.tp_atr = LIVE_SL, LIVE_TP
+    s.sl_atr = LIVE_SL
+    s.tp_atr = LIVE_TP if TP_OVERRIDE is None else TP_OVERRIDE
     s.trail_atr_mult = s.trail_activation_atr = 999.0
     s.precompute(d)
     return s
@@ -134,7 +140,8 @@ def main():
 
     print("=" * 78)
     print(f" H1 TREND-PULLBACK, THE LIVE CONFIG -- XAUUSD  {n:,} H1 bars")
-    print(f" adx {LIVE_ADX}  touch {LIVE_TOL}  SL {LIVE_SL}xATR  TP {LIVE_TP}xATR"
+    print(f" adx {LIVE_ADX}  touch {LIVE_TOL}  SL {LIVE_SL}xATR  "
+          f"TP {LIVE_TP if TP_OVERRIDE is None else TP_OVERRIDE}xATR"
           f"  risk {LIVE_RISK}%  from {START:,.0f}")
     print(f" {FOLDS} windows, each run from the same starting balance")
     print("=" * 78)
