@@ -42,6 +42,17 @@ NAMED = ["2026-08-07", "2026-08-12", "2026-09-02", "2026-09-03",
          "2026-09-04", "2026-09-10", "2026-09-11"]
 
 
+P1, G11LOW, SINK = [], [], []
+
+
+def out(line="", keep=None):
+    """print, and optionally keep a copy for the tail re-print"""
+    print(line)
+    SINK.append(line)
+    if keep is not None:
+        keep.append(line)
+
+
 def binom_p_one_sided(w, n):
     """P(X >= w) under a fair coin -- exact."""
     if n == 0:
@@ -146,25 +157,25 @@ def main():
         return "neither"
 
     # ================= PART 1 -- the named days ======================
-    print("=" * 92)
-    print(" PART 1 -- THE DAYS YOU NAMED, REPLAYED")
-    print("=" * 92)
-    print("\n  chosen because they moved, so this is a record, not a test.")
+    out("=" * 92, P1)
+    out(" PART 1 -- THE DAYS YOU NAMED, REPLAYED", P1)
+    out("=" * 92, P1)
+    out("  chosen because they moved, so this is a record, not a test.", P1)
     by_date = {str(d): (pm, atr, paths) for d, pm, atr, paths in sess}
     for g in GATES:
-        print(f"\n  ---- gate {g:g} pts ----")
-        print(f"{'date':>12}{'pre-bell':>10}{'xATR':>7}{'dir':>5}"
-              + "".join(f"{str(l):>8}" for l, _, _ in usable))
+        out(f"\n  ---- gate {g:g} pts ----", P1)
+        out(f"{'date':>12}{'pre-bell':>10}{'xATR':>7}{'dir':>5}"
+            + "".join(f"{str(l):>8}" for l, _, _ in usable), P1)
         tally = {lot: [0, 0, 0] for lot, _, _ in usable}
         for ds in NAMED:
             got = by_date.get(ds)
             if got is None:
-                print(f"{ds:>12}{'no data (market shut or not yet)':>38}")
+                out(f"{ds:>12}{'no data (market shut or not yet)':>38}", P1)
                 continue
             pm, atr, paths = got
             if g not in paths:
-                print(f"{ds:>12}{pm:>+10.2f}{abs(pm)/atr:>7.2f}"
-                      f"{'--':>5}{'gate never cleared':>28}")
+                out(f"{ds:>12}{pm:>+10.2f}{abs(pm)/atr:>7.2f}"
+                    f"{'--':>5}{'gate never cleared':>28}", P1)
                 continue
             side, path = paths[g]
             cells = ""
@@ -172,11 +183,11 @@ def main():
                 r = settle(path, dist)
                 tally[lot][0 if r == "double" else 1 if r == "bust" else 2] += 1
                 cells += f"{'WIN' if r=='double' else 'BUST' if r=='bust' else '-':>8}"
-            print(f"{ds:>12}{pm:>+10.2f}{abs(pm)/atr:>7.2f}"
-                  f"{'BUY' if side>0 else 'SELL':>5}{cells}")
-        print(f"{'TOTAL':>12}{'':>22}"
-              + "".join(f"{str(tally[l][0])+'/'+str(tally[l][0]+tally[l][1]):>8}"
-                        for l, _, _ in usable))
+            out(f"{ds:>12}{pm:>+10.2f}{abs(pm)/atr:>7.2f}"
+                f"{'BUY' if side>0 else 'SELL':>5}{cells}", P1)
+        out(f"{'TOTAL':>12}{'':>22}"
+            + "".join(f"{str(tally[l][0])+'/'+str(tally[l][0]+tally[l][1]):>8}"
+                      for l, _, _ in usable), P1)
 
     # ========== PART 2 -- causal strong-day filter, 365 days ==========
     print("\n" + "=" * 92)
@@ -206,11 +217,15 @@ def main():
                                             else "")).ljust(22)
                 if agree_only and k == 0:
                     continue
-                print(f"\n  {tag}  {len(rows)} sessions"
-                      f"  ({len(rows)/len(sess)*100:.0f}% of days)")
-                print(f"{'lot':>8}{'target':>9}{'double':>8}{'bust':>7}"
-                      f"{'neither':>9}{'P(double)':>11}{'exact p':>9}"
-                      f"{'EV/bet':>9}")
+                keep = G11LOW if (g == 11.0 and not agree_only
+                                  and k <= 0.5) else None
+                if keep is not None:
+                    keep.append(f"  gate {g:g}  {tag}")
+                out(f"\n  {tag}  {len(rows)} sessions"
+                    f"  ({len(rows)/len(sess)*100:.0f}% of days)", keep)
+                out(f"{'lot':>8}{'target':>9}{'double':>8}{'bust':>7}"
+                    f"{'neither':>9}{'P(double)':>11}{'exact p':>9}"
+                    f"{'EV/bet':>9}", keep)
                 for lot, pv, dist in usable:
                     w = l = n0 = 0
                     for path in rows:
@@ -223,18 +238,32 @@ def main():
                         continue
                     p = w / tot
                     ev = p * EQUITY - (1 - p) * EQUITY
-                    print(f"{lot:>8.2f}{dist:>9.1f}{w:>8}{l:>7}{n0:>9}"
-                          f"{p*100:>10.1f}%"
-                          f"{binom_p_one_sided(w, tot):>9.3f}{ev:>+9.2f}")
+                    out(f"{lot:>8.2f}{dist:>9.1f}{w:>8}{l:>7}{n0:>9}"
+                        f"{p*100:>10.1f}%"
+                        f"{binom_p_one_sided(w, tot):>9.3f}{ev:>+9.2f}", keep)
         print("\n  'exact p' = P(this many doubles or more from a fair coin).")
         print("  Below 0.05 in a cell you did not pick afterwards is the only"
               " thing that counts.")
 
+    print("\n\n" + "#" * 92)
+    print("#  TAIL RE-PRINT -- the blocks that scroll off the top")
+    print("#" * 92)
+    for line in G11LOW:
+        print(line)
+    print()
+    for line in P1:
+        print(line)
     print("\n" + "=" * 92)
     print(" Slippage is not modelled. Spread is charged once at entry.")
     print(" Strong-day filters cut the sample hard -- read the n column"
           " before the P column.")
+    print(" Full output also written to dob.txt")
     print("=" * 92)
+    try:
+        with open("dob.txt", "w") as fh:
+            fh.write("\n".join(SINK) + "\n")
+    except Exception as exc:
+        print(f" (could not write dob.txt: {exc!r})")
     mt5.shutdown()
     return 0
 
