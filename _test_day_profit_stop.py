@@ -82,29 +82,53 @@ D.mt5 = fake
 
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    rc = D.main(["--days", "5", "--targets", "20,50"])
+    rc = D.main(["--days", "5", "--targets", "20,50", "--loss-stops", "0,20"])
 out = buf.getvalue()
+full = open(D.OUT_FILE, encoding="utf-8").read()
 print(out)
 
 fails = []
 def check(cond, msg):
     (print(f"  PASS  {msg}") if cond else fails.append(msg))
 
+def grid_cell(profit_label, col):
+    """read the summary grid: row by label, col 0 = no loss stop, 1 = -20"""
+    for l in out.splitlines():
+        parts = l.split()
+        if parts and parts[0] == profit_label and len(parts) >= 3:
+            try:
+                return float(parts[1 + col])
+            except ValueError:
+                pass
+    return None
+
 check(rc == 0, "exit code 0")
 check("manual trades only" in out, "bot trade (magic 555001) excluded by default")
-# Day A: peak = (4006.00 - 4000.20) * 0.10 * 100 = +58.00, end = (3996.00-4000.20)*10 = -42.00
-check("+58.00" in out and "-42.00" in out, "day A best +58.00 and actual -42.00")
-check(any(l.strip().startswith(str(D.datetime.fromtimestamp(a_open, D.timezone.utc).date()))
-          and "+20.00*" in l and "+50.00*" in l for l in out.splitlines()),
-      "day A: stop+20 banks +20.00, stop+50 banks +50.00 (both starred)")
-# Day B never positive: sell 0.05 @ 4009.90, ask climbs -> actual (4009.90-4026.10)*5 = -81.00
-check("-81.00" in out, "day B actual -81.00")
-# Day C partial: +0.05@4029.90 (+49.00) and +0.05@4014.90 (-26.00) = +23.00 realized
-check("+23.00" in out, "day C partial-close total +23.00")
-# totals: actual = -42 -81 +23 = -100 ; but B and C share a Thai day? B opens 13:00 UTC=20:00 Thai,
-# C opens 14:00 UTC=21:00 Thai, same Thai day -> that day ends -81 + 23 = -58
-check("-100.00" in out, "total actual -100.00")
-check("never reached" in out or "NEVER reached" in out, "never-reached days reported separately")
+# long report goes to the FILE only; the screen gets the one-screen summary
+check("LATEST DAY" not in out and "LATEST DAY" in full, "long report -> file only by default")
+check("+58.00" in out and "-42.00" in out, "summary day A best +58.00, ended -42.00")
+check("+17.00" in out and "-83.00" in out and "-58.00" in out, "summary merged evening best +17, worst -83, ended -58")
+check("-81.00" in full and "+23.00" in full, "file keeps per-trade detail (-81.00, partial +23.00)")
+check("as traded: -100.00" in out, "as traded -100.00")
+
+g = {k: grid_cell(*k) for k in [("none", 0), ("none", 1), ("+20", 0), ("+50", 0), ("+50", 1)]}
+print("  grid read:", g)
+close = lambda a, b, tol=0.15: a is not None and abs(a - b) <= tol
+check(close(g[("none", 0)], -100.00), "grid none/none = -100.00 (as traded)")
+check(close(g[("+20", 0)], -38.00),  "grid +20/none = -38 (A banks +20, evening never reaches +20)")
+check(close(g[("+50", 0)], -8.00),   "grid +50/none = -8")
+check(close(g[("none", 1)], -40.00), "grid none/-20 = -40 (both days cut at -20)")
+check(close(g[("+50", 1)], +30.00),  "grid +50/-20 = +30 (A reaches +50 before -20; evening cut at -20)")
+
+def group_row(prefix):
+    for l in out.splitlines():
+        if l.strip().startswith(prefix):
+            return l.split()
+    return None
+flat, down, up = group_row("flat"), group_row("DOWN"), group_row("UP")
+check(flat is not None and flat[1] == "2" and "-123.00" in flat, "flat bucket: A and B, total -123.00")
+check(down is not None and "+23.00" in " ".join(down), "DOWN bucket: C opened while day was -81 -> +23.00")
+check(up is not None and up[-1] == "0", "UP bucket empty in this scenario")
 
 # MT5 returning None must be an error, not 'no trades'
 fake.history_deals_get = lambda f, t: None

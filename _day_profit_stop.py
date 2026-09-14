@@ -35,8 +35,12 @@ OUT_FILE = "day_profit_stop.txt"
 LINES: list[str] = []
 
 
+QUIET = {"on": False}
+
+
 def say(s=""):
-    print(s)
+    if not QUIET["on"]:
+        print(s)
     LINES.append(s)
 
 
@@ -140,8 +144,15 @@ def main(argv=None):
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--targets", default="20,30,50")
     ap.add_argument("--all", action="store_true", help="include bot trades")
+    ap.add_argument("--loss-stops", default="0,20,30,50",
+                    help="daily loss limits to pair with each target; 0 = none")
+    ap.add_argument("--after", type=float, default=20.0,
+                    help="a trade counts as 'opened while up' when the day was already >= +this")
+    ap.add_argument("--full", action="store_true",
+                    help="print the long per-trade report too (always saved to file)")
     a = ap.parse_args(argv)
     targets = [float(x) for x in a.targets.split(",") if x.strip()]
+    losses = [float(x) for x in a.loss_stops.split(",") if x.strip()]
 
     if mt5 is None:
         print("[ERROR] needs MetaTrader5 -- run on the VPS"); return 2
@@ -165,12 +176,12 @@ def main(argv=None):
     off_h = broker_offset_hours(syms or ["XAUUSDm", "XAUUSD"])
     now_srv = now_utc + off_h * 3600
 
-    say("=" * 92)
+    say("=" * 78)
     say(f" YOUR TRADES, REPLAYED -- account {acct.login} ({acct.server})"
         f"  equity {acct.equity:,.2f} {ccy}")
     say(f" last {a.days} days   {'all trades' if a.all else 'manual trades only (magic 0)'}"
         f"   broker clock UTC{off_h:+d}   targets {', '.join(f'+{t:g}' for t in targets)} {ccy}")
-    say("=" * 92)
+    say("=" * 78)
     if not poss:
         say("\n  no closed or open positions found in the window"); _save(); return 0
 
@@ -209,9 +220,10 @@ def main(argv=None):
     def hhmm(srv_t):
         return (datetime.fromtimestamp(srv_t - off_h * 3600, tz=timezone.utc) + THAI).strftime("%H:%M:%S")
 
+    QUIET["on"] = not a.full         # long sections -> file only, unless --full
     # ---- the most recent day in detail ------------------------------------
     last = day_rows[-1]
-    say(f"\n{'-'*92}\n LATEST DAY {last['day']}  ({last['n']} trades)\n{'-'*92}")
+    say(f"\n{'-'*78}\n LATEST DAY {last['day']}  ({last['n']} trades)\n{'-'*78}")
     say(f"{'open':>9}{'close':>10}{'symbol':>10}{'side':>6}{'lot':>6}"
         f"{'open px':>11}{'close px':>11}{'result':>10}")
     for n in last["idx"]:
@@ -232,7 +244,7 @@ def main(argv=None):
                 f"  instead of {last['end']:+.2f}")
 
     # ---- every day -------------------------------------------------------
-    say(f"\n{'-'*92}\n EVERY DAY\n{'-'*92}")
+    say(f"\n{'-'*78}\n EVERY DAY\n{'-'*78}")
     say(f"{'day':>11}{'trades':>7}{'best':>9}{'worst':>9}{'actual':>9}"
         + "".join(f"{f'stop+{T:g}':>10}" for T in targets))
     for r in day_rows:
@@ -262,12 +274,84 @@ def main(argv=None):
             f"  (difference {saved:+.2f})")
         say(f"     days it was NEVER reached   : {len(miss):>3}"
             f"   -> {sum(r['end'] for r in miss):+.2f}  (the rule cannot help these)")
+    QUIET["on"] = False
+    # ---- SUMMARY THAT FITS ONE SCREEN -------------------------------------
+    def first_touch(path, T, L):
+        """day result if you stop at +T or -L, whichever is touched first.
+        T or L of 0 means that side is off. Same second -> the loss."""
+        v = path.to_numpy()
+        up = np.flatnonzero(v >= T) if T > 0 else np.array([], int)
+        dn = np.flatnonzero(v <= -L) if L > 0 else np.array([], int)
+        iu = up[0] if len(up) else None
+        idn = dn[0] if len(dn) else None
+        if iu is None and idn is None:
+            return float(v[-1]), ""
+        if idn is not None and (iu is None or idn <= iu):
+            return float(v[idn]), "L"
+        return float(v[iu]), "P"
+
+    say("\n" + "#" * 78)
+    say(f"#  SUMMARY  acct {acct.login}  {len(day_rows)} days"
+        f"  {sum(r['n'] for r in day_rows)} trades  (full detail: {OUT_FILE})")
+    say("#" * 78)
+    say(f"\n  {'day':>10}{'trades':>7}{'best':>9}{'worst':>9}{'ended':>9}")
+    for r in day_rows:
+        say(f"  {str(r['day']):>10}{r['n']:>7}{r['peak']:>+9.2f}"
+            f"{r['low']:>+9.2f}{r['end']:>+9.2f}")
+    say(f"  {'TOTAL':>10}{'':>25}{sum(r['end'] for r in day_rows):>+9.2f}")
+
+    say(f"\n  STOP-AT-PROFIT x STOP-AT-LOSS  ({len(day_rows)}-day total, {ccy})")
+    head = "  profit\\loss" + "".join(
+        f"{('none' if L == 0 else f'-{L:g}'):>10}" for L in losses)
+    say(head)
+    grid = {}
+    for T in [0.0] + targets:
+        row = f"  {('none' if T == 0 else f'+{T:g}'):>11}"
+        for L in losses:
+            tot_g = 0.0; nP = nL = 0
+            for r in day_rows:
+                v, why = first_touch(r["path"], T, L)
+                tot_g += v; nP += why == "P"; nL += why == "L"
+            grid[(T, L)] = (tot_g, nP, nL)
+            row += f"{tot_g:>+10.2f}"
+        say(row)
+    best = max(grid.items(), key=lambda kv: kv[1][0])
+    (bT, bL), (bv, bp, bl) = best
+    say(f"\n  best cell: profit {'none' if bT == 0 else f'+{bT:g}'},"
+        f" loss {'none' if bL == 0 else f'-{bL:g}'} -> {bv:+.2f}"
+        f"  (profit stop fired {bp}x, loss stop {bl}x)")
+    say(f"  as traded: {grid[(0.0, 0.0)][0]:+.2f}")
+
+    # ---- does the day's P&L change how you trade? ----------------------
+    say(f"\n  TRADES GROUPED BY HOW THE DAY STOOD WHEN YOU OPENED THEM")
+    say(f"  {'opened while':>22}{'trades':>7}{'won':>6}{'total':>10}"
+        f"{'per trade':>11}{'avg lot':>9}")
+    groups = {"UP (>= +%g)" % a.after: [], "flat": [], "DOWN (<= -%g)" % a.after: []}
+    keys = list(groups)
+    for r in day_rows:
+        path = r["path"]
+        for n in r["idx"]:
+            t0 = infos[n]["open_t"]
+            before = path[path.index < t0 - 0.5]
+            stand = float(before.iloc[-1]) if len(before) else 0.0
+            k = keys[0] if stand >= a.after else keys[2] if stand <= -a.after else keys[1]
+            groups[k].append(infos[n])
+    for k in keys:
+        g = groups[k]
+        if not g:
+            say(f"  {k:>22}{0:>7}"); continue
+        res = np.array([i["result"] for i in g])
+        say(f"  {k:>22}{len(g):>7}{(res > 0).mean()*100:>5.0f}%{res.sum():>+10.2f}"
+            f"{res.mean():>+11.2f}{np.mean([i['lot'] for i in g]):>9.2f}")
+    say("  If UP trades lose more per trade or use bigger lots than flat ones,")
+    say("  the leak is what happens after you are already winning.")
+
     if skipped:
         say(f"\n  skipped {len(skipped)} position(s) with no tick history:"
             f" {', '.join(sorted({s['sym'] for s in skipped}))}")
     say("\n  Closing takes a few seconds in real life; fills here are the exact")
     say("  tick where the target was first touched, so real results are a little worse.")
-    say("=" * 92)
+    say("=" * 78)
     _save()
     mt5.shutdown()
     return 0
