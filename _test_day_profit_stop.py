@@ -1,0 +1,119 @@
+"""Fake-MT5 test for _day_profit_stop.py. Scenario built to match the
+operator's day: up +60 at best, closed at -40. Values checked exactly."""
+import sys, time, types, io, contextlib
+from collections import namedtuple
+import numpy as np
+
+sys.path.insert(0, ".")
+import _day_profit_stop as D
+
+NOW = float(int(time.time()))
+DAY = 86400.0
+# Day A two days ago 12:30 UTC; Day B yesterday 13:00; Day C today-ish
+def at(days_ago, hh, mm, ss=0):
+    base = (NOW // DAY - days_ago) * DAY
+    return base + hh * 3600 + mm * 60 + ss
+
+Deal = namedtuple("Deal", "ticket position_id symbol type entry volume price profit "
+                          "commission swap fee magic time_msc")
+CONTRACT = 100.0          # standard gold: 1 lot = 100 oz, $1 move = $100/lot
+SPREAD = 0.20
+
+# piecewise mid-price timeline (absolute seconds -> mid)
+knots = [
+    (at(2, 12, 29), 4000.10), (at(2, 12, 30), 4000.10),   # A: buy at ask 4000.20
+    (at(2, 12, 40), 4006.10),                              # bid 4006.00 -> +58
+    (at(2, 13, 0), 3996.10),                               # bid 3996.00 -> -42
+    (at(1, 12, 59), 4010.00), (at(1, 13, 0), 4010.00),     # B: sell at bid 4009.90
+    (at(1, 13, 30), 4026.00),                              # ask 4026.10 -> -81
+    (at(1, 14, 0), 4020.00), (at(1, 14, 5), 4024.00),      # C: buy 0.10 @ ask 4020.10
+    (at(1, 14, 20), 4030.00),                              # partial 0.05 @ bid 4029.90
+    (at(1, 14, 40), 4015.00),                              # rest 0.05 @ bid 4014.90
+    (NOW, 4015.00),
+]
+kt = np.array([k[0] for k in knots]); kv = np.array([k[1] for k in knots])
+
+def mid(t):
+    return np.interp(t, kt, kv)
+
+def bid(t): return mid(t) - SPREAD / 2
+def ask(t): return mid(t) + SPREAD / 2
+
+def profit(side, vol, p_open, p_close):
+    return round((p_close - p_open) * side * vol * CONTRACT, 2)
+
+a_open, a_close = at(2, 12, 30), at(2, 13, 0)
+b_open, b_close = at(1, 13, 0), at(1, 13, 30)
+c_open, c_p1, c_p2 = at(1, 14, 0), at(1, 14, 20), at(1, 14, 40)
+DEALS = [
+    Deal(1, 11, "XAUUSDm", 0, 0, 0.10, ask(a_open), 0, 0, 0, 0, 0, int(a_open * 1000)),
+    Deal(2, 11, "XAUUSDm", 1, 1, 0.10, bid(a_close),
+         profit(1, 0.10, ask(a_open), bid(a_close)), 0, 0, 0, 0, int(a_close * 1000)),
+    Deal(3, 12, "XAUUSDm", 1, 0, 0.05, bid(b_open), 0, 0, 0, 0, 0, int(b_open * 1000)),
+    Deal(4, 12, "XAUUSDm", 0, 1, 0.05, ask(b_close),
+         profit(-1, 0.05, bid(b_open), ask(b_close)), 0, 0, 0, 0, int(b_close * 1000)),
+    Deal(5, 13, "XAUUSDm", 0, 0, 0.10, ask(c_open), 0, 0, 0, 0, 0, int(c_open * 1000)),
+    Deal(6, 13, "XAUUSDm", 1, 1, 0.05, bid(c_p1),
+         profit(1, 0.05, ask(c_open), bid(c_p1)), 0, 0, 0, 0, int(c_p1 * 1000)),
+    Deal(7, 13, "XAUUSDm", 1, 1, 0.05, bid(c_p2),
+         profit(1, 0.05, ask(c_open), bid(c_p2)), 0, 0, 0, 0, int(c_p2 * 1000)),
+    Deal(8, 14, "XAUUSDm", 0, 0, 0.01, ask(c_open), 0, 0, 0, 0, 555001, int(c_open * 1000)),  # a bot trade
+    Deal(9, 0, "", 2, 0, 0, 0, 100.0, 0, 0, 0, 0, int(a_open * 1000) - 5000),                 # balance row
+]
+
+fake = types.SimpleNamespace(
+    ORDER_TYPE_BUY=0, DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1,
+    DEAL_ENTRY_IN=0, DEAL_ENTRY_OUT=1, DEAL_ENTRY_OUT_BY=3, COPY_TICKS_ALL=-1,
+    initialize=lambda: True, shutdown=lambda: None, last_error=lambda: (0, "ok"),
+    account_info=lambda: types.SimpleNamespace(login=425386147, server="Exness-MT5Real15",
+                                               currency="USD", equity=123.45),
+    history_deals_get=lambda f, t: list(DEALS),
+    symbol_info_tick=lambda s: types.SimpleNamespace(time=int(time.time())),
+    order_calc_profit=lambda ty, s, v, p0, p1: (p1 - p0) * v * CONTRACT,
+)
+def copy_ticks_range(sym, d0, d1, flags):
+    t = np.arange(d0.timestamp(), d1.timestamp(), 1.0)
+    arr = np.zeros(len(t), dtype=[("time_msc", "i8"), ("bid", "f8"), ("ask", "f8")])
+    arr["time_msc"] = (t * 1000).astype(np.int64)
+    arr["bid"], arr["ask"] = bid(t), ask(t)
+    return arr
+fake.copy_ticks_range = copy_ticks_range
+D.mt5 = fake
+
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = D.main(["--days", "5", "--targets", "20,50"])
+out = buf.getvalue()
+print(out)
+
+fails = []
+def check(cond, msg):
+    (print(f"  PASS  {msg}") if cond else fails.append(msg))
+
+check(rc == 0, "exit code 0")
+check("manual trades only" in out, "bot trade (magic 555001) excluded by default")
+# Day A: peak = (4006.00 - 4000.20) * 0.10 * 100 = +58.00, end = (3996.00-4000.20)*10 = -42.00
+check("+58.00" in out and "-42.00" in out, "day A best +58.00 and actual -42.00")
+check(any(l.strip().startswith(str(D.datetime.fromtimestamp(a_open, D.timezone.utc).date()))
+          and "+20.00*" in l and "+50.00*" in l for l in out.splitlines()),
+      "day A: stop+20 banks +20.00, stop+50 banks +50.00 (both starred)")
+# Day B never positive: sell 0.05 @ 4009.90, ask climbs -> actual (4009.90-4026.10)*5 = -81.00
+check("-81.00" in out, "day B actual -81.00")
+# Day C partial: +0.05@4029.90 (+49.00) and +0.05@4014.90 (-26.00) = +23.00 realized
+check("+23.00" in out, "day C partial-close total +23.00")
+# totals: actual = -42 -81 +23 = -100 ; but B and C share a Thai day? B opens 13:00 UTC=20:00 Thai,
+# C opens 14:00 UTC=21:00 Thai, same Thai day -> that day ends -81 + 23 = -58
+check("-100.00" in out, "total actual -100.00")
+check("never reached" in out or "NEVER reached" in out, "never-reached days reported separately")
+
+# MT5 returning None must be an error, not 'no trades'
+fake.history_deals_get = lambda f, t: None
+buf2 = io.StringIO()
+with contextlib.redirect_stdout(buf2):
+    rc2 = D.main(["--days", "5"])
+check(rc2 == 2 and "CANNOT TELL" in buf2.getvalue(), "history_deals_get None -> error, not empty")
+
+print("\nFAILED:" if fails else "\nALL CHECKS PASSED")
+for f in fails:
+    print("  FAIL ", f)
+sys.exit(1 if fails else 0)
