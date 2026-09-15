@@ -53,7 +53,7 @@ def evenings(sym, days, p, off_h):
         if d.weekday() >= 5:
             continue
         start_thai = datetime(d.year, d.month, d.day, tzinfo=timezone.utc) + timedelta(minutes=a)
-        start_utc = start_thai - S.THAI - timedelta(minutes=10)
+        start_utc = start_thai - S.THAI - timedelta(minutes=30)   # room for a gate candle before the session
         end_utc = start_thai - S.THAI + timedelta(minutes=(b - a) + p.max_hold_min + 10)
         srv0 = start_utc + timedelta(hours=off_h)
         srv1 = end_utc + timedelta(hours=off_h)
@@ -158,6 +158,31 @@ def main(argv=None):
                 nn, ww, aa, tt = summary(run(evs, q))
                 mark = " <- running" if (mode, mm, tpv, slv) == (p.mode, p.min_move, p.tp, p.sl) else ""
                 say(f"  {mode:>7}{mm:>6g}{tpv:>5g}{slv:>5g}{nn:>8}{ww*100:>5.0f}%{aa:>+9.3f}{tt:>+10.2f}{mark}")
+
+    # selective days: the day gate, halves, coin flips
+    say(f"\n  NOT EVERY DAY -- trade {p.session} only when the {p.gate_at or p.session.split('-')[0]} candle moved >= gate pts")
+    say(f"  (exploration; halves = first/second {len(evs)//2} evenings; coin = % of 50 flips beaten)")
+    say(f"  {'gate':>5}{'mode':>7}{'TP/SL':>6}{'days':>5}{'trades':>7}{'won':>5}"
+        f"{'pts/tr':>8}{'total$':>8}{'half1$':>8}{'half2$':>8}{'coin':>6}")
+    h = len(evs) // 2
+    for gate in (0.0, 5.0, 10.0, 15.0, 20.0):
+        for mode in ("fade", "follow"):
+            for tpv, slv in ((1.0, 5.0), (3.0, 3.0)):
+                q = S.Params(**{**p.__dict__, "mode": mode, "tp": tpv, "sl": slv,
+                                "day_gate": gate})
+                trq = run(evs, q)
+                nn, ww, aa, tt = summary(trq)
+                if nn == 0:
+                    say(f"  {gate:>5g}{mode:>7}{f'{tpv:g}/{slv:g}':>6}{0:>5}{0:>7}")
+                    continue
+                h1 = summary(run(evs[:h], q))[3]
+                h2 = summary(run(evs[h:], q))[3]
+                fl = np.array([summary(run(evs, q, random_side=True, seed=s))[3]
+                               for s in range(1, 51)])
+                days_n = len({x["day"] for x in trq})
+                say(f"  {gate:>5g}{mode:>7}{f'{tpv:g}/{slv:g}':>6}{days_n:>5}{nn:>7}"
+                    f"{ww*100:>4.0f}%{aa:>+8.3f}{tt:>+8.2f}{h1:>+8.2f}{h2:>+8.2f}"
+                    f"{(fl < tt).mean()*100:>5.0f}%")
 
     say(f"\n  Real fills can be worse than ticks (slippage at 19:30). The spread is")
     say(f"  already paid: longs exit at the bid, shorts at the ask.  saved -> {OUT}")

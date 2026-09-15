@@ -160,6 +160,7 @@ class Bot:
         self.last_bar = None
         self.unknown_since = None
         self.stopped_logged = ""
+        self.gate = {}                  # thai date -> first session candle big enough
 
     # -- startup ---------------------------------------------------------
     def setup(self) -> bool:
@@ -185,6 +186,8 @@ class Bot:
             f"  (${self.p.usd_per_point:.2f}/point)  acct {getattr(acct, 'login', '?')}")
         log(f" {self.p.mode} >= {self.p.min_move:g} pts | TP {self.p.tp:g} SL {self.p.sl:g}"
             f" | hold {self.p.max_hold_min:g}m | {self.p.session} Thai | spread <= {self.p.max_spread:g}")
+        gate_at = self.p.gate_at or self.p.session.split("-")[0]
+        log(f" day gate: {('%s candle >= %g pts' % (gate_at, self.p.day_gate)) if self.p.day_gate > 0 else 'off (every day)'}")
         log(f" day guard +{self.p.profit_stop:g} / -{self.p.loss_stop:g}"
             f"  max {self.p.max_trades} trades | broker UTC{self.off_h:+d} | kill: {KILL_FILE}")
         if not self.live:
@@ -225,6 +228,17 @@ class Bot:
             return
         self.last_bar = bar_t
         close_utc = bar_t - self.off_h * 3600 + 300
+        if self.p.day_gate > 0 and S.is_gate_candle(close_utc, self.p):
+            move = abs(float(bars[0]["close"]) - float(bars[0]["open"]))
+            today = S.thai_date(close_utc - 1)
+            self.gate[today] = move >= self.p.day_gate
+            verdict = "OPEN -- trading today" if self.gate[today] else "SHUT -- no trades today"
+            log(f"[{self.tag}] day gate: first candle moved {move:.2f} pts"
+                f" (need {self.p.day_gate:g}) -> {verdict}")
+            gate_at = self.p.gate_at or self.p.session.split("-")[0]
+            telegram(f"scalp_bot [{self.tag}] {gate_at} candle {move:.2f} pts -> {verdict}")
+        if self.p.day_gate > 0 and not self.gate.get(S.thai_date(close_utc - 1), False):
+            return
         if kill or self.pos is not None or not self.guard.can_open():
             return
         if t - close_utc > 5.0 or not S.in_session(close_utc - 1, self.p.session):

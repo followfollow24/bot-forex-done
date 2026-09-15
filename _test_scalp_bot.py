@@ -165,6 +165,32 @@ close_bar(fake, 30, 4000.0, 4008.0); fake.bid, fake.ask = 4008.0, 4008.6
 bot.step()
 ok(bot.pos is None, "spread 0.6 > 0.35 -> skipped")
 
+# H -- day gate: first session candle 12:30-12:35 moves +8
+fake, bot = make(day_gate=10.0)
+close_bar(fake, 30, 4000.0, 4008.0); fake.bid, fake.ask = 4008.0, 4008.2
+bot.step()
+close_bar(fake, 40, 4008.0, 4016.0); fake.bid, fake.ask = 4016.0, 4016.2
+bot.step()
+ok(bot.pos is None, "gate 10: 19:30 candle moved 8 -> no trades all evening")
+fake, bot = make(day_gate=5.0)
+close_bar(fake, 30, 4000.0, 4008.0); fake.bid, fake.ask = 4008.0, 4008.2
+bot.step()
+ok(bot.pos is not None and bot.gate, "gate 5: 19:30 candle moved 8 -> day open, entry taken")
+fake, bot = make(day_gate=5.0)
+fake.bar = (int(utc(12, 30)), 4000.0, 4008.0); bot.last_bar = fake.bar[0]   # started after 19:35
+close_bar(fake, 40, 4008.0, 4016.0); fake.bid, fake.ask = 4016.0, 4016.2
+bot.step()
+ok(bot.pos is None, "bot started after the gate candle -> gate unknown -> no trades that day")
+
+# I -- judge 19:30, trade 19:40-20:00
+fake, bot = make(day_gate=5.0, session="19:40-20:00", gate_at="19:30")
+close_bar(fake, 30, 4000.0, 4008.0); fake.bid, fake.ask = 4008.0, 4008.2
+bot.step()
+ok(bot.pos is None and any(bot.gate.values()), "19:35 Thai: gate judged OPEN but outside 19:40-20:00 -> no entry yet")
+close_bar(fake, 40, 4008.0, 4016.0); fake.bid, fake.ask = 4016.0, 4016.2
+bot.step()
+ok(bot.pos is not None and bot.pos["side"] == -1, "19:45 Thai candle +8 inside the window -> faded")
+
 ok(len(SENT_TG) > 0, f"telegram calls captured by the stub ({len(SENT_TG)}), none reached the network")
 
 print("\nFAILED:" if fails else "\nALL BOT TESTS PASSED")

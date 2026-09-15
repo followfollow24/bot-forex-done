@@ -102,6 +102,22 @@ tr5 = S.replay(T, B, A, p4)
 ok(len(tr5) == 1 and tr5[0]["reason"] == "DAY_LOSS" and -2.0 <= tr5[0]["usd"] <= -1.5,
    "the spread alone (-$2 at $10/pt) trips a -$1.50 loss stop on the next tick")
 
+# day gate: the first session candle is 12:30-12:35 UTC (+8 in this evening)
+pg = S.Params(**{**p.__dict__, "day_gate": 5.0})
+ok(len(S.replay(T, B, A, pg)) == 2, "day gate 5: first candle moved 8 -> day traded (2 trades)")
+pg2 = S.Params(**{**p.__dict__, "day_gate": 10.0})
+ok(S.replay(T, B, A, pg2) == [], "day gate 10: first candle moved only 8 -> whole day skipped")
+ok(S.is_first_session_candle(utc(12, 35), "19:30-21:30") and not S.is_first_session_candle(utc(12, 40), "19:30-21:30"),
+   "the 19:30-19:35 Thai candle is the gate candle, 19:35-19:40 is not")
+# judge 19:30, trade 19:40-20:00: only the 12:50 UTC (19:50 Thai) signal is inside
+pw = S.Params(**{**p.__dict__, "session": "19:40-20:00", "gate_at": "19:30", "day_gate": 5.0})
+trw = S.replay(T, B, A, pw)
+ok(len(trw) == 1 and abs(trw[0]["open_t"] - utc(12, 50)) < 2, "gate at 19:30 (outside the window), trade 19:40-20:00 -> only the 19:50 signal")
+pw2 = S.Params(**{**pw.__dict__, "day_gate": 10.0})
+ok(S.replay(T, B, A, pw2) == [], "same window, 19:30 candle too small for gate 10 -> nothing")
+late = T.index(utc(12, 40))
+ok(S.replay(T[late:], B[late:], A[late:], pg) == [], "no ticks for the first candle -> gate unknown -> no trading")
+
 # random-side control keeps timing
 trr = S.replay(T, B, A, p, random_side=True, rng=random.Random(1))
 ok(len(trr) == 2 and [x["open_t"] for x in trr] == [x["open_t"] for x in tr], "coin-flip control uses identical entry times")

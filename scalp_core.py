@@ -11,6 +11,10 @@ THE RULE (defaults in Params):
   * one position at a time, entered at the first tick after the candle
     closes, and only if the spread is <= max_spread
   * exit at +tp points, -sl points, or after max_hold_min minutes
+  * DAY GATE (optional): trade a Thai day only if the gate candle -- the
+    5-minute candle opening at gate_at, or at the session start -- moved
+    >= day_gate points. The gate candle may sit BEFORE the session
+    (e.g. judge 19:30, trade 19:40-20:00): "not every day, only strong days"
   * DAY GUARD: stop for the Thai day at +profit_stop or -loss_stop dollars
     (realized + open), and never more than max_trades entries a day
     -- the guard your own 9 days of trades said you need.
@@ -40,6 +44,9 @@ class Params:
     profit_stop: float = 50.0      # day guard, account currency (0 = off)
     loss_stop: float = 30.0        # day guard, account currency (0 = off)
     max_trades: int = 10           # entries per Thai day (0 = no cap)
+    day_gate: float = 0.0          # skip the whole Thai day unless the GATE
+                                   # candle moved >= this many points (0 = off)
+    gate_at: str = ""              # Thai HH:MM the gate candle OPENS; "" = session start
     usd_per_point: float = 1.0     # at the traded lot; the bot measures it
 
 
@@ -61,6 +68,19 @@ def in_session(utc_ts: float, session: str) -> bool:
     d = thai_dt(utc_ts)
     m = d.hour * 60 + d.minute
     return a <= m < b if a <= b else (m >= a or m < b)
+
+
+def is_first_session_candle(close_utc: float, session: str) -> bool:
+    """True for the 5-minute candle that OPENS at the session start."""
+    d = thai_dt(close_utc - 300)
+    return d.hour * 60 + d.minute == _hm(session.split("-")[0])
+
+
+def is_gate_candle(close_utc: float, p: "Params") -> bool:
+    """True for the 5-minute candle that opens at gate_at (or session start)."""
+    at = p.gate_at.strip() or p.session.split("-")[0]
+    d = thai_dt(close_utc - 300)
+    return d.hour * 60 + d.minute == _hm(at)
 
 
 def candle_signal(o: float, c: float, mode: str, min_move: float) -> int:
@@ -138,11 +158,18 @@ def m5_signals(times, bids, p: Params):
     starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
     ends = np.r_[starts[1:] - 1, len(T) - 1]
     out = []
+    gate_ok = {}                               # thai date -> first candle big enough
     for k in range(len(starts) - 1):          # the last bucket is unfinished
         close_t = float((bucket[starts[k]] + 1) * 300)
+        o, c = Bd[starts[k]], Bd[ends[k]]
+        day = thai_date(close_t - 1)
+        if p.day_gate > 0 and is_gate_candle(close_t, p):
+            gate_ok[day] = abs(c - o) >= p.day_gate    # judged even outside the session
         if not in_session(close_t - 1, p.session):
             continue
-        d = candle_signal(Bd[starts[k]], Bd[ends[k]], p.mode, p.min_move)
+        if p.day_gate > 0 and not gate_ok.get(day, False):
+            continue                          # unknown or small gate candle = no trading
+        d = candle_signal(o, c, p.mode, p.min_move)
         if d:
             out.append((close_t, d))
     return out
