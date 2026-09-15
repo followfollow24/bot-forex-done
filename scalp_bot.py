@@ -5,11 +5,13 @@ PAPER MODE BY DEFAULT. Real orders only with --allow-real, which the
 operator types, never an assistant.
 
 The rule lives in scalp_core.py and is the SAME code _scalp_replay.py
-measured. Before running this live, read what that replay said on the
-broker's own XAUUSDm ticks (86 evenings, 2026-05-18 .. 2026-09-14):
+measured. Replays on the broker's own XAUUSDm ticks (86 evenings,
+2026-05-18 .. 2026-09-14), 0.01 lot:
 
-    468 trades, 79% won, -0.239 points per trade, -$112 at 0.01 lot,
-    and no better than choosing the direction with a coin (beats 44%).
+    default (fade, 19:30-21:30): 468 trades, 79% won, -0.239 pts/trade,
+        -$112, no better than a coin (beats 44%)
+    follow, 19:40-20:00, 19:30 gate 5: 37 trades, 97% won, +$33.72 --
+        but -0.70 pts/trade over 253 trades on 13 years of M5 gold
 
 Paper mode exists so that can be watched on live prices without paying for
 it. What the bot does, every quarter-second:
@@ -192,7 +194,8 @@ class Bot:
             f"  max {self.p.max_trades} trades | broker UTC{self.off_h:+d} | kill: {KILL_FILE}")
         if not self.live:
             log(" PAPER MODE -- no order will be sent")
-        log(" replay on this broker's ticks: -0.239 pts/trade, no better than a coin")
+        log(" measure these exact settings first: _scalp_replay.py with the same flags,")
+        log(" and treat a replay window you chose from recent charts as unproven")
         log("=" * 70)
         bars = mt5.copy_rates_from_pos(self.sym, mt5.TIMEFRAME_M5, 1, 1)
         if bars is not None and len(bars):
