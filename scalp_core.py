@@ -20,6 +20,8 @@ A "point" is 1.0 of gold price. At 0.01 lot on XAUUSDm that is $1.
 from __future__ import annotations
 
 import random
+
+import numpy as np
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -125,22 +127,24 @@ class DayGuard:
 
 def m5_signals(times, bids, p: Params):
     """[(candle_close_utc, direction)] from bid ticks, causal: a candle's
-    signal uses only ticks inside that candle."""
+    signal uses only ticks inside that candle, and a candle only counts once
+    a later tick exists (so the last, possibly unfinished candle is ignored).
+    Vectorised: the per-tick Python loop was the replay's bottleneck."""
+    T = np.asarray(times, dtype=float)
+    Bd = np.asarray(bids, dtype=float)
+    if len(T) == 0:
+        return []
+    bucket = (T // 300).astype(np.int64)
+    starts = np.flatnonzero(np.r_[True, bucket[1:] != bucket[:-1]])
+    ends = np.r_[starts[1:] - 1, len(T) - 1]
     out = []
-    if len(times) == 0:
-        return out
-    cur, o, c = None, None, None
-    for t, b in zip(times, bids):
-        bucket = int(t // 300) * 300
-        if bucket != cur:
-            if cur is not None:
-                close_t = cur + 300
-                if in_session(close_t - 1, p.session):
-                    d = candle_signal(o, c, p.mode, p.min_move)
-                    if d:
-                        out.append((close_t, d))
-            cur, o = bucket, b
-        c = b
+    for k in range(len(starts) - 1):          # the last bucket is unfinished
+        close_t = float((bucket[starts[k]] + 1) * 300)
+        if not in_session(close_t - 1, p.session):
+            continue
+        d = candle_signal(Bd[starts[k]], Bd[ends[k]], p.mode, p.min_move)
+        if d:
+            out.append((close_t, d))
     return out
 
 
@@ -151,9 +155,17 @@ def replay(times, bids, asks, p: Params, random_side: bool = False,
     random_side=True keeps every entry time, spread check, exit and day
     guard identical and only flips a coin for the direction -- the control
     that says whether the SIGNAL adds anything beyond the timing.
+
+    While flat, nothing can happen until the next signal, so the loop jumps
+    straight there; tick-by-tick stepping only runs while a position is open.
     """
     rng = rng or random.Random(0)
-    sigs = m5_signals(times, bids, p)
+    T = np.asarray(times, dtype=float)
+    Bd = np.asarray(bids, dtype=float)
+    Ad = np.asarray(asks, dtype=float)
+    n = len(T)
+    sigs = m5_signals(T, Bd, p)
+    dayid = ((T + THAI.total_seconds()) // 86400).astype(np.int64)
     guard = DayGuard(p.profit_stop, p.loss_stop, p.max_trades)
     trades, pos, j = [], None, 0
     max_sec = p.max_hold_min * 60.0
@@ -163,17 +175,24 @@ def replay(times, bids, asks, p: Params, random_side: bool = False,
         pts = (px - entry) * side
         usd = pts * p.usd_per_point
         guard.closed(usd)
-        trades.append(dict(open_t=t0, close_t=times[i], side=side, entry=entry,
-                           exit=px, points=pts, usd=usd, reason=reason,
-                           day=thai_date(t0)))
+        trades.append(dict(open_t=t0, close_t=float(T[i]), side=side, entry=entry,
+                           exit=float(px), points=float(pts), usd=float(usd),
+                           reason=reason, day=thai_date(t0)))
 
-    for i in range(len(times)):
-        t = times[i]
-        if guard.roll(thai_date(t)) and pos is not None:
-            pass                                  # a position may span midnight
+    i = 0
+    while i < n:
+        if pos is None:
+            if j >= len(sigs):
+                break
+            k = int(np.searchsorted(T, sigs[j][0], side="left"))
+            if k >= n:
+                break
+            i = max(i, k)
+        t = T[i]
+        guard.roll(int(dayid[i]))
         if pos is not None:
             side, entry, t0 = pos
-            reason, px = exit_reason(side, entry, bids[i], asks[i],
+            reason, px = exit_reason(side, entry, Bd[i], Ad[i],
                                      p.tp, p.sl, t - t0, max_sec)
             open_usd = (px - entry) * side * p.usd_per_point
             if not reason and guard.check(open_usd):
@@ -189,10 +208,11 @@ def replay(times, bids, asks, p: Params, random_side: bool = False,
                 continue
             if pos is not None or not guard.can_open():
                 continue
-            if asks[i] - bids[i] > p.max_spread:
+            if Ad[i] - Bd[i] > p.max_spread:
                 continue
             side = rng.choice((1, -1)) if random_side else d
-            entry = asks[i] if side > 0 else bids[i]
-            pos = (side, entry, t)
+            entry = float(Ad[i] if side > 0 else Bd[i])
+            pos = (side, entry, float(t))
             guard.opened()
+        i += 1
     return trades
